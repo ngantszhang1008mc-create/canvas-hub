@@ -1,0 +1,42 @@
+# Credentials and local settings
+.env
+.env.*
+!.env.example
+!.env.sample
+*.pem
+*.key
+
+# Private Canvas data, browser sessions, and local runtime state
+.canvas-data/
+canvas-state/
+browser-profile/
+browser-profiles/
+playwright-profile/
+storage-state*.json
+storageState*.json
+session-state*.json
+cookies*.json
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+
+# Dependencies and build outputs
+node_modules/
+dist/
+build/
+out/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.cache/
+coverage/
+
+# Local artifacts
+.DS_Store
+*.log
+work/
