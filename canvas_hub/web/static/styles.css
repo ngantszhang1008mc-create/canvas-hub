@@ -408,6 +408,7 @@ details.raw summary { cursor: pointer; color: var(--text-3); font-size: 12.5px; 
 
 /* ---- assistant ---- */
 .main.fill { padding-bottom: 16px; }
+.main.fill > .tabs { position: sticky; top: 0; z-index: 4; background: var(--bg); }   /* top: set to what stays above it */
 /* The chat fills the window (height set by app.js); only the message list scrolls. */
 .assistant-layout { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 20px; height: 75vh; min-height: 0; }
 .conv-list { display: flex; flex-direction: column; gap: 2px; min-height: 0; }
@@ -418,7 +419,7 @@ details.raw summary { cursor: pointer; color: var(--text-3); font-size: 12.5px; 
 .conv.on { border-left-color: var(--mark); background: var(--paper); color: var(--ink); }
 .conv-title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 13.5px; }
 .chat { background: var(--paper); border: 1px solid var(--rule); border-radius: var(--radius); padding: 0; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
-.chat-scroll { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 18px 20px; display: flex; flex-direction: column; gap: 12px; }
+.chat-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 18px 20px; display: flex; flex-direction: column; gap: 12px; }
 .chat-log { display: flex; flex-direction: column; gap: 14px; }
 .chat-log:empty { display: none; }
 .msg.user { align-self: flex-end; max-width: 78%; }
@@ -804,6 +805,7 @@ label.btn input[type=file] { display: none; }
 body.chat-focus .sidebar, body.chat-focus .topbar, body.chat-focus .main > .page-head { display: none; }
 body.chat-focus .main { max-width: none; padding: 10px 24px 12px; }
 body.chat-focus .main > .tabs { margin-bottom: 10px; }
+body.chat-focus .chat-scroll { overscroll-behavior: contain; }     /* the page itself has nowhere to scroll */
 body.chat-focus .chat-log, body.chat-focus .chat-status, body.chat-focus .chat-empty,
 body.chat-focus .composer > *, body.chat-focus .chat-foot { width: 100%; max-width: 920px; margin-left: auto; margin-right: auto; }
 body.chat-focus .chat-foot { box-sizing: border-box; max-width: 960px; }     /* its own 20px padding lines it up with the composer */

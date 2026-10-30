@@ -84,3 +84,48 @@ def test_focus_mode_shows_just_the_chat(hub, account):
         expect(pg.locator("#sidebar")).to_be_visible()
         b.close()
     assert not errors, errors
+
+
+@pytest.mark.parametrize("width,height", [(1280, 800), (390, 844)], ids=["desktop", "phone"])
+def test_scrolling_the_page_grows_the_chat_under_the_tabs(hub, account, width, height):
+    # The message box stays at the bottom of the window; scrolling moves the heading away and the chat grows
+    # into its space, up to the tabs, which stay on screen.
+    from playwright.sync_api import expect, sync_playwright
+    with serve(hub, [], answer=ANSWER) as (base, tok, _), sync_playwright() as p:
+        b = p.chromium.launch()
+        pg = b.new_page(viewport={"width": width, "height": height})
+        errors = []
+        pg.on("pageerror", lambda e: errors.append(str(e)))
+        pg.goto(f"{base}/?token={tok}")
+        pg.goto(f"{base}/#/assistant")
+        pg.locator(".composer textarea").fill("When is the proposal due?")
+        pg.get_by_role("button", name="Send").click()
+        expect(pg.locator(".msg.assistant").last).to_have_text(ANSWER, timeout=15000)
+
+        def box(sel):
+            return pg.locator(sel).first.bounding_box()
+
+        def at(y):
+            pg.evaluate("y => window.scrollTo(0, y)", y)
+            pg.wait_for_timeout(150)
+            return {"composer": box(".composer"), "chat": box(".chat"), "tabs": box(".main > .tabs"),
+                    "head": box(".main > .page-head"), "y": pg.evaluate("window.scrollY")}
+
+        start = at(0)
+        assert height - 120 < start["composer"]["y"] + start["composer"]["height"] < height, start   # near the bottom
+        mid, end = at(40), at(10_000)
+        assert end["y"] > 40
+        for s in (mid, end):
+            assert abs(s["composer"]["y"] - start["composer"]["y"]) < 2, s       # the message box did not move
+        assert mid["chat"]["height"] > start["chat"]["height"] + 30           # the chat grew into the space
+        assert end["chat"]["height"] > mid["chat"]["height"]
+        assert end["head"]["y"] + end["head"]["height"] <= end["tabs"]["y"] + 1   # the heading went out of view
+        assert end["tabs"]["y"] + end["tabs"]["height"] <= end["chat"]["y"]
+        expect(pg.get_by_role("button", name="⤢ Focus")).to_be_in_viewport()
+        at(0)
+        pg.mouse.move(start["chat"]["x"] + 100, start["chat"]["y"] + 60)       # scrolling over the chat works too
+        pg.mouse.wheel(0, 300)
+        pg.wait_for_timeout(300)
+        assert pg.evaluate("window.scrollY") > 0
+        b.close()
+    assert not errors, errors
