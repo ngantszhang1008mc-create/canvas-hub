@@ -474,17 +474,36 @@ export function makeComponents(env) {
     const status = h("span", { class: "tiny muted save-state", "aria-live": "polite" });
     const redraw = () => { mount(el, render(v, api_)); };
     const queue = (fn) => (saving = saving.then(fn, fn));
+    // Edits made while a save was in flight are re-applied on top of the server's answer (which may hold
+    // changes from elsewhere, e.g. a linked to-do finished meanwhile): per key, and per entry for maps.
+    const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+    const isMap = (x) => x && typeof x === "object" && !Array.isArray(x);
+    const rebase = (sentState, local, server) => {
+      const out = { ...server };
+      for (const k of new Set([...Object.keys(local), ...Object.keys(sentState)])) {
+        if (same(local[k], sentState[k])) continue;                 // not touched since the request: server's
+        if (isMap(local[k]) && isMap(sentState[k]) && isMap(server[k])) {
+          const m = { ...server[k] };
+          for (const j of new Set([...Object.keys(local[k]), ...Object.keys(sentState[k])])) {
+            if (same(local[k][j], sentState[k][j])) continue;
+            if (local[k][j] === undefined) delete m[j]; else m[j] = local[k][j];
+          }
+          out[k] = m;
+        } else if (local[k] === undefined) delete out[k];
+        else out[k] = local[k];
+      }
+      return out;
+    };
     let pending = null;
     const persist = () => {
       clearTimeout(timer);
       status.textContent = "Saving…";
       pending = () => queue(async () => {
-        const sent = edits;
+        const sent = edits, sentState = v.state;
         try {
-          const r = await api(A(`/components/${v.id}`), { method: "PATCH", body: { state: v.state, base: seen, expected_version: v.version } });
+          const r = await api(A(`/components/${v.id}`), { method: "PATCH", body: { state: sentState, base: seen, expected_version: v.version } });
           seen = r.state;
-          // keep edits made while this save was in flight, but adopt server-owned to-do links
-          v = edits === sent ? r : { ...r, state: r.state.links ? { ...v.state, links: { ...v.state.links, ...r.state.links } } : v.state };
+          v = edits === sent ? r : { ...r, state: rebase(sentState, v.state, r.state) };
           if (edits === sent) redraw();
           status.textContent = edits === sent ? `Saved ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : "Saving…";
         } catch (e) {
