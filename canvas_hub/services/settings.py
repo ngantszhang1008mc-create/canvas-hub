@@ -4,6 +4,7 @@ Keys in use:
 - ``canvas_writes``  {"enabled": false, "kinds": [...]}  - confirmed writes to Canvas (off by default)
 - ``auto_refresh``   {"minutes": 0}                      - background quick checks while the app runs (0 = off)
 - ``notifications``  {"last_seen_change_id": 0}         - what the change bell has shown
+- ``custom_html``    {"enabled": false}                  - the assistant may show sandboxed HTML/JS blocks (off by default)
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ DEFAULTS = {
     "canvas_writes": {"enabled": False, "kinds": ["submission_text", "submission_file", "discussion_reply", "message"]},
     "auto_refresh": {"minutes": 0},
     "notifications": {"last_seen_change_id": 0},
+    "custom_html": {"enabled": False},
 }
 
 

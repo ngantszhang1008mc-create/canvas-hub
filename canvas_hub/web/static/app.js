@@ -432,6 +432,7 @@ VIEWS.overview = async (main) => {
     api(A("/discrepancies")),
     api(A("/jobs") + qs({ limit: 3 })),
   ]);
+  const dash = await api(A("/dashboard")).catch(() => null);
   const gaps = cov.records.filter((r) => ["partial", "blocked"].includes(r.latest.status));
   const active = jobs.jobs.find((j) => ["running", "queued", "needs_login", "paused", "interrupted"].includes(j.state));
   const recent = ch.events.slice(-8).reverse();
@@ -460,7 +461,8 @@ VIEWS.overview = async (main) => {
       empty("Nothing due in the next 14 days", "Based on the deadlines collected so far."));
   const chCard = h("div", { class: "card" }, h("div", { class: "card-head" }, h("h2", null, "Recent changes"), h("a", { href: "#/changes", class: "small" }, "All changes")),
     recent.length ? h("ul", { class: "list" }, recent.map(eventLi)) : empty("No changes since the baseline", "Changes appear after a later check finds edits."));
-  mount(main, head, banners, stats, h("div", { class: "grid cols-2", style: "margin-top:14px" }, dlCard, chCard));
+  mount(main, head, banners, stats, dash && dash.courses.length > 1 ? h("div", { style: "margin-top:14px" }, C.dashboardView({ title: "All courses", ...dash })) : null,
+    h("div", { class: "grid cols-2", style: "margin-top:14px" }, dlCard, chCard));
 };
 
 function summarize(v) {
@@ -593,13 +595,66 @@ VIEWS.course = async (main, parts, params) => {
         h("p", { class: "muted small" }, "Sections missing here are not guessed. Content they hide is still collected when Home, the syllabus, modules or pages link to it."),
         syl ? h("p", null, h("a", { href: `#/item/${syl.id}` }, "Read the syllabus")) : null,
         pagesHome.items.length ? h("p", { class: "small" }, `${pagesHome.items.length} page(s) collected`) : null),
-      h("div", { class: "card" }, h("h2", null, "Coverage for this course"), coverageTable(cov.records)));
+      h("div", { class: "card" }, h("h2", null, "Coverage for this course"), coverageTable(cov.records)),
+      await gradingCard(cid));
   } else {
     const list = await api(A("/items") + qs({ course_id: cid, type: tab, limit: 200 }));
     body = h("div", { class: "card" }, itemTable(list.items));
   }
   mount(main, head, tabs, body);
 };
+
+// Local grading rules: what Canvas leaves out (real group weights, pass mark). Never sent to Canvas.
+async function gradingCard(cid) {
+  const card = h("div", { class: "card grading-card", style: "grid-column:1/-1" });
+  const draw = (rules) => {
+    const rows = Object.entries(rules.groups || {}).map(([name, g]) => ({ name, weight: g.weight ?? "", drop: g.drop_lowest || "" }));
+    if (!rows.length) rows.push({ name: "", weight: "", drop: "" });
+    const body = h("tbody");
+    const addRow = (r) => {
+      const tr = h("tr", null,
+        h("td", null, h("input", { type: "text", class: "g-name", value: r.name, placeholder: "Assignment group, e.g. Homework", "aria-label": "Group name" })),
+        h("td", { class: "num" }, h("input", { class: "num-in g-weight", type: "number", min: 0, max: 100, step: "any", value: r.weight, "aria-label": "Weight (%)" })),
+        h("td", { class: "num" }, h("input", { class: "num-in g-drop", type: "number", min: 0, step: 1, value: r.drop, "aria-label": "Drop lowest" })),
+        h("td", null, h("button", { class: "ghost sm", "aria-label": "Remove this group", onclick: () => { tr.remove(); total(); } }, "×")));
+      tr.addEventListener("input", () => total());
+      body.append(tr);
+    };
+    rows.forEach(addRow);
+    const sum = h("span", { class: "small", "aria-live": "polite" });
+    const total = () => {
+      const t = [...body.querySelectorAll(".g-weight")].reduce((s, i) => s + (Number(i.value) || 0), 0);
+      sum.textContent = `Weights add up to ${Math.round(t * 100) / 100}%`;
+      sum.className = Math.abs(t - 100) < 0.01 || t === 0 ? "small muted" : "small bad-text";
+    };
+    total();
+    const thr = h("input", { class: "num-in", type: "number", min: 0, step: "any", value: rules.threshold ?? "", "aria-label": "Pass mark" });
+    const src = h("input", { type: "text", value: rules.source || "", placeholder: "e.g. syllabus p.2", "aria-label": "Source of these rules" });
+    const items = Object.entries(rules.items || {});
+    mount(card, h("div", { class: "card-head" }, h("h2", null, "Grading rules"), h("span", { class: "sub" }, "kept on this computer · used by score models and grade projections")),
+      h("p", { class: "small muted" }, "Canvas often reports 0 for every group weight. Enter the syllabus weights here (or ask the assistant to read them); nothing is sent to Canvas."),
+      h("div", { class: "table-wrap" }, h("table", { class: "t" }, h("thead", null, h("tr", null, h("th", null, "Group"), h("th", { class: "num" }, "Weight %"), h("th", { class: "num" }, "Drop lowest"), h("th", null, ""))), body)),
+      h("div", { class: "row", style: "margin-top:8px" }, h("button", { class: "sm", onclick: () => { addRow({ name: "", weight: "", drop: "" }); total(); } }, "+ Add group"), sum),
+      h("div", { class: "row", style: "margin-top:10px" }, h("label", { class: "small" }, "Pass mark ", thr), h("label", { class: "small grow" }, "Source ", src)),
+      items.length ? h("details", { style: "margin-top:10px" }, h("summary", { class: "small" }, `${items.length} assignment rule(s) set by the assistant`),
+        h("ul", { class: "small" }, items.map(([id, r]) => h("li", null, h("code", null, id), " ", Object.entries(r).map(([k, v]) => `${k}: ${v}`).join(" · "))))) : null,
+      h("div", { class: "row", style: "margin-top:12px" }, h("button", { class: "primary", onclick: async () => {
+        const groups = {};
+        for (const tr of body.querySelectorAll("tr")) {
+          const name = tr.querySelector(".g-name").value.trim();
+          if (!name) continue;
+          const w = tr.querySelector(".g-weight").value, d = tr.querySelector(".g-drop").value;
+          groups[name] = { ...(w !== "" ? { weight: Number(w) } : {}), ...(d !== "" && Number(d) ? { drop_lowest: Number(d) } : {}) };
+        }
+        const next = { ...rules, groups, threshold: thr.value === "" ? undefined : Number(thr.value), source: src.value.trim() || undefined };
+        delete next.updated_at;
+        const r = await guard(() => api(A(`/courses/${cid}/grading`), { method: "PUT", body: next }));
+        if (r) { toast("Grading rules saved"); draw(r); }
+      } }, "Save rules"), rules.updated_at ? h("span", { class: "tiny muted" }, `saved ${ago(rules.updated_at)}`) : null));
+  };
+  try { draw(await api(A(`/courses/${cid}/grading`))); } catch (e) { mount(card, h("p", { class: "muted small" }, "Grading rules unavailable: " + e.message)); }
+  return card;
+}
 
 function itemTable(items) {
   if (!items.length) return empty("Nothing here", "");
@@ -678,8 +733,10 @@ const relLabel = (r) => ({ body_link: "links to", module_item_content: "opens", 
 
 function resourceBlock(r) {
   const st = r.extraction_status;
-  const cls = st === "ok" ? "ok" : ["needs_ocr", "image_only", "unsupported_media", "unsupported_type", "empty"].includes(st) ? "warn" : st === "failed" ? "bad" : "muted";
-  const label = { ok: "Text extracted", needs_ocr: "Scanned — needs OCR", image_only: "Image only", unsupported_media: "Audio/video (not transcribed)",
+  const cls = st === "ok" || st === "ocr" ? "ok" : ["needs_ocr", "image_only", "unsupported_media", "unsupported_type", "empty", "ocr_low_confidence"].includes(st) ? "warn" : st === "failed" ? "bad" : "muted";
+  const conf = r.ocr_confidence != null ? ` · ${Math.round(r.ocr_confidence)}% confidence` : "";
+  const label = { ok: "Text extracted", ocr: `Text from OCR${conf}`, ocr_low_confidence: `OCR, low confidence${conf}`,
+    needs_ocr: "Scanned — needs OCR", image_only: "Image only", unsupported_media: "Audio/video (not transcribed)",
     unsupported_type: "No text extractor", failed: "Extraction failed", empty: "No text found", tool_unavailable: "Extractor not installed", not_attempted: "Not extracted" }[st] || st;
   const out = h("div", null);
   const textBox = h("div");
@@ -841,8 +898,8 @@ VIEWS.notes = async (main, _p, params) => {
   const filter = params.get("show") || "open";
   const q = filter === "all" || filter === "board" ? {} : filter === "notes" ? { kind: "note" } : { kind: "task", task_state: filter === "open" ? "active" : filter };
   const [r, files] = await Promise.all([api(A("/annotations") + qs(q)), api(A("/files")).catch(() => ({ files: [] }))]);
-  const title = h("input", { type: "text", placeholder: "To-do title", style: "flex:1" });
-  const due = h("input", { type: "datetime-local" });
+  const title = h("input", { type: "text", placeholder: "To-do title", "aria-label": "To-do title", style: "flex:1" });
+  const due = h("input", { type: "datetime-local", "aria-label": "Due (optional)" });
   const chips = h("div", { class: "chips" }, [["open", "Open to-dos"], ["board", "Board"], ["done", "Done"], ["notes", "Notes"], ["all", "Everything"]].map(([k, l]) =>
     h("button", { class: "chip" + (k === filter ? " on" : ""), onclick: () => { location.hash = `#/notes?show=${k}`; } }, l)));
   const patch = (a, body) => guard(() => api(A(`/annotations/${a.id}`), { method: "PATCH", body }));
@@ -1003,6 +1060,32 @@ function scopeEditor(scope, courses) {
 }
 
 // ---------- settings ----------
+// Optional OCR (app-wide): text from photos and scanned PDFs, with a confidence flag per document.
+function ocrCard(s) {
+  const on = h("input", { type: "checkbox", checked: s.enabled ? true : null, disabled: s.tesseract ? null : true });
+  const lang = h("input", { type: "text", value: s.lang || "eng", "aria-label": "OCR languages", style: "width:140px" });
+  const result = h("div", { class: "small", "aria-live": "polite" });
+  return h("div", { class: "card" }, h("div", { class: "card-head" }, h("h2", null, "Text from scans and photos (OCR)"),
+    pill(s.enabled && s.tesseract ? "ok" : "muted", s.enabled && s.tesseract ? "On" : "Off")),
+    h("p", { class: "small muted" }, `Reads text from photographed forms and scanned PDFs on this computer with tesseract. Each document gets a confidence score; below ${s.low_confidence_below}% it is flagged, because handwriting and formulas are often misread. Nothing is uploaded.`),
+    s.tesseract ? h("p", { class: "small" }, `Found ${s.version || "tesseract"}${s.pdf ? " and pdftoppm (scanned PDFs)" : " — scanned PDFs also need pdftoppm (brew install poppler)"}.`)
+      : h("div", { class: "banner warn" }, h("div", { class: "b-body" }, h("div", { class: "b-title" }, "tesseract is not installed"), h("div", { class: "small" }, s.install_hint))),
+    h("label", { class: "check" }, on, h("strong", null, "Read text from scans and photos")),
+    h("div", { class: "row", style: "margin-top:6px" }, h("label", { class: "small" }, "Languages ", lang), h("span", { class: "tiny muted" }, "e.g. eng, or eng+chi_tra (language packs must be installed)")),
+    h("div", { class: "row", style: "margin-top:10px" }, h("button", { class: "primary", onclick: async () => {
+      const r = await guard(() => api("/api/ocr", { method: "PUT", body: { enabled: !!on.checked, lang: lang.value.trim() || "eng" } }));
+      if (r) { toast(r.enabled ? "OCR is on" : "OCR is off"); route(); } } }, "Save"),
+      s.enabled && s.tesseract && s.pending ? h("button", { onclick: async (e) => {
+        e.target.disabled = true; result.textContent = "Reading…";
+        const r = await guard(() => api("/api/ocr/run", { method: "POST", body: { limit: 10 } }));
+        e.target.disabled = false;
+        if (r) mount(result, h("ul", { class: "list" }, r.processed.map((x) => h("li", null, x.filename || x.resource_id.slice(0, 12), " — ",
+          pill(x.status === "ocr" ? "ok" : "warn", x.status === "ocr" ? "text read" : x.status === "ocr_low_confidence" ? "low confidence" : x.status),
+          x.confidence != null ? ` ${Math.round(x.confidence)}%` : ""))), h("p", { class: "tiny muted" }, `${r.pending} still to read`));
+      } }, `Read ${Math.min(10, s.pending)} of ${s.pending} stored document${s.pending === 1 ? "" : "s"}`) : null),
+    result);
+}
+
 VIEWS.settings = async (main) => {
   const [backups, info] = await Promise.all([api("/api/backups"), api("/api/info")]);
   const inst = currentInstance();
@@ -1017,7 +1100,7 @@ VIEWS.settings = async (main) => {
           if (!confirm("Restore this backup? Current data will be moved aside (not deleted).")) return;
           const r = await guard(() => api(`/api/backups/${encodeURIComponent(f.name)}/restore`, { method: "POST" }));
           if (r) { toast("Restored"); await loadIdentities(); route(); } } }, "Restore") : null))))) : null));
-  const file = h("input", { type: "file", accept: ".zip" });
+  const file = h("input", { type: "file", accept: ".zip", "aria-label": "Export archive to import (.zip)" });
   cards.push(h("div", { class: "card" }, h("h2", null, "Import"), h("p", { class: "muted small" }, "Import a portable export created by Canvas Hub. Data is attached to the account named inside the export and never merged into a different account."),
     h("div", { class: "row" }, file, h("button", { onclick: async () => {
       if (!file.files[0]) return;
@@ -1037,6 +1120,9 @@ VIEWS.settings = async (main) => {
       } }, "Delete data"))));
   }
   if (S.accountId) { const ws = await api(A("/writes")).catch(() => null); if (ws) cards.push(C.writesSettingsCard(ws)); }
+  if (S.accountId) { const ch = await api(A("/custom-html")).catch(() => null); if (ch) cards.push(C.customHtmlCard(ch)); }
+  const ocrS = await api("/api/ocr").catch(() => null);
+  if (ocrS) cards.push(ocrCard(ocrS));
   const acfg = await api("/api/assistant/config").catch(() => null);
   if (acfg) {
     const active = acfg.profiles.find((x) => x.id === acfg.active_profile);

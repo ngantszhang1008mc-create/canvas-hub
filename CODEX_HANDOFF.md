@@ -585,6 +585,42 @@ canvas-hub mcp --allow-settings     # + scope changes
   - a self-contained HTML snapshot, with its own CSP and no scripts;
   - **Print / Save as PDF** for one component.
 
+### Phase 4: formulas, local grading rules, custom HTML, dashboard, accessibility, OCR
+
+- **Formula language** (`formula.py`, browser twin `web/static/formula.js`):
+  - One small grammar, two hand-written parsers. There is no `eval` (the page CSP forbids it anyway).
+  - Arithmetic, comparisons, and/or/not, and the functions min, max, round, floor, ceil, abs, sqrt, clamp and lazy `if(c, a, b)`.
+  - Rounding is half away from zero, and `%` takes the sign of the divisor on both sides. A non-finite value at any step is an error, so both sides agree on edge cases.
+  - `tests/fixtures/formula_vectors.json` runs through both. The Node run must match Python bit for bit.
+- **Formula lines:** a score-model bucket can carry `formula`, for rules Canvas shows only as an image, e.g. `if(hours >= 10, 20 * min(1, hours / 20), 0)`.
+  - Names available: value, hours, max, full_at, min_value. The result is kept between 0 and max, and gating still applies.
+  - The page recomputes formula lines live with `formula.js`.
+- **Local grading rules** (`services/grading.py`, `account_settings` key `grading:<course id>`):
+  - Group weights and drop-lowest.
+  - Per assignment (by Canvas id): unit, gating, min_value, full_at, formula, exclude, note.
+  - Pass mark, letter scale and source.
+  - `course_score_lines` and the projector draft apply them. Tools: `get_grading_rules`, `set_grading_rules` (the latter needs notes permission).
+  - The course page has a **Grading rules** card. Rules are never sent to Canvas. Category nesting is not modelled: use one group per graded category.
+- **Custom HTML blocks** (`show_html`; `/sandbox` + `web/static/sandbox.html`):
+  - Off by default (`account_settings.custom_html`), and each block runs only after **Run**.
+  - The frame is `sandbox="allow-scripts"` (opaque origin: no cookies, storage or parent access). `/sandbox` has its own CSP: inline only, `connect-src 'none'`, images only from `data:`/`blob:`, `frame-ancestors 'self'`.
+  - Data arrives by `postMessage` as frozen `window.hubData`.
+  - The app CSP changed only `frame-src 'none'` → `'self'`.
+  - **Residual risk:** a sandboxed frame can still navigate itself to another site, and no browser control blocks that; the setting text says so.
+- **Dashboard** (`show_dashboard`, `GET /api/accounts/{id}/dashboard`, also on Overview when there is more than one course):
+  - Grade so far, weighted when local or Canvas weights exist.
+  - Work done / lost, due within N days, and the next deadline.
+- **Accessibility:**
+  - Every control, meter and graphic on the main views has an accessible name; `test_every_control_has_an_accessible_name` audits them in Chromium.
+  - Heatmap days with deadlines are announced with what is due, and empty days are hidden from screen readers.
+  - Timeline bars and the dashboard table have labels and a caption.
+  - Focus outlines are visible.
+- **OCR** (`ocr.py`; app setting `ocr` in `app_settings`, off by default):
+  - Runs local tesseract on images, and on scanned PDFs page by page via pdftoppm (up to 40 pages).
+  - Status `ocr`, or `ocr_low_confidence` below 70% mean word confidence; the text is kept but flagged. `resources.ocr_confidence` (migration 0007) holds the score.
+  - **Data & settings → Text from scans and photos** runs it on stored documents, 10 at a time, and re-indexes search. `get_item` adds a caution to OCR'd documents.
+  - Install on the Mac: `brew install tesseract poppler`.
+
 ### Still left for Codex
 
 1. **Codex-side configuration.** Register `canvas-hub mcp` (with whatever flags the user chooses) in Codex's MCP configuration. Re-check [MCP tools for Codex](https://learn.chatgpt.com/docs/extend/mcp).
