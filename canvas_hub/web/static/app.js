@@ -986,7 +986,8 @@ function renderMessages(list, msgs, ctx = {}) {
   for (const m of msgs) if (m.role === "tool") for (const r of m.results) results[r.id] = r;
   const out = [];
   for (const m of msgs) {
-    if (m.role === "user") out.push(h("div", { class: "msg user" }, h("div", { class: "bubble" }, m.text)));
+    if (m.role === "user") out.push(h("div", { class: "msg user" }, h("div", { class: "bubble" }, m.text),
+      m.setup ? h("div", { class: "msg-meta tiny muted" }, `${m.setup}${m.reasoning ? ` · reasoning ${m.reasoning}` : ""}`) : null));
     else if (m.role === "assistant") {
       const parts = [];
       if (m.text) parts.push(renderMarkdown(m.text));
@@ -1059,7 +1060,8 @@ VIEWS.assistant = async (main, parts, params) => {
     const t = (text ?? input.value).trim();
     if (!t) return;
     sendBtn.disabled = true;
-    const r = await guard(() => api(A("/assistant/messages"), { method: "POST", body: { text: t, conversation_id: current, profile_id: setupSel.value || cfg.active_profile } }));
+    const r = await guard(() => api(A("/assistant/messages"), { method: "POST", body: { text: t, conversation_id: current, profile_id: setupSel.value || cfg.active_profile,
+      reasoning: reasoningSel.hidden ? "" : reasoningSel.value } }));
     if (!r) { sendBtn.disabled = false; return; }
     input.value = "";
     const emptyEl = document.getElementById("chat-empty");
@@ -1076,20 +1078,34 @@ VIEWS.assistant = async (main, parts, params) => {
 
   const suggestions = h("div", { class: "chips suggest" }, ["What's due in the next 7 days?", "Plan my study time this week",
     "Anything new since yesterday?", "Check Canvas for new announcements", "Show my scores"].map((s) => h("button", { class: "chip", onclick: () => send(s) }, s)));
+  // Setup and reasoning are chosen right here for each message. The reasoning
+  // level is remembered per setup in this browser only; it is not a saved setting.
   const usable = cfg.profiles.filter((x) => x.configured);
-  const setupSel = h("select", { class: "setup-select", title: "Assistant setup used for the next message" },
+  const setupSel = h("select", { class: "chat-pick", title: "Saved API setup (provider and model) for the next message" },
     usable.map((x) => h("option", { value: x.id, selected: x.id === cfg.active_profile ? true : null }, `${x.name} · ${x.model || "default model"}`)));
-  setupSel.addEventListener("change", async () => {
-    const r = await guard(() => api(`/api/assistant/profiles/${encodeURIComponent(setupSel.value)}/activate`, { method: "POST" }));
-    if (r) toast(`Now using ${r.name}`);
+  const reasoningSel = h("select", { class: "chat-pick", title: "Reasoning effort for the next message" });
+  const fillReasoning = () => {
+    const prof = usable.find((x) => x.id === setupSel.value);
+    const levels = (prof && prof.reasoning_levels) || [];
+    const saved = store.get(`reasoning.${setupSel.value}`) || "";
+    mount(reasoningSel, ["", ...levels].map((v) => h("option", { value: v, selected: v === saved ? true : null }, `Reasoning: ${v || "default"}`)));
+    reasoningSel.hidden = !levels.length;
+  };
+  fillReasoning();
+  setupSel.addEventListener("change", () => {
+    fillReasoning();
+    // Also make it the default for new chats; each message names its setup anyway.
+    api(`/api/assistant/profiles/${encodeURIComponent(setupSel.value)}/activate`, { method: "POST" }).catch(() => null);
   });
+  reasoningSel.addEventListener("change", () => store.set(`reasoning.${setupSel.value}`, reasoningSel.value));
   const perms = cfg.permissions;
-  const footer = h("div", { class: "chat-foot tiny muted" }, usable.length > 1 ? setupSel : h("span", null, `${cfg.name} · ${cfg.model || "default model"}`),
-    h("span", null, `Can ${["read your data", perms.notes ? "edit your notes" : null, perms.collect ? "check Canvas" : null, perms.settings ? "change scope" : null].filter(Boolean).join(", ")}. Questions and the data it reads go to this provider.`));
+  const footer = h("div", { class: "chat-foot tiny muted" },
+    h("span", null, `Can ${["read your data", perms.notes ? "edit your notes" : null, perms.collect ? "check Canvas" : null, perms.settings ? "change scope" : null].filter(Boolean).join(", ")}. Questions and the data it reads go to the chosen provider.`));
   scroller.append(log, status);
   if (!current) scroller.append(h("div", { class: "chat-empty", id: "chat-empty" }, h("div", { class: "e-title" }, "What would you like to know?"), suggestions));
   const chat = h("div", { class: "chat" }, scroller,
-    h("div", { class: "composer" }, input, h("div", { class: "row" }, stopBtn, sendBtn)), footer);
+    h("div", { class: "composer" }, input,
+      h("div", { class: "composer-bar" }, setupSel, reasoningSel, h("span", { class: "grow" }), stopBtn, sendBtn)), footer);
   const layout = h("div", { class: "assistant-layout" }, sideList, chat);
   main.classList.add("fill");
   mount(main, head, tabs, layout);
@@ -1112,7 +1128,7 @@ function assistantSettingsView(main, head, tabs, cfg, params) {
     h("div", { class: "card-head" }, h("h2", null, "Saved setups"), h("a", { class: "btn sm", href: "#/assistant/settings?p=new" }, "+ Add setup")),
     cfg.profiles.length ? cfg.profiles.map((x) => h("div", { class: "setup-row" + (x.id === sel ? " on" : "") },
       h("a", { class: "setup-main", href: `#/assistant/settings?p=${encodeURIComponent(x.id)}` },
-        h("span", { class: "strong" }, x.name), h("span", { class: "tiny muted" }, [x.model || "default model", x.thinking ? `thinking ${x.thinking}` : null, x.api_key_saved ? "key saved" : null].filter(Boolean).join(" · "))),
+        h("span", { class: "strong" }, x.name), h("span", { class: "tiny muted" }, [x.model || "default model", x.api_key_saved ? "key saved" : null].filter(Boolean).join(" · "))),
       x.id === cfg.active_profile ? pill("ok", "In use") : h("button", { class: "sm ghost", disabled: x.configured ? null : true, onclick: async () => {
         if (await guard(() => api(`/api/assistant/profiles/${encodeURIComponent(x.id)}/activate`, { method: "POST" }))) { toast(`Now using ${x.name}`); route(); }
       } }, "Use"))) : h("p", { class: "muted small" }, "No setups yet. Add one with your provider and API key."));
@@ -1138,7 +1154,7 @@ function assistantPermissionsCard(cfg) {
 }
 
 function assistantSettingsCard(cfg, prof) {
-  const cur = prof || { id: "new", name: "", preset: null, provider: null, base_url: "", model: "", effort: "", thinking: "", extra_params: {} };
+  const cur = prof || { id: "new", name: "", preset: null, provider: null, base_url: "", model: "", extra_params: {} };
   const isNew = !prof;
   const name = h("input", { type: "text", value: cur.name || "", placeholder: "e.g. DeepSeek max, Claude for long questions", maxlength: 60 });
   const presetSel = h("select", null, h("option", { value: "" }, "Choose a provider…"),
@@ -1146,33 +1162,19 @@ function assistantSettingsCard(cfg, prof) {
   const base = h("input", { type: "url", value: cur.base_url || "", placeholder: "https://…/v1" });
   const model = h("input", { type: "text", value: cur.model || "", placeholder: "model name" });
   const key = h("input", { type: "password", autocomplete: "off", placeholder: cur.api_key_saved ? `saved (${cur.api_key_hint}) — type to replace` : "paste your API key" });
-  const effort = h("select", null, ["", "low", "medium", "high", "xhigh", "max"].map((e) => h("option", { value: e, selected: e === (cur.effort || "") ? true : null }, e || "model default")));
   const baseField = h("label", { class: "field" }, h("span", null, "Base URL"), base);
-  const effortField = h("label", { class: "field" }, h("span", null, "Effort (Claude)"), effort);
-  const thinking = h("select");
-  const thinkingField = h("label", { class: "field" }, h("span", null, "Thinking"), thinking);
   const extra = h("textarea", { rows: 2, class: "mono", placeholder: "optional, e.g. {\"temperature\": 0.3}" });
   extra.value = cur.extra_params && Object.keys(cur.extra_params).length ? JSON.stringify(cur.extra_params) : "";
   const extraField = h("label", { class: "field", style: "grid-column:1/-1" },
     h("span", null, "Extra request settings (JSON, optional — sent as-is to the provider)"), extra);
-  const fillThinking = (presetId) => {
-    const opts = presetId === "deepseek"
-      ? [["", "provider default"], ["off", "off"], ["low", "low"], ["high", "high"], ["max", "max"]]
-      : [["", "provider default"], ["low", "low"], ["medium", "medium"], ["high", "high"]];
-    const v = thinking.value || cur.thinking || "";
-    mount(thinking, opts.map(([o, l]) => h("option", { value: o, selected: o === v ? true : null }, l)));
-  };
   const hint = h("div", { class: "tiny muted" });
   const sync = () => {
     const p = cfg.presets.find((x) => x.id === presetSel.value);
     const isAnthropic = p && p.provider === "anthropic";
-    effortField.hidden = !isAnthropic;
-    thinkingField.hidden = !p || isAnthropic;
     extraField.hidden = !p || isAnthropic;
-    fillThinking(p ? p.id : "");
     baseField.querySelector("span").textContent = isAnthropic ? "Base URL (leave empty for the Claude API)" : "Base URL";
     if (p && presetSel.value !== cur.preset) { base.value = p.base_url; if (p.model) model.value = p.model; else if (cur.provider !== p.provider) model.value = ""; }
-    mount(hint, p ? (isAnthropic ? "Without a pasted key, ANTHROPIC_API_KEY or an `ant auth login` profile is used." : p.id === "ollama" ? "Runs on your own computer; no key and nothing leaves it." : p.id === "deepseek" ? "Thinking sends thinking:{type} and reasoning_effort, as in DeepSeek's docs; Save & test shows whether your chosen level is accepted." : `Key format: ${p.key_hint || "provider API key"}. For OpenAI-compatible providers OPENAI_API_KEY is used if no key is saved.`) : "");
+    mount(hint, p ? (isAnthropic ? "Without a pasted key, ANTHROPIC_API_KEY or an `ant auth login` profile is used." : p.id === "ollama" ? "Runs on your own computer; no key and nothing leaves it." : `Key format: ${p.key_hint || "provider API key"}. For OpenAI-compatible providers OPENAI_API_KEY is used if no key is saved.`) : "");
   };
   presetSel.addEventListener("change", sync); sync();
   const result = h("div", { class: "small" });
@@ -1183,7 +1185,7 @@ function assistantSettingsCard(cfg, prof) {
       try { extraParams = JSON.parse(extra.value); } catch { toast("Extra request settings must be valid JSON", true); return null; }
     }
     const body = { profile_id: cur.id, name: name.value, preset: presetSel.value, base_url: base.value, model: model.value,
-      effort: effort.value, thinking: thinking.value, extra_params: extraParams };
+      extra_params: extraParams };
     if (key.value) body.api_key = key.value;
     const r = await guard(() => api("/api/assistant/config", { method: "PUT", body }));
     if (r) { key.value = ""; cur.id = r.saved_profile; toast("Setup saved"); return r; }   // later saves edit this setup
@@ -1214,8 +1216,9 @@ function assistantSettingsCard(cfg, prof) {
     h("div", { class: "banner info" }, h("div", { class: "b-body small" }, cfg.privacy, " Keys are kept in a private file outside your course data, so they are never included in backups or exports.")),
     h("div", { class: "grid cols-2" }, h("label", { class: "field", style: "grid-column:1/-1" }, h("span", null, "Name"), name),
       h("label", { class: "field" }, h("span", null, "Provider"), presetSel), h("label", { class: "field" }, h("span", null, "Model"), model),
-      baseField, h("label", { class: "field" }, h("span", null, "API key"), key), effortField, thinkingField, extraField),
+      baseField, h("label", { class: "field" }, h("span", null, "API key"), key), extraField),
     hint,
+    h("div", { class: "tiny muted" }, "Reasoning effort is not part of a setup: choose it next to the message box for each message."),
     h("div", { class: "row", style: "margin-top:14px" },
       saveBtn, testBtn,
       !isNew && cur.id !== cfg.active_profile ? h("button", { class: "ghost", disabled: cur.configured ? null : true, onclick: async () => {
