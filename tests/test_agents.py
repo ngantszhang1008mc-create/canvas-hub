@@ -274,3 +274,42 @@ def test_assistant_setup_changes_are_serialised(seeded):
     for t in threads:
         t.join()
     assert sorted(x["name"] for x in svc.public_config()["profiles"]) == sorted(f"s{i}" for i in range(12))
+
+
+def test_connection_test_does_not_block_the_server(seeded):
+    import socket
+    import threading
+    import time
+
+    import httpx
+    import uvicorn
+
+    from canvas_hub.web.app import create_app
+    hub, _ = seeded
+    hang = socket.socket()
+    hang.bind(("127.0.0.1", 0))
+    hang.listen()              # accepts connections, never answers: a provider that hangs
+    api = HubAPI(hub)
+    api.assistant = AssistantService(hub, api)
+    api.assistant.update_config({"preset": "custom", "base_url": f"http://127.0.0.1:{hang.getsockname()[1]}/v1", "model": "m"})
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    tok = "t" * 40
+    srv = uvicorn.Server(uvicorn.Config(create_app(api, token=tok, port=port), host="127.0.0.1", port=port, log_level="warning"))
+    threading.Thread(target=srv.run, daemon=True).start()
+    base, hdr = f"http://127.0.0.1:{port}", {"Authorization": "Bearer " + tok, "X-Canvas-Hub": "1"}
+    try:
+        for _ in range(50):
+            if srv.started:
+                break
+            time.sleep(0.1)
+        threading.Thread(target=lambda: httpx.post(base + "/api/assistant/test", json={}, headers=hdr, timeout=30),
+                         daemon=True).start()
+        time.sleep(0.5)
+        t0 = time.monotonic()
+        r = httpx.get(base + "/api/assistant/config", headers=hdr, timeout=10)
+        assert r.status_code == 200 and time.monotonic() - t0 < 2
+    finally:
+        srv.should_exit = True
+        hang.close()

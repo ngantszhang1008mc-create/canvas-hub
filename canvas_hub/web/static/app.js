@@ -1214,7 +1214,10 @@ function assistantSettingsCard(cfg, prof) {
       } }, "Remove saved key") : null,
       !isNew ? h("button", { class: "danger", onclick: async () => {
         if (!confirm(`Delete the setup “${cur.name}” and its saved key?`)) return;
-        if (await guard(() => api(`/api/assistant/profiles/${encodeURIComponent(cur.id)}`, { method: "DELETE" }))) { toast("Setup deleted"); location.hash = "#/assistant/settings"; }
+        if (await guard(() => api(`/api/assistant/profiles/${encodeURIComponent(cur.id)}`, { method: "DELETE" }))) {
+          toast("Setup deleted");
+          if (location.hash === "#/assistant/settings") route(); else location.hash = "#/assistant/settings";   // same hash fires no hashchange
+        }
       } }, "Delete setup") : null,
       result));
 }

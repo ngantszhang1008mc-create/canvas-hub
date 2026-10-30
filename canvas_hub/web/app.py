@@ -10,6 +10,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
+from starlette.concurrency import run_in_threadpool
 
 from ..boundary import HubAPI
 from ..util import HubError, InvalidInput
@@ -381,7 +382,9 @@ def create_app(api: HubAPI, *, token: str, port: int) -> FastAPI:
 
     @app.post("/api/assistant/test")
     async def assistant_test(request: Request):
-        return _assistant().test((await body(request)).get("profile_id"))
+        # The provider call can take minutes; keep it off the event loop.
+        pid = (await body(request)).get("profile_id")
+        return await run_in_threadpool(_assistant().test, pid)
 
     @app.post("/api/assistant/profiles/{pid}/activate")
     def assistant_activate(pid: str):
