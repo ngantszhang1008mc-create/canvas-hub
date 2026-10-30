@@ -910,7 +910,9 @@ ${pv.body || ""}`, json: w })));
   function hoursTrackerView(view) {
     return savedComponent(view, (v, ctl) => {
       const spec = v.spec, st = v.state || {}, entries = st.entries || [];
-      const total = entries.reduce((s, e) => s + e.hours, 0);
+      const lastDay = spec.deadline ? spec.deadline.slice(0, 10) : null;          // as projections.hours_summary
+      const total = entries.reduce((s, e) => s + (!lastDay || e.date <= lastDay ? e.hours : 0), 0);
+      const late = entries.reduce((s, e) => s + (lastDay && e.date > lastDay ? e.hours : 0), 0);
       const now = Date.now(), dl = spec.deadline ? new Date(spec.deadline).getTime() : null;
       const counting = total >= spec.minimum;
       const status = counting ? (total >= spec.target ? "complete" : "counting") : dl && dl < now ? "lost" : "below_minimum";
@@ -929,7 +931,8 @@ ${pv.body || ""}`, json: w })));
             h("dt", null, "To minimum"), h("dd", { class: "num" }, `${fmtN(Math.max(0, spec.minimum - total))} ${spec.unit}`),
             h("dt", null, "To target"), h("dd", { class: "num" }, `${fmtN(left)} ${spec.unit}`),
             perWeek ? [h("dt", null, "Needed per week"), h("dd", { class: "num" }, `${fmtN(Math.round(perWeek * 10) / 10)} ${spec.unit}`)] : null,
-            spec.deadline ? [h("dt", null, "Deadline"), h("dd", null, countdown(spec.deadline))] : null),
+            spec.deadline ? [h("dt", null, "Deadline"), h("dd", null, countdown(spec.deadline))] : null,
+            late ? [h("dt", null, "After the deadline"), h("dd", { class: "num muted" }, `${fmtN(late)} ${spec.unit} (not counted)`)] : null),
           h("div", { class: "tiny muted" }, st.refreshed_at ? `Checked against ${spec.source || "the source"} ${ago(st.refreshed_at)}` : `Not yet checked against ${spec.source || "the official count"}`),
           h("button", { class: "sm", onclick: () => ctl.setState((s) => ({ ...s, refreshed_at: new Date().toISOString() })) }, "I checked it just now")),
         h("div", { class: "sl-main" }, alertList(status === "below_minimum" ? [{ level: "bad", text: `Counts 0 until ${fmtN(spec.minimum)} ${spec.unit} are logged (${fmtN(spec.minimum - total)} to go).` }] : status === "lost" ? [{ level: "bad", text: "The deadline passed below the minimum, so this line is lost." }] : []),
