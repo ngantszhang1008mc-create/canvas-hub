@@ -1188,6 +1188,23 @@ function assistantSettingsCard(cfg, prof) {
     if (r) { key.value = ""; cur.id = r.saved_profile; toast("Setup saved"); return r; }   // later saves edit this setup
     return null;
   };
+  // One save or test at a time: overlapping clicks would each send profile_id "new" and create duplicates.
+  const saveBtn = h("button", { class: "primary" }, "Save");
+  const testBtn = h("button", null, "Save & test");
+  let busy = false;
+  const exclusive = (fn) => async () => {
+    if (busy) return;
+    busy = true; saveBtn.disabled = testBtn.disabled = true;
+    try { await fn(); } finally { busy = false; saveBtn.disabled = testBtn.disabled = false; }
+  };
+  saveBtn.addEventListener("click", exclusive(async () => { const r = await save(); if (r) goTo(r.saved_profile); }));
+  testBtn.addEventListener("click", exclusive(async () => {
+    const r = await save(); if (!r) return;
+    mount(result, h("span", { class: "muted" }, "Testing…"));
+    const t = await guard(() => api("/api/assistant/test", { method: "POST", body: { profile_id: r.saved_profile } }));
+    if (t) mount(result, t.ok ? pill("ok", `Connected · ${t.model || ""}`) : h("span", { style: "color:var(--bad)" }, t.message));
+    if (isNew) setTimeout(() => goTo(r.saved_profile), t && t.ok ? 1200 : 4000);
+  }));
   const goTo = (pid) => { const h2 = `#/assistant/settings?p=${encodeURIComponent(pid)}`; if (location.hash === h2) route(); else location.hash = h2; };
   return h("div", { class: "card" },
     h("div", { class: "card-head" }, h("h2", null, isNew ? "New setup" : cur.name),
@@ -1198,14 +1215,7 @@ function assistantSettingsCard(cfg, prof) {
       baseField, h("label", { class: "field" }, h("span", null, "API key"), key), effortField, thinkingField, extraField),
     hint,
     h("div", { class: "row", style: "margin-top:14px" },
-      h("button", { class: "primary", onclick: async () => { const r = await save(); if (r) goTo(r.saved_profile); } }, "Save"),
-      h("button", { onclick: async () => {
-        const r = await save(); if (!r) return;
-        mount(result, h("span", { class: "muted" }, "Testing…"));
-        const t = await guard(() => api("/api/assistant/test", { method: "POST", body: { profile_id: r.saved_profile } }));
-        if (t) mount(result, t.ok ? pill("ok", `Connected · ${t.model || ""}`) : h("span", { style: "color:var(--bad)" }, t.message));
-        if (isNew) setTimeout(() => goTo(r.saved_profile), t && t.ok ? 1200 : 4000);
-      } }, "Save & test"),
+      saveBtn, testBtn,
       !isNew && cur.id !== cfg.active_profile ? h("button", { class: "ghost", disabled: cur.configured ? null : true, onclick: async () => {
         if (await guard(() => api(`/api/assistant/profiles/${encodeURIComponent(cur.id)}/activate`, { method: "POST" }))) { toast(`Now using ${cur.name}`); route(); }
       } }, "Use this setup") : null,
