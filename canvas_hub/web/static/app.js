@@ -1429,16 +1429,18 @@ VIEWS.assistant = async (main, parts, params) => {
       window.removeEventListener("resize", fit); window.removeEventListener("scroll", fit);
       return;
     }
+    // What stays at the top of the window: the sticky bars across it (not the full-height sidebar beside it).
+    // Their size, not where they are now, so this never depends on how far the page is scrolled.
     const pinned = [$("#sidebar"), $("#topbar")].filter((el) => el && getComputedStyle(el).position === "sticky"
-      && el.getBoundingClientRect().bottom < window.innerHeight / 2);
-    const stickTop = Math.max(0, ...pinned.map((el) => el.getBoundingClientRect().bottom));
+      && el.offsetHeight < window.innerHeight / 2);
+    const stickTop = Math.max(0, ...pinned.map((el) => el.offsetHeight));
     tabs.style.top = `${stickTop}px`;
     const docTop = layout.getBoundingClientRect().top + window.scrollY;
     const settled = document.body.classList.contains("chat-focus") ? docTop      // nothing above it scrolls away
       : stickTop + tabs.offsetHeight + parseFloat(getComputedStyle(tabs).marginBottom);
-    const full = Math.max(380, window.innerHeight - settled - 16);
+    const full = Math.max(160, window.innerHeight - settled - 16);
     const top = Math.max(layout.getBoundingClientRect().top, settled);
-    const shown = Math.min(full, Math.max(240, window.innerHeight - top - 16));
+    const shown = Math.min(full, Math.max(160, window.innerHeight - top - 16));
     const atEnd = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 4;
     layout.style.height = `${shown}px`;
     layout.style.marginBottom = `${full - shown}px`;

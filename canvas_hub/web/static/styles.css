@@ -413,13 +413,17 @@ details.raw summary { cursor: pointer; color: var(--text-3); font-size: 12.5px; 
 .assistant-layout { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 20px; height: 75vh; min-height: 0; }
 .conv-list { display: flex; flex-direction: column; gap: 2px; min-height: 0; }
 .conv-list .btn { justify-content: center; margin-bottom: 8px; flex: none; }
-.conv-scroll { display: flex; flex-direction: column; gap: 2px; overflow-y: auto; min-height: 0; flex: 1; }
+.conv-scroll { position: relative; display: flex; flex-direction: column; gap: 2px; overflow-y: auto; min-height: 0; flex: 1; }
 .conv { display: flex; flex-direction: column; padding: 7px 10px; border-left: 2px solid transparent; color: var(--text-2); border-radius: 0 4px 4px 0; }
 .conv:hover { background: var(--surface-2); text-decoration: none; }
 .conv.on { border-left-color: var(--mark); background: var(--paper); color: var(--ink); }
 .conv-title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 13.5px; }
-.chat { background: var(--paper); border: 1px solid var(--rule); border-radius: var(--radius); padding: 0; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
-.chat-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 18px 20px; display: flex; flex-direction: column; gap: 12px; }
+/* flex-end: when the chat is shorter than its parts, the message list gives way at the top and the message box
+   stays at the bottom. */
+.chat { background: var(--paper); border: 1px solid var(--rule); border-radius: var(--radius); padding: 0; display: flex; flex-direction: column; justify-content: flex-end; min-height: 0; overflow: hidden; }
+/* position: relative keeps absolutely placed pieces of a message (like a table's screen-reader caption) inside the
+   scrolling list; otherwise they sit where the message is, far down a long chat, and stretch the whole page. */
+.chat-scroll { position: relative; flex: 1; min-height: 0; overflow-y: auto; padding: 18px 20px; display: flex; flex-direction: column; gap: 12px; }
 .chat-log { display: flex; flex-direction: column; gap: 14px; }
 .chat-log:empty { display: none; }
 .msg.user { align-self: flex-end; max-width: 78%; }

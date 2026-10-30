@@ -184,3 +184,48 @@ def test_switching_chats_keeps_the_page_where_it_is(hub, account):
         assert pg.evaluate("window.scrollY") == 0
         b.close()
     assert not errors, errors
+
+
+def test_a_long_chat_with_a_table_never_stretches_the_page(hub, account, fixture_pkg):
+    # A dashboard deep in a long chat has a screen-reader caption placed absolutely. It must stay inside the
+    # message list: before, it sat thousands of pixels down and the page scrolled into blank space.
+    from playwright.sync_api import expect, sync_playwright
+
+    from .fake_llm import FakeLLM
+    hub.importer.import_package(fixture_pkg)                           # courses for the dashboard
+    long = "\n\n".join(f"Paragraph {i}: " + "word " * 60 for i in range(12))
+    with serve(hub, [], answer=long) as (base, tok, api), sync_playwright() as p:
+        r = api.assistant.send(account["id"], "Question 0")
+        cid = r["conversation_id"]
+        api.assistant.wait(cid, 30)
+        for i in range(1, 3):
+            api.assistant.send(account["id"], f"Question {i}", conversation_id=cid)
+            api.assistant.wait(cid, 30)
+        dash = FakeLLM([("show_dashboard", {})], answer="Here it is.")
+        try:
+            api.assistant.update_config({"preset": "custom", "base_url": dash.url + "/v1", "model": "m"})
+            api.assistant.send(account["id"], "Show my dashboard", conversation_id=cid)
+            api.assistant.wait(cid, 30)
+        finally:
+            dash.stop()
+        b = p.chromium.launch()
+        pg = b.new_page(viewport={"width": 1000, "height": 560})
+        errors = []
+        pg.on("pageerror", lambda e: errors.append(str(e)))
+        pg.goto(f"{base}/?token={tok}")
+        pg.goto(f"{base}/#/assistant/{cid}")
+        expect(pg.locator(".dash-t")).to_have_count(1)
+        page_h = "document.documentElement.scrollHeight"
+        assert pg.evaluate(page_h) == pg.evaluate("document.querySelector('.shell').offsetHeight")
+        composer = pg.locator(".composer").bounding_box()
+        pg.mouse.move(300, 120)
+        for _ in range(20):                                             # scroll well past the end
+            pg.mouse.wheel(0, 150)
+            pg.wait_for_timeout(40)
+        pg.wait_for_timeout(200)
+        assert pg.evaluate("window.scrollY + window.innerHeight") <= pg.evaluate(page_h) + 1
+        assert abs(pg.locator(".composer").bounding_box()["y"] - composer["y"]) < 2      # nothing jumped
+        expect(pg.get_by_role("button", name="⤢ Focus")).to_be_in_viewport()
+        expect(pg.locator("#sidebar")).to_be_in_viewport()
+        b.close()
+    assert not errors, errors
