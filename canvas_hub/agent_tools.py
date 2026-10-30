@@ -587,8 +587,21 @@ def h_show_choices(ctx, a):
 # ---- stateful components, artifacts and viewers ------------------------------------
 def _component_display(ctx, view: dict, verb: str) -> dict:
     desc = ctx.api.hub.components.describe(view_account(ctx, view), view["id"])
-    t = desc["totals"]
-    if view["kind"] == "score_model":
+    t = desc.get("totals") or {}
+    if view["kind"] == "grade_projector":
+        pj = desc["projection"]
+        head = (f"{verb} grade projection #{view['id']} '{view['title']}': {pj['percent']}% ({pj['letter']})"
+                if pj["percent"] is not None else f"{verb} grade projection #{view['id']} '{view['title']}' (no scores yet)")
+        if pj["needed_on_remaining"]:
+            head += "; needed on remaining work: " + ", ".join(
+                f"{n['letter']} {n['needs']}%" if n["reachable"] else f"{n['letter']} out of reach" for n in pj["needed_on_remaining"])
+        if pj["weights_missing"]:
+            head += ". Category weights are missing, so points were pooled; ask the user for the syllabus weights"
+    elif view["kind"] == "hours_tracker":
+        sm = desc["summary"]
+        head = (f"{verb} hours tracker #{view['id']} '{view['title']}': {sm['total']:g} of {sm['target']:g} h "
+                f"(minimum {sm['minimum']:g}), status {sm['status']}" + (f", {sm['points']:g} points" if sm["points"] is not None else ""))
+    elif view["kind"] == "score_model":
         head = (f"{verb} score model #{view['id']} '{view['title']}': booked {t['booked']:g}, projected {t['projected']:g}, "
                 f"ceiling {t['ceiling']:g}, lost {t['lost']:g}")
         if t.get("threshold") is not None:
@@ -631,6 +644,121 @@ def h_show_checklist(ctx, a):
     if a.get("pin"):
         v = ctx.api.hub.components.pin(aid, v["id"], True)
     return _component_display(ctx, v, "Created")
+
+
+def h_show_grade_projector(ctx, a):
+    aid = _account(ctx, a)
+    spec = {k: a[k] for k in ("title", "categories", "scale") if a.get(k) is not None}
+    if not spec.get("categories") and a.get("course_id"):
+        spec["categories"] = _draft_categories(ctx, aid, str(a["course_id"]))
+        spec.setdefault("title", f"What-if grade · course {a['course_id']}")
+    v = ctx.api.hub.components.create(aid, "grade_projector", spec, conversation_id=ctx.conversation_id)
+    if a.get("pin"):
+        v = ctx.api.hub.components.pin(aid, v["id"], True)
+    return _component_display(ctx, v, "Created")
+
+
+def _draft_categories(ctx, aid: int, course_id: str) -> list[dict]:
+    lines = h_course_score_lines(ctx, {"course_id": course_id})
+    cats: dict[str, dict] = {}
+    for b in lines["buckets"]:
+        g = b.get("group") or "Assignments"
+        c = cats.setdefault(g, {"id": re.sub(r"[^\w.:-]", "_", g)[:60] or "g", "name": g,
+                                "weight": lines["group_weights"].get(g), "items": []})
+        c["items"].append({"id": b["id"], "label": b["label"], "max": b["max"], "item_id": b.get("item_id"),
+                           "score": b.get("earned") if b["status"] in ("earned", "lost") else None})
+    if not cats:
+        raise InvalidInput("no graded assignments found for that course")
+    return list(cats.values())
+
+
+def h_show_hours_tracker(ctx, a):
+    aid = _account(ctx, a)
+    spec = {k: a[k] for k in ("title", "target", "minimum", "points", "deadline", "source", "unit") if a.get(k) is not None}
+    state = {"entries": a.get("entries") or [], "refreshed_at": a.get("refreshed_at")}
+    v = ctx.api.hub.components.create(aid, "hours_tracker", spec, conversation_id=ctx.conversation_id, state=state)
+    if a.get("pin"):
+        v = ctx.api.hub.components.pin(aid, v["id"], True)
+    return _component_display(ctx, v, "Created")
+
+
+def h_set_reminder(ctx, a):
+    aid = _account(ctx, a)
+    r = ctx.api.hub.reminders.create(aid, title=a["title"], remind_at=a["remind_at"], item_id=a.get("item_id"),
+                                     annotation_id=a.get("note_id"), note=a.get("note"), created_by="assistant")
+    return {"reminder": r, "note": "Shown by Canvas Hub while it is running (toast, 🔔 bell, optional desktop notification)."}
+
+
+def h_list_reminders(ctx, a):
+    return {"reminders": ctx.api.hub.reminders.list(_account(ctx, a), a.get("status") or "pending")}
+
+
+def h_show_kanban(ctx, a):
+    aid = _account(ctx, a)
+    tasks = [t for t in ctx.api.hub.annotations.list(aid, kind="task") if not a.get("course_id")
+             or t.get("course_canvas_id") == str(a["course_id"])]
+    counts = {s: sum(1 for t in tasks if t["task_state"] == s) for s in ("open", "in_progress", "blocked", "done")}
+    return _display("kanban", {"title": a.get("title") or "To-do board", "course_id": a.get("course_id")},
+                    "Showed a to-do board: " + ", ".join(f"{v} {k.replace('_', ' ')}" for k, v in counts.items())
+                    + ". The user drags cards between columns (local to-dos only).")
+
+
+def h_show_timeline(ctx, a):
+    """Modules across the term with unlock dates, prerequisites and due dates inside them."""
+    aid = _account(ctx, a)
+    hub = ctx.api.hub
+    cid = str(a["course_id"])
+    acct = hub.identity.get_account(aid)
+    tz = acct.get("time_zone")
+    mods = []
+    for r in hub.db.query("""SELECT id, canvas_id, title FROM items WHERE account_id=? AND item_type='module'
+                             AND course_canvas_id=? AND current_revision>0""", (aid, cid)):
+        f = hub.query._fields(r["id"])
+        mods.append({"id": r["canvas_id"], "item_id": r["id"], "title": r["title"], "position": f.get("position") or 0,
+                     "unlock_at": dates.format_local(f.get("unlock_at"), tz) if f.get("unlock_at") else None,
+                     "unlock_iso": (dates.instant(f.get("unlock_at")) or None) and dates.instant(f.get("unlock_at")).isoformat(),
+                     "prerequisites": f.get("prerequisite_module_ids") or [], "sequential": bool(f.get("require_sequential_progress")),
+                     "state": f.get("progress_state"), "items": [i.get("title") for i in (f.get("items") or [])][:30]})
+    mods.sort(key=lambda m: m["position"])
+    names = {m["id"]: m["title"] for m in mods}
+    for m in mods:
+        m["prerequisites"] = [names.get(p, p) for p in m["prerequisites"]]
+    now = datetime.now(timezone.utc)
+    dl = hub.query.deadlines(aid, start=(now - timedelta(days=120)).isoformat(), end=(now + timedelta(days=240)).isoformat(),
+                             time_zone=tz, course_id=cid, include_calendar=True, limit=300)
+    marks = [{"title": d["title"], "when": d["date"]["iso"], "kind": d["item_type"], "item_id": d["item_id"],
+              "done": bool((d.get("submission") or {}).get("submitted_at"))} for d in dl["deadlines"] if d["date"].get("iso")]
+    if not mods and not marks:
+        raise InvalidInput("no modules or dated items collected for that course")
+    return _display("timeline", {"title": a.get("title") or "Term timeline", "modules": mods, "marks": marks, "now": now.isoformat()},
+                    f"Showed a timeline of {len(mods)} module(s) and {len(marks)} dated item(s)"
+                    + (". Prerequisites: " + "; ".join(f"{m['title']} needs {', '.join(m['prerequisites'])}" for m in mods if m["prerequisites"])
+                       if any(m["prerequisites"] for m in mods) else "") + ".")
+
+
+def h_show_heatmap(ctx, a):
+    """Workload density per day: deadlines (weighted by points) and dated to-dos."""
+    aid = _account(ctx, a)
+    hub = ctx.api.hub
+    acct = hub.identity.get_account(aid)
+    tz = acct.get("time_zone")
+    weeks = max(2, min(a.get("weeks") or 10, 26))
+    now = datetime.now(timezone.utc)
+    dl = hub.query.deadlines(aid, start=(now - timedelta(days=7)).isoformat(), end=(now + timedelta(weeks=weeks)).isoformat(),
+                             time_zone=tz, include_calendar=False, limit=500)
+    days: dict[str, dict] = {}
+    for d in dl["deadlines"]:
+        day = (d.get("date_local") or "")[:10]
+        if not day:
+            continue
+        e = days.setdefault(day, {"count": 0, "points": 0.0, "titles": []})
+        e["count"] += 1
+        e["points"] += float(d.get("points_possible") or 0)
+        e["titles"].append(f"{d['title']} ({d['course_title'] or ''})")
+    return _display("heatmap", {"title": a.get("title") or "Workload", "days": days, "weeks": weeks,
+                                "start": (now - timedelta(days=7)).date().isoformat()},
+                    f"Showed a workload heatmap for {weeks} weeks; busiest days: "
+                    + "; ".join(f"{k} ({v['count']})" for k, v in sorted(days.items(), key=lambda x: -x[1]["count"])[:5]) + ".")
 
 
 def h_get_component(ctx, a):
@@ -963,7 +1091,7 @@ TOOLS: list[AgentTool] = [
     AgentTool("list_notes", "The user's own local notes and to-dos, optionally filtered by words in the title or body. "
               "Long bodies are cut at 2,000 characters; use get_note for the whole text.", "read",
               {"item_id": {"type": "integer"}, "kind": {"type": "string", "enum": ["note", "task"]},
-               "task_state": {"type": "string", "enum": ["open", "done"]}, "query": {"type": "string"}}, [], h_list_notes),
+               "task_state": {"type": "string", "enum": ["open", "in_progress", "blocked", "done"]}, "query": {"type": "string"}}, [], h_list_notes),
     AgentTool("get_note", "Read one local note in full (up to 100,000 characters per call; page with offset).", "read",
               {"note_id": {"type": "integer"}, "offset": {"type": "integer", "minimum": 0},
                "max_chars": {"type": "integer", "minimum": 1000, "maximum": 100000}}, ["note_id"], h_get_note),
@@ -985,6 +1113,8 @@ TOOLS: list[AgentTool] = [
     AgentTool("find_clashes", "Cross-course conflicts: days with two or more unsubmitted deadlines, and Canvas events "
               "(e.g. exams) that overlap the user's saved class times.", "read",
               {"days_ahead": {"type": "integer", "minimum": 1, "maximum": 120}}, [], h_find_clashes),
+    AgentTool("list_reminders", "The user's reminders (pending by default).", "read",
+              {"status": {"type": "string", "enum": ["pending", "fired", "dismissed"]}}, [], h_list_reminders),
     AgentTool("whats_new", "Important changes since the user last looked: new announcements and assignments, edited due "
               "dates and instructions, newly posted grades, items that disappeared. Unread ones are flagged.", "read",
               {"limit": {"type": "integer", "minimum": 1, "maximum": 60}, "mark_seen": {"type": "boolean"}}, [], h_whats_new),
@@ -997,13 +1127,18 @@ TOOLS: list[AgentTool] = [
               "and never a submission.", "notes",
               {"kind": {"type": "string", "enum": ["note", "task"]}, "title": {"type": "string"}, "body": {"type": "string"},
                "item_id": {"type": "integer"}, "local_due": {"type": "string", "description": _DATE_DESC},
-               "task_state": {"type": "string", "enum": ["open", "done"]}}, ["kind"], h_create_note),
+               "task_state": {"type": "string", "enum": ["open", "in_progress", "blocked", "done"]}}, ["kind"], h_create_note),
     AgentTool("update_note", "Edit a local note or mark a local to-do open/done. mode=append (or prepend) adds the body "
               "text to the existing body instead of replacing it.", "notes",
               {"note_id": {"type": "integer"}, "title": {"type": "string"}, "body": {"type": "string"},
                "mode": {"type": "string", "enum": ["replace", "append", "prepend"]},
-               "task_state": {"type": "string", "enum": ["open", "done"]}, "local_due": {"type": "string", "description": _DATE_DESC}},
+               "task_state": {"type": "string", "enum": ["open", "in_progress", "blocked", "done"]}, "local_due": {"type": "string", "description": _DATE_DESC}},
               ["note_id"], h_update_note),
+    AgentTool("set_reminder", "Set a reminder for the user (e.g. a day before a deadline), optionally linked to a Canvas "
+              "item or a local to-do. Canvas Hub shows it while it is running.", "notes",
+              {"title": {"type": "string"}, "remind_at": {"type": "string", "description": _DATE_DESC},
+               "item_id": {"type": "integer"}, "note_id": {"type": "integer"}, "note": {"type": "string"}},
+              ["title", "remind_at"], h_set_reminder),
     AgentTool("save_file", "Save finished work as a file in Canvas Hub (e.g. study-plan.md, notes.csv). The user can "
               "download it, and it can be attached to a prepared submission.", "notes",
               {"filename": {"type": "string"}, "content": {"type": "string"}, "title": {"type": "string"},
@@ -1175,6 +1310,40 @@ TOOLS += [
                        "due": {"type": "string"}, "item_id": {"type": "integer"}, "note": {"type": "string"},
                        "done": {"type": "boolean"}}, "required": ["label"]}}}, "required": ["rows"]}}},
               ["sections"], h_show_checklist),
+    AgentTool("show_grade_projector", "Create a what-if grade projection (saved): categories with weights (percent of the "
+              "course grade) and items with max and actual score; the user enters hypothetical scores for ungraded work and "
+              "sees the course percentage, the letter grade and what is needed on the remaining work for each letter. "
+              "Give course_id alone to draft it from Canvas assignment groups (weights are often 0 in Canvas: ask the user "
+              "for the syllabus weights and pass categories instead).", "ui",
+              {"title": {"type": "string"}, "course_id": {"type": "string"}, "pin": {"type": "boolean"},
+               "categories": {"type": "array", "items": {"type": "object", "properties": {
+                   "id": {"type": "string"}, "name": {"type": "string"}, "weight": {"type": "number"},
+                   "drop_lowest": {"type": "integer"},
+                   "items": {"type": "array", "items": {"type": "object", "properties": {
+                       "id": {"type": "string"}, "label": {"type": "string"}, "max": {"type": "number"},
+                       "score": {"type": "number"}, "item_id": {"type": "integer"}}, "required": ["label", "max"]}}},
+                   "required": ["name", "items"]}},
+               "scale": {"type": "array", "items": {"type": "object", "properties": {
+                   "letter": {"type": "string"}, "min": {"type": "number"}}, "required": ["letter", "min"]}}},
+              [], h_show_grade_projector),
+    AgentTool("show_hours_tracker", "Create an hours tracker (saved) for hour-based requirements such as service hours: "
+              "nothing counts until `minimum` hours, points scale up to `target`; if the deadline passes below the "
+              "minimum the line is lost. The user logs entries and records when they last checked the source portal.", "ui",
+              {"title": {"type": "string"}, "target": {"type": "number"}, "minimum": {"type": "number"},
+               "points": {"type": "number"}, "deadline": {"type": "string", "description": _DATE_DESC},
+               "source": {"type": "string", "description": "where the official count lives, e.g. the Engage portal"},
+               "entries": {"type": "array", "items": {"type": "object", "properties": {
+                   "date": {"type": "string"}, "hours": {"type": "number"}, "note": {"type": "string"}},
+                   "required": ["date", "hours"]}},
+               "refreshed_at": {"type": "string"}, "pin": {"type": "boolean"}}, ["target"], h_show_hours_tracker),
+    AgentTool("show_kanban", "Show the user's local to-dos as a board (open / in progress / blocked / done) they can drag "
+              "cards across.", "ui", {"title": {"type": "string"}, "course_id": {"type": "string"}}, [], h_show_kanban),
+    AgentTool("show_timeline", "Show a course's modules across the term (unlock dates, prerequisites such as 'module 3 "
+              "needs module 2') with due dates and exams as markers.", "ui",
+              {"course_id": {"type": "string"}, "title": {"type": "string"}}, ["course_id"], h_show_timeline),
+    AgentTool("show_heatmap", "Show a calendar heatmap of workload (deadlines per day, weighted by points) for the next "
+              "weeks across all courses.", "ui", {"weeks": {"type": "integer", "minimum": 2, "maximum": 26},
+                                                  "title": {"type": "string"}}, [], h_show_heatmap),
     AgentTool("update_component", "Change a saved score model or checklist: replace its definition (spec, same shape as "
               "when created), set its state, or pin it to Trackers.", "ui",
               {"component_id": {"type": "integer"}, "spec": {"type": "object"}, "state": {"type": "object"},

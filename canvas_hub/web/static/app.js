@@ -255,6 +255,11 @@ async function pollBell() {
     if (first) new Notification("Canvas Hub", { body: `${first.headline}: ${first.title}${f.unread > 1 ? ` (+${f.unread - 1} more)` : ""}` });
   }
   bellLastUnread = f.unread;
+  const due = await api(A("/reminders/due"), { method: "POST" }).catch(() => null);
+  for (const r of (due && due.reminders) || []) {
+    toast(`⏰ ${r.title}`);
+    if (store.get("desktopNotify") === "1" && "Notification" in window && Notification.permission === "granted") new Notification("Canvas Hub reminder", { body: r.title });
+  }
   if (!bellEl.querySelector(".bell-panel").hidden) drawBell();
 }
 function drawBell() {
@@ -502,6 +507,7 @@ VIEWS.deadlines = async (main, _p, params) => {
             h("span", { title: "When the due date was last read from Canvas" }, "date read " + ago(d.date_observed_at)),
             d.source_url ? h("a", { href: d.source_url, target: "_blank", rel: "noopener noreferrer" }, "Open in Canvas") : null)),
         h("div", { class: "row", style: "justify-content:flex-end" }, submissionPill(d.submission),
+          d.item_type !== "calendar_event" ? C.remindButton({ title: `Due: ${d.title}`, due: d.date.iso, item_id: d.item_id }) : null,
           d.item_type !== "calendar_event" ? localTaskToggle(d) : null));
     })));
   })) : [empty("Nothing in this range", "No collected deadlines fall in this window.")];
@@ -833,13 +839,54 @@ VIEWS.coverage = async (main) => {
 // ---------- notes ----------
 VIEWS.notes = async (main, _p, params) => {
   const filter = params.get("show") || "open";
-  const [r, files] = await Promise.all([api(A("/annotations") + qs(filter === "all" ? {} : filter === "notes" ? { kind: "note" } : { kind: "task", task_state: filter })),
-    api(A("/files")).catch(() => ({ files: [] }))]);
+  const q = filter === "all" || filter === "board" ? {} : filter === "notes" ? { kind: "note" } : { kind: "task", task_state: filter === "open" ? "active" : filter };
+  const [r, files] = await Promise.all([api(A("/annotations") + qs(q)), api(A("/files")).catch(() => ({ files: [] }))]);
   const title = h("input", { type: "text", placeholder: "To-do title", style: "flex:1" });
   const due = h("input", { type: "datetime-local" });
-  const chips = h("div", { class: "chips" }, [["open", "Open to-dos"], ["done", "Done"], ["notes", "Notes"], ["all", "Everything"]].map(([k, l]) =>
+  const chips = h("div", { class: "chips" }, [["open", "Open to-dos"], ["board", "Board"], ["done", "Done"], ["notes", "Notes"], ["all", "Everything"]].map(([k, l]) =>
     h("button", { class: "chip" + (k === filter ? " on" : ""), onclick: () => { location.hash = `#/notes?show=${k}`; } }, l)));
-  mount(main, pageHead("Notes & tasks", "Your own notes and to-dos. Stored locally, kept across every refresh, and never sent to Canvas."),
+  const patch = (a, body) => guard(() => api(A(`/annotations/${a.id}`), { method: "PATCH", body }));
+  const STATES = [["open", "To do"], ["in_progress", "In progress"], ["blocked", "Blocked"], ["done", "Done"]];
+  // In place: click the title or text to edit; "- [ ]" lines in a body are checkboxes.
+  const editable = (a, field, multiline) => {
+    const show = () => {
+      const val = a[field] || "";
+      if (field === "body" && /^\s*[-*] \[[ xX]\]/m.test(val)) {
+        const lines = val.split("\n");
+        return h("div", { class: "note-body", title: "Click a line's text to edit" }, lines.map((ln, i) => {
+          const m = ln.match(/^(\s*[-*] \[)([ xX])(\]\s?)(.*)$/);
+          if (!m) return h("div", { class: "small", onclick: () => edit() }, ln || "\u00a0");
+          return h("label", { class: "check small" }, h("input", { type: "checkbox", checked: m[2] !== " " ? true : null, onchange: async (e) => {
+            lines[i] = m[1] + (e.target.checked ? "x" : " ") + m[3] + m[4]; const r2 = await patch(a, { body: lines.join("\n") }); if (r2) a.body = r2.body; } }),
+            h("span", { onclick: (e) => { e.preventDefault(); edit(); } }, m[4]));
+        }));
+      }
+      return h(field === "title" ? "span" : "div", { class: field === "title" ? "strong editable" : "small editable note-body", tabindex: "0", title: "Click to edit",
+        onclick: () => edit(), onkeydown: (e) => { if (e.key === "Enter" && field === "title") edit(); } }, val || (field === "title" ? "(untitled)" : "Add details…"));
+    };
+    const box = h("span", { class: field === "body" ? "edit-box block" : "edit-box" }, show());
+    const edit = () => {
+      const inp = h(multiline ? "textarea" : "input", { class: multiline ? "edit-area" : "edit-in", "aria-label": `Edit ${field}` });
+      inp.value = a[field] || "";
+      const save = async () => { if (inp.value !== (a[field] || "")) { const r2 = await patch(a, { [field]: inp.value }); if (r2) a[field] = r2[field]; } mount(box, show()); };
+      inp.addEventListener("blur", save);
+      inp.addEventListener("keydown", (e) => { if (e.key === "Escape") mount(box, show()); if (e.key === "Enter" && (!multiline || e.metaKey || e.ctrlKey)) { e.preventDefault(); inp.blur(); } });
+      mount(box, inp); inp.focus();
+    };
+    return box;
+  };
+  const list = r.annotations.length ? h("ul", { class: "list" }, r.annotations.map((a) => h("li", null, h("div", { class: "spread" },
+    h("div", { class: "row" }, a.kind === "task" ? h("input", { type: "checkbox", checked: a.task_state === "done" ? true : null, "aria-label": "Done (local)",
+      onchange: async (e) => { await patch(a, { task_state: e.target.checked ? "done" : "open" }); route(); } }) : pill("muted plain", "Note"),
+      editable(a, "title", false),
+      a.item_id ? h("a", { href: `#/item/${a.item_id}`, class: "small" }, a.item_title || "linked item") : null),
+    h("div", { class: "row" }, a.local_due ? h("span", { class: "small muted" }, "due " + fmtDate(a.local_due), " · ", C.countdown(a.local_due)) : null,
+      a.kind === "task" ? h("select", { class: "sm-select", "aria-label": "State", onchange: async (e) => { await patch(a, { task_state: e.target.value }); route(); } },
+        STATES.map(([v, l]) => h("option", { value: v, selected: a.task_state === v ? true : null }, l))) : null,
+      a.kind === "task" ? C.remindButton({ title: a.title || "To-do", due: a.local_due, annotation_id: a.id }) : null,
+      h("button", { class: "ghost sm", onclick: async () => { await guard(() => api(A(`/annotations/${a.id}`), { method: "DELETE" })); route(); } }, "Delete"))),
+    editable(a, "body", true)))) : empty("Nothing here", "");
+  mount(main, pageHead("Notes & tasks", "Your own notes and to-dos. Stored locally, kept across every refresh, and never sent to Canvas. Click any text to edit it."),
     h("div", { class: "card" }, h("div", { class: "row" }, title, due, h("button", { class: "primary", onclick: async () => {
       if (!title.value.trim()) return;
       const body = { kind: "task", title: title.value };
@@ -847,14 +894,7 @@ VIEWS.notes = async (main, _p, params) => {
       await guard(() => api(A("/annotations"), { method: "POST", body })); route();
     } }, "Add to-do"))),
     h("div", { style: "margin:14px 0 8px" }, chips),
-    h("div", { class: "card" }, r.annotations.length ? h("ul", { class: "list" }, r.annotations.map((a) => h("li", null, h("div", { class: "spread" },
-      h("div", { class: "row" }, a.kind === "task" ? h("input", { type: "checkbox", checked: a.task_state === "done" ? true : null, "aria-label": "Done (local)",
-        onchange: async (e) => { await guard(() => api(A(`/annotations/${a.id}`), { method: "PATCH", body: { task_state: e.target.checked ? "done" : "open" } })); route(); } }) : pill("muted plain", "Note"),
-        h("span", { class: "strong" }, a.title || (a.body || "").slice(0, 80)),
-        a.item_id ? h("a", { href: `#/item/${a.item_id}`, class: "small" }, a.item_title || "linked item") : null),
-      h("div", { class: "row" }, a.local_due ? h("span", { class: "small muted" }, "due " + fmtDate(a.local_due)) : null,
-        h("button", { class: "ghost sm", onclick: async () => { await guard(() => api(A(`/annotations/${a.id}`), { method: "DELETE" })); route(); } }, "Delete"))),
-      a.body && a.title ? h("div", { class: "small", style: "white-space:pre-wrap;margin-top:4px" }, a.body) : null))) : empty("Nothing here", "")),
+    filter === "board" ? C.kanbanView({ title: "To-do board" }) : h("div", { class: "card" }, list),
     h("div", { style: "margin-top:16px" }, C.filesCard(files.files)));
 };
 

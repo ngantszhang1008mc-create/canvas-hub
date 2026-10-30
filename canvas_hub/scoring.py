@@ -30,9 +30,10 @@ from __future__ import annotations
 
 import math
 import re
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from .util import InvalidInput
+from .util import InvalidInput, parse_iso
 
 STATUSES = ("earned", "pending", "lost", "locked", "excused")
 GATING = ("none", "all_or_nothing", "min_threshold")
@@ -164,6 +165,35 @@ def _line(b: dict, state: dict) -> dict:
     return res
 
 
+def alerts(model: dict, lines: list[dict], totals: dict, now: datetime | None = None) -> list[dict]:
+    """Rule-driven warnings; the page computes the same list."""
+    now = now or datetime.now(timezone.utc)
+    out = []
+    thr = totals.get("threshold")
+    by = {b["id"]: b for b in model["buckets"]}
+    if thr is not None:
+        if totals["ceiling"] < thr - 1e-9:
+            out.append({"level": "bad", "text": f"Even full marks on everything left gives {totals['ceiling']:g}, below the pass mark {thr:g}."})
+        elif not totals["passes"]:
+            out.append({"level": "bad", "text": f"Below the pass mark by {thr - totals['projected']:g} with this plan."})
+        elif totals["margin"] < max(1.0, 0.05 * thr):
+            out.append({"level": "warn", "text": f"Only {totals['margin']:g} to spare: losing any line worth more fails."})
+    for x in lines:
+        b = by[x["id"]]
+        if x["status"] != "pending" or not x["included"]:
+            continue
+        due = parse_iso(b["due"]) if b.get("due") and len(b["due"]) > 10 else None
+        if x["gated"] and b["unit"] == "hours":
+            out.append({"level": "bad", "text": f"{b['label']}: counts 0 until {b['min_value']:g} h are reached."})
+        elif x["gated"]:
+            out.append({"level": "bad", "text": f"{b['label']}: {x['note']} — currently worth 0."})
+        if due and due < now:
+            out.append({"level": "warn", "text": f"{b['label']} is past its due date but still planned."})
+        elif b["gating"] == "all_or_nothing" and due and due - now < timedelta(days=7):
+            out.append({"level": "warn", "text": f"At risk: {b['label']} is all-or-nothing and due within a week."})
+    return out
+
+
 def evaluate(model: dict, state: dict | None = None) -> dict:
     st = normalize_state(model, state)
     lines = [_line(b, st) for b in model["buckets"]]
@@ -191,4 +221,4 @@ def evaluate(model: dict, state: dict | None = None) -> dict:
         elif x["status"] == "pending":
             g["remaining" if x["included"] else "skipped"] += x["points"] if x["included"] else x["max"]
         g["lost"] += x["lost"]
-    return {"lines": lines, "totals": totals, "groups": groups, "state": st}
+    return {"lines": lines, "totals": totals, "groups": groups, "state": st, "alerts": alerts(model, lines, totals)}

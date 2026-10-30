@@ -19,6 +19,7 @@ from .jobs import JobService
 from .notifications import NotificationService
 from .planner import PlannerService
 from .query import QueryService
+from .reminders import ReminderService
 from .requests import RequestService
 from .resources import ResourceService
 from .search import SearchService
@@ -48,6 +49,7 @@ class Hub:
         self.writes = WriteService(self.db, self.identity, self.query, self.files, self.settings)
         self.notifications = NotificationService(self.db, self.settings)
         self.datefinder = DateFinder(self.db, self.query, self.annotations, self.settings)
+        self.reminders = ReminderService(self.db)
 
     def close(self) -> None:
         self.db.close()

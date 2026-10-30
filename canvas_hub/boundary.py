@@ -312,6 +312,22 @@ class HubAPI:
             added += 1
         return {"found": len(rows), "added": added, "class_times": self.hub.planner.list_classes(a["id"])}
 
+    # ---- reminders -----------------------------------------------------------------------------
+    def list_reminders(self, account_id, status="pending") -> dict:
+        return {"reminders": self.hub.reminders.list(self._acct(account_id)["id"], status or None)}
+
+    def create_reminder(self, account_id, data: dict) -> dict:
+        allowed = {"title", "remind_at", "item_id", "annotation_id", "note"}
+        if set(data) - allowed:
+            raise InvalidInput(f"unknown fields {sorted(set(data) - allowed)}")
+        return self.hub.reminders.create(self._acct(account_id)["id"], created_by="user", **data)
+
+    def due_reminders(self, account_id) -> dict:
+        return {"reminders": self.hub.reminders.due(self._acct(account_id)["id"])}
+
+    def dismiss_reminder(self, account_id, rid) -> dict:
+        return self.hub.reminders.dismiss(self._acct(account_id)["id"], rid)
+
     # ---- saved files ------------------------------------------------------------------------
     def list_files(self, account_id) -> dict:
         return {"files": self.hub.files.list(self._acct(account_id)["id"])}

@@ -555,6 +555,36 @@ canvas-hub mcp --allow-settings     # + scope changes
   - LTI tools are not launched, because launching can record attendance or start attempts.
   - OCR is phase 4.
 
+### Phase 3: projections, hours, board, timeline, workload, reminders
+
+- **Grade projector** (`projections.py`, component kind `grade_projector`, tool `show_grade_projector`):
+  - Categories with weights and items with max and score; ungraded items take *what-if* scores from the saved state.
+  - Like Canvas, only categories with counted items are included, with weights re-normalised; with no weights, points are pooled. `drop_lowest` is supported.
+  - For each letter it reports the uniform score needed on everything still ungraded, found by bisection. A value over 100 means out of reach (shown as "102% (over 100)").
+  - `course_id` alone drafts categories from Canvas assignment groups. Canvas weights are often 0, so the tool tells the assistant to ask for the syllabus weights.
+- **Hours tracker** (kind `hours_tracker`, tool `show_hours_tracker`):
+  - Logged entries add up. Nothing counts until `minimum`, then points scale up to `target`.
+  - Below the minimum when the deadline passes, the line is *lost* (the reset rule).
+  - It shows the hours needed per week, and when the total was last checked against the source portal.
+- **Score alerts:** `scoring.alerts` (mirrored in `components.js`) warns about:
+  - a ceiling below the pass mark;
+  - a plan that fails, or a thin margin;
+  - gated lines currently worth 0;
+  - planned lines past due;
+  - all-or-nothing lines due within a week.
+- **To-do states:** to-dos are now open / in_progress / blocked / done. `task_state="active"` means not done.
+  - `show_kanban` shows a board with drag-and-drop and ← / → buttons for keyboard users.
+  - **Notes & tasks** edits titles and bodies in place, ticks `- [ ]` lines, and has a **Board** view.
+- **Timeline** (`show_timeline`): a course's modules across the term, with unlock dates, prerequisites, and due/exam markers. **Workload heatmap** (`show_heatmap`): deadlines per day, weighted by points.
+- **Reminders** (`services/reminders.py`, table `reminders`):
+  - Set from Deadlines rows, to-dos and the board, or with `set_reminder` / `list_reminders`.
+  - The page asks `POST /reminders/due` when it polls the bell; each reminder fires once, as a toast and optionally a desktop notification.
+  - In-app only: no OS or external schedule is created.
+- **Export:** the component menu adds:
+  - `.ics` for anything with dates;
+  - a self-contained HTML snapshot, with its own CSP and no scripts;
+  - **Print / Save as PDF** for one component.
+
 ### Still left for Codex
 
 1. **Codex-side configuration.** Register `canvas-hub mcp` (with whatever flags the user chooses) in Codex's MCP configuration. Re-check [MCP tools for Codex](https://learn.chatgpt.com/docs/extend/mcp).

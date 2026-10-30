@@ -135,3 +135,15 @@ Writing to Canvas is real: use a low-stakes assignment or a draft.
 | 11.7 | **Deadlines → Dates found in course pages** | The COMP2711H midterm (Rm 2503/2504, 19:00–22:00) is suggested. **Confirm** puts it in the Planner |
 | 11.8 | **Courses** | AISC1000A / COMP4900 / LANG1406 duplicates show *Possible duplicate*; TEMG1011 shows *Not accessible*; empty or hidden shells are labelled |
 | 11.9 | Start `canvas-hub mcp --allow-fulfil` in Codex and ask it to serve requests | **Agent requests** shows Codex as connected; an open COMP1023 request is claimed |
+
+## 12. Projections, hours, board and reminders
+
+| # | Step | Expected |
+| --- | --- | --- |
+| 12.1 | Ask "Project my grade in <course> — the syllabus weights are …" | A grade projector with your graded items. The current percent matches Canvas's (graded categories only). Each letter shows the score needed on the rest, and an unreachable letter shows "over 100" |
+| 12.2 | Drag a what-if slider, or press **Assume on the rest: 80%** | The percent and letter update at once and are kept after a reload |
+| 12.3 | Ask for an SDE service-hours tracker (20 h, 10 h minimum, deadline from the syllabus), then log your hours | Below 10 h it shows *0 until 10 h* and an alert. It shows the hours needed per week and when you last checked Engage |
+| 12.4 | **Notes & tasks → Board**: move a to-do to *In progress* and another to *Blocked* | The states are kept, and the assistant's `show_kanban` shows the same board |
+| 12.5 | On a Deadlines row press ⏰ → **In 1 hour** (or a custom time a few minutes away) and leave the app open | A toast (and a desktop notification if enabled) appears once at that time |
+| 12.6 | Ask for a timeline of a course's modules and a workload heatmap | Locked modules show their unlock date and prerequisites; busy days are darker |
+| 12.7 | On a deadlines card choose **Copy ▾ → Download .ics (calendar)**, then open it in Calendar; on the projector choose **Print / Save as PDF** | The events import; the PDF contains only that component |

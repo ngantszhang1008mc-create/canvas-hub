@@ -11,7 +11,7 @@ from ..db import Database
 from ..util import InvalidInput, NotFound, now_iso, parse_iso
 
 _KINDS = ("note", "task")
-_TASK_STATES = ("open", "done")
+_TASK_STATES = ("open", "in_progress", "blocked", "done")
 
 
 class AnnotationService:
@@ -38,7 +38,7 @@ class AnnotationService:
         item = self._check_item(account_id, item_id)
         state = (task_state or "open") if kind == "task" else None
         if state and state not in _TASK_STATES:
-            raise InvalidInput("task_state must be 'open' or 'done'")
+            raise InvalidInput("task_state must be open, in_progress, blocked or done")
         now = now_iso()
         with self.db.tx() as c:
             aid = c.execute(
@@ -64,7 +64,7 @@ class AnnotationService:
             raise InvalidInput(f"cannot update {sorted(bad)}")
         if "task_state" in changes:
             if cur["kind"] != "task" or changes["task_state"] not in _TASK_STATES:
-                raise InvalidInput("task_state applies to tasks and must be 'open' or 'done'")
+                raise InvalidInput("task_state applies to tasks and must be open, in_progress, blocked or done")
         if changes.get("local_due") and not parse_iso(changes["local_due"]):
             raise InvalidInput("local_due must be an ISO-8601 timestamp with an offset")
         if not changes:
@@ -92,7 +92,9 @@ class AnnotationService:
         if kind:
             where.append("a.kind=?")
             params.append(kind)
-        if task_state:
+        if task_state == "active":                 # anything not done yet
+            where.append("a.task_state!='done'")
+        elif task_state:
             where.append("a.task_state=?")
             params.append(task_state)
         return [dict(r) for r in self.db.query(

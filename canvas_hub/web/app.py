@@ -419,6 +419,23 @@ def create_app(api: HubAPI, *, token: str, port: int) -> FastAPI:
             raise InvalidInput("calendar files are limited to 2 MB")
         return api.import_timetable(aid, raw.decode("utf-8", errors="replace"))
 
+    # ---- reminders -------------------------------------------------------------------------------
+    @app.get("/api/accounts/{aid}/reminders")
+    def reminders_list(aid: int, status: str | None = "pending"):
+        return api.list_reminders(aid, status)
+
+    @app.post("/api/accounts/{aid}/reminders")
+    async def reminders_create(aid: int, request: Request):
+        return api.create_reminder(aid, await body(request))
+
+    @app.post("/api/accounts/{aid}/reminders/due")
+    def reminders_due(aid: int):
+        return api.due_reminders(aid)
+
+    @app.post("/api/accounts/{aid}/reminders/{rid}/dismiss")
+    def reminders_dismiss(aid: int, rid: int):
+        return api.dismiss_reminder(aid, rid)
+
     # ---- saved files ------------------------------------------------------------------------
     @app.get("/api/accounts/{aid}/files")
     def files_list(aid: int):
