@@ -265,7 +265,7 @@ class HubAPI:
             def run():
                 same_user(self.worker.check_session(a["instance_id"], launch=True))
                 return CanvasWriter(self.worker._context(a["instance_id"]), inst["origin"]).send(job)
-            return self.worker.call(run, timeout=300)
+            return self.worker.submit(run)          # a Future: confirm waits, or leaves it `sending` until it ends
         r = self.hub.writes.confirm(a["id"], write_id, preview_hash, send)
         if r["status"] == "sent" and self.runner is not None:
             try:      # read the course again so the submission or reply shows up in Canvas Hub
