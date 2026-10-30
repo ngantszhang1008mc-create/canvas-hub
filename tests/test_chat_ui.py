@@ -129,3 +129,41 @@ def test_scrolling_the_page_grows_the_chat_under_the_tabs(hub, account, width, h
         assert pg.evaluate("window.scrollY") > 0
         b.close()
     assert not errors, errors
+
+
+def test_switching_chats_keeps_the_page_where_it_is(hub, account):
+    from playwright.sync_api import expect, sync_playwright
+    with serve(hub, [], answer=ANSWER) as (base, tok, api), sync_playwright() as p:
+        for i in range(16):                                         # enough chats for the list to scroll
+            r = api.assistant.send(account["id"], f"Question {i}")
+            api.assistant.wait(r["conversation_id"], 30)
+        b = p.chromium.launch()
+        pg = b.new_page(viewport={"width": 1280, "height": 800})
+        errors = []
+        pg.on("pageerror", lambda e: errors.append(str(e)))
+        pg.goto(f"{base}/?token={tok}")
+        pg.goto(f"{base}/#/assistant")
+        expect(pg.locator(".conv-list .conv")).to_have_count(16)
+        pg.evaluate("window.scrollTo(0, 10000)")
+        pg.locator(".conv-scroll").evaluate("el => { el.scrollTop = el.scrollHeight; }")
+        pg.wait_for_timeout(200)
+        y, list_top = pg.evaluate("window.scrollY"), pg.locator(".conv-scroll").evaluate("el => el.scrollTop")
+        composer = pg.locator(".composer").bounding_box()
+        assert y > 40 and list_top > 100
+        seen = []
+        for name in ("Question 0", "Question 1"):                   # the oldest chats, at the end of the list
+            pg.locator(".conv").filter(has=pg.get_by_text(name, exact=True)).click()
+            expect(pg.locator(".msg.user .bubble").first).to_have_text(name)
+            for _ in range(10):                                     # it stays put, not just ends up there
+                seen.append(pg.evaluate("window.scrollY"))
+                pg.wait_for_timeout(30)
+            assert pg.locator(".conv-scroll").evaluate("el => el.scrollTop") == list_top
+            assert abs(pg.locator(".composer").bounding_box()["y"] - composer["y"]) < 2
+        assert set(seen) == {y}, seen
+        pg.get_by_role("button", name="Settings").click()           # the tabs keep it too
+        expect(pg.get_by_role("button", name="Save & test")).to_be_visible()
+        pg.get_by_role("button", name="Chat").click()
+        expect(pg.locator(".composer")).to_be_visible()
+        assert pg.evaluate("window.scrollY") == y
+        b.close()
+    assert not errors, errors

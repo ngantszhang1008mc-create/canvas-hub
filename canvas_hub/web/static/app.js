@@ -359,6 +359,7 @@ async function startJob(mode, scope) {
 
 // ---------- router ----------
 const VIEWS = {};
+let lastView = null;          // the view route() drew last
 async function route() {
   const hash = location.hash || "#/overview";
   const [path, query] = hash.slice(2).split("?");
@@ -370,16 +371,28 @@ async function route() {
   let view = parts[0] || "overview";
   if (!S.accountId && !["setup", "settings"].includes(view)) view = "setup";
   setActiveNav(view === "course" ? "courses" : view === "item" ? "" : view);
+  // Switching between chats (or the assistant's tabs) keeps the page where it is: the old page stays on screen
+  // until the new one is drawn, then the scroll position is put back.
+  const keep = view === "assistant" && lastView === "assistant";
+  lastView = view;
+  const scrollY = window.scrollY;
   // Each page gets a fresh #main. A page still loading from before keeps the old, detached element, so when its
   // data arrives late it draws there instead of over the page the user has moved on to.
   const old = $("#main");
   const main = old.cloneNode(false);
-  main.classList.remove("fill");
+  if (!keep) main.classList.remove("fill");
+  const lists = keep ? [...old.querySelectorAll(".conv-scroll, .chat-scroll")].map((el) => [el, el.scrollTop]) : [];
   old.replaceWith(main);
-  mount(main, h("div", { class: "muted" }, "Loading…"));
+  if (keep) {
+    main.append(...old.childNodes);
+    for (const [el, top] of lists) el.scrollTop = top;          // moving them resets where they were scrolled to
+    main.dataset.keepScroll = String(scrollY);
+  }
+  else mount(main, h("div", { class: "muted" }, "Loading…"));
   const fn = VIEWS[view] || VIEWS.overview;
   try { await fn(main, parts.slice(1), params); }
   catch (e) { mount(main, errorBox(e)); }
+  if (keep && main.isConnected) window.scrollTo(0, scrollY);
   if (main.isConnected) main.focus({ preventScroll: true });
 }
 window.addEventListener("hashchange", route);
@@ -1246,6 +1259,7 @@ VIEWS.assistant = async (main, parts, params) => {
   clearInterval(assistantPoll);
   const cfg = await api("/api/assistant/config");
   const onSettings = parts[0] === "settings";
+  if (onSettings || !cfg.configured) main.classList.remove("fill");       // only the chat itself fills the window
   const head = pageHead("Assistant", "Ask about your courses. Answers come from your Canvas Hub data; with permission it can check Canvas for updates and keep your notes.");
   // Focus mode: the window holds just the chat list, the chat, these tabs and the composer (remembered in this browser).
   const focusBtn = h("button", { class: "sm ghost focus-toggle", title: "Show only the chat (Esc to leave)",
@@ -1279,6 +1293,7 @@ VIEWS.assistant = async (main, parts, params) => {
   const stopBtn = h("button", { class: "danger", hidden: true }, "Stop");
   let current = convId; let lastSeq = 0; let all = []; let stick = true; let wasBusy = false;
   showConvs(convs);
+  const listTop = main.querySelector(".conv-scroll")?.scrollTop || 0;      // the chat list being replaced, if any
 
   // ---- replies appear word by word: from the live stream, or all at once for providers that do not stream ----
   const calm = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -1428,6 +1443,8 @@ VIEWS.assistant = async (main, parts, params) => {
     if (atEnd) scroller.scrollTop = scroller.scrollHeight;      // keep the latest message in view as it shrinks
   };
   fit();
+  if (main.dataset.keepScroll) { window.scrollTo(0, Number(main.dataset.keepScroll)); fit(); }   // switched chats
+  convBox.scrollTop = listTop;
   window.addEventListener("resize", fit);
   window.addEventListener("scroll", fit, { passive: true });
   if (current) { await refresh(); assistantPoll = setInterval(refresh, 400); }
