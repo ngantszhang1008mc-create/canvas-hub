@@ -609,11 +609,13 @@ export function makeComponents(env) {
 
   // ---------- dispatcher with a per-result cache ----------
   // The chat re-renders while the assistant works; keep the same element so
-  // sorting, expanded rows and unsaved inputs survive.
+  // sorting, expanded rows and unsaved inputs survive. Callbacks read the chat
+  // context through `ref`, which is updated on reuse (the chat view may be new).
   const cache = new Map();
   function componentView(d, ctx = {}, key = null) {
     if (!d) return null;
-    if (key && cache.has(key)) return cache.get(key);
+    if (key && cache.has(key)) { const hit = cache.get(key); hit.ref.ctx = ctx; return hit.el; }
+    const ref = { ctx };
     let el = null;
     try {
       if (d.component === "deadlines") el = deadlinesView(d);
@@ -628,11 +630,11 @@ export function makeComponents(env) {
       else if (d.component === "score_model") el = scoreModelView(d.view);
       else if (d.component === "checklist") el = checklistView(d.view);
       else if (d.component === "choices") el = h("div", { class: "cmp cmp-choices" }, h("div", { class: "small" }, d.question),
-        h("div", { class: "chips", style: "margin-top:6px" }, d.options.map((o) => h("button", { class: "chip", onclick: () => ctx.send && ctx.send(o) }, o))));
+        h("div", { class: "chips", style: "margin-top:6px" }, d.options.map((o) => h("button", { class: "chip", onclick: () => ref.ctx.send && ref.ctx.send(o) }, o))));
     } catch (e) {
       el = h("div", { class: "cmp muted small" }, `Could not show this ${d.component}: ${e.message}`);
     }
-    if (key && el) { cache.set(key, el); if (cache.size > 300) cache.delete(cache.keys().next().value); }
+    if (key && el) { cache.set(key, { el, ref }); if (cache.size > 300) cache.delete(cache.keys().next().value); }
     return el;
   }
 

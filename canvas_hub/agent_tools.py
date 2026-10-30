@@ -24,7 +24,7 @@ from __future__ import annotations
 import json
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
@@ -43,6 +43,7 @@ class ToolContext:
     account_id: int | None = None  # fixed account (in-app assistant); None = take from args / single account
     worker: Any = None             # BrowserWorker when running inside the app
     conversation_id: int | None = None   # in-app chat the call belongs to (components link back to it)
+    permissions: frozenset[str] | None = None   # set per call by run_tool_display; None = not restricted
 
 
 @dataclass
@@ -583,8 +584,17 @@ def h_show_score_model(ctx, a):
     return _component_display(ctx, v, "Created")
 
 
+def _need_notes_for_todos(ctx):
+    """Linked checklists create and complete to-dos, so they need the notes permission too."""
+    if ctx.permissions is not None and "notes" not in ctx.permissions:
+        raise InvalidInput("a checklist linked to to-dos changes your to-dos; allow notes and to-dos in the assistant "
+                           "settings, or use sync_todos: false", code="notes_permission_required")
+
+
 def h_show_checklist(ctx, a):
     aid = _account(ctx, a)
+    if a.get("sync_todos"):
+        _need_notes_for_todos(ctx)
     spec = {k: a[k] for k in ("title", "sections", "sync_todos") if a.get(k) is not None}
     v = ctx.api.hub.components.create(aid, "checklist", spec, conversation_id=ctx.conversation_id)
     if a.get("pin"):
@@ -609,6 +619,9 @@ def h_update_component(ctx, a):
     if a.get("spec") is None and a.get("state") is None and a.get("pin") is None:
         raise InvalidInput("give spec, state or pin")
     v = svc.get(aid, a["component_id"])
+    if v["kind"] == "checklist" and (a.get("spec") is not None or a.get("state") is not None):
+        if (a["spec"] if isinstance(a.get("spec"), dict) else v["spec"]).get("sync_todos"):   # the spec in force after the call
+            _need_notes_for_todos(ctx)
     if a.get("spec") is not None:
         v = svc.update_spec(aid, v["id"], a["spec"], by="assistant")
     if a.get("state") is not None:
@@ -951,7 +964,7 @@ TOOLS += [
               ["buckets"], h_show_score_model),
     AgentTool("show_checklist", "Create an interactive checklist (saved): sections of rows with optional points, due date "
               "and linked item; ticks persist, sections show subtotals and progress. sync_todos links each row to a local "
-              "to-do (ticking one ticks the other).", "ui",
+              "to-do (ticking one ticks the other; needs the notes permission).", "ui",
               {"title": {"type": "string"}, "sync_todos": {"type": "boolean"}, "pin": {"type": "boolean"},
                "sections": {"type": "array", "items": {"type": "object", "properties": {
                    "id": {"type": "string"}, "title": {"type": "string"},
@@ -993,6 +1006,8 @@ def run_tool_display(ctx: ToolContext, name: str, args: Any, permissions: set[st
         return json.dumps({"error": "unknown_or_disabled_tool", "message": f"Tool '{name}' is not available."}), True, None
     try:
         args = validate_args(tool, args if args is not None else {}, with_account=with_account)
+        if ctx is not None:
+            ctx = replace(ctx, permissions=frozenset(permissions))
         result = tool.handler(ctx, args)
         display = result.pop("display", None) if isinstance(result, dict) else None
         text = json.dumps(result, ensure_ascii=False, default=str)

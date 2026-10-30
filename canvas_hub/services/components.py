@@ -123,7 +123,7 @@ class ComponentService:
 
     def _view(self, account_id: int, row: dict) -> dict:
         spec, state = json.loads(row["spec_json"]), json.loads(row["state_json"])
-        if row["kind"] == "checklist" and state.get("links"):
+        if row["kind"] == "checklist" and spec.get("sync_todos") and state.get("links"):
             state = self._pull_todos(account_id, spec, state)
         out = {"id": row["id"], "kind": row["kind"], "title": row["title"], "spec": spec, "state": state,
                "version": row["version"], "pinned": bool(row["pinned"]), "conversation_id": row["conversation_id"],
@@ -156,6 +156,8 @@ class ComponentService:
         else:
             initial = {}
         st = self._clean_state(kind, clean, {**initial, **(state or {})})
+        if kind == "checklist" and clean.get("sync_todos"):
+            st = self._push_todos(account_id, clean, st)     # linked from the start, not only after the first tick
         now = now_iso()
         with self.db.tx() as c:
             cid = c.execute(
@@ -204,7 +206,13 @@ class ComponentService:
         with self._lock:
             row = self._row(account_id, cid)
             clean = self.normalize(row["kind"], spec)
-            st = self._clean_state(row["kind"], clean, json.loads(row["state_json"]))
+            st = json.loads(row["state_json"])
+            old = json.loads(row["spec_json"])
+            if row["kind"] == "checklist" and old.get("sync_todos") and st.get("links"):
+                st = self._pull_todos(account_id, old, st)        # keep the ticks as they are now when sync turns off
+            st = self._clean_state(row["kind"], clean, st)
+            if row["kind"] == "checklist" and clean.get("sync_todos"):
+                st = self._push_todos(account_id, clean, st)
             return self._save(account_id, row, clean, st, by)
 
     def undo(self, account_id: int, cid: int) -> dict:

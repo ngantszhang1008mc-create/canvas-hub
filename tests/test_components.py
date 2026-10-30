@@ -199,12 +199,12 @@ def test_undo_puts_linked_todos_back(hub, account):
     svc = hub.components
     v = svc.create(aid, "checklist", {"title": "T", "sync_todos": True, "sections": [
         {"id": "s", "rows": [{"id": "r1", "label": "One"}, {"id": "r2", "label": "Two"}]}]})
-    v = svc.set_state(aid, v["id"], {"done": {"r1": True}})          # first sync creates both to-dos
-    links = v["state"]["links"]
+    links = v["state"]["links"]                                       # created with the checklist
+    v = svc.set_state(aid, v["id"], {"done": {"r1": True}})
     v = svc.set_state(aid, v["id"], {"done": {"r1": True, "r2": True}, "links": links})
     v = svc.undo(aid, v["id"])
     assert v["state"]["done"] == {"r1": True} and hub.annotations.get(aid, links["r2"])["task_state"] == "open"
-    v = svc.undo(aid, v["id"])                                          # back before the first sync
+    v = svc.undo(aid, v["id"])                                          # back to nothing ticked
     assert v["state"]["done"] == {} and hub.annotations.get(aid, links["r1"])["task_state"] == "open"
     svc.set_state(aid, v["id"], {"done": {"r2": True}, "links": v["state"]["links"]})
     tasks = [a for a in hub.annotations.list(aid) if a["kind"] == "task"]
@@ -221,3 +221,35 @@ def test_saves_without_links_reuse_linked_todos(hub, account):
     v = svc.set_state(aid, v["id"], {"done": {"r1": True, "r2": True}, "links": {}})
     assert v["state"]["links"] == first["state"]["links"]
     assert len([a for a in hub.annotations.list(aid) if a["kind"] == "task"]) == 2
+
+
+def test_linked_checklists_sync_from_creation_and_stop_when_unlinked(hub, account):
+    aid = account["id"]
+    svc = hub.components
+    spec = {"title": "T", "sync_todos": True, "sections": [{"id": "s", "rows": [{"id": "r1", "label": "One"},
+                                                                                 {"id": "r2", "label": "Two"}]}]}
+    v = svc.create(aid, "checklist", spec)
+    links = v["state"]["links"]
+    assert set(links) == {"r1", "r2"}                                   # in the to-do list before any tick
+    assert {hub.annotations.get(aid, i)["task_state"] for i in links.values()} == {"open"}
+    hub.annotations.update(aid, links["r1"], task_state="done")
+    v = svc.update_spec(aid, v["id"], {**spec, "sync_todos": False})
+    assert v["state"]["done"] == {"r1": True}                           # ticks kept as they were when unlinked
+    v = svc.set_state(aid, v["id"], {"done": {}})
+    assert v["state"]["done"] == {}                                      # no longer overridden by the to-do
+    assert hub.annotations.get(aid, links["r1"])["task_state"] == "done"
+
+
+def test_linked_checklist_tools_need_the_notes_permission(hub, account):
+    ctx = ToolContext(api=HubAPI(hub), account_id=account["id"])
+    spec = {"title": "T", "sync_todos": True, "sections": [{"rows": [{"label": "One"}]}]}
+    text, err, _ = run_tool_display(ctx, "show_checklist", spec, {"read", "ui"})
+    assert err and json.loads(text)["error"] == "notes_permission_required"
+    assert not [a for a in hub.annotations.list(account["id"]) if a["kind"] == "task"]
+    text, err, _ = run_tool_display(ctx, "show_checklist", spec, {"read", "ui", "notes"})
+    cid = json.loads(text)["component_id"]
+    text, err, _ = run_tool_display(ctx, "update_component", {"component_id": cid, "state": {"done": {"s.1": True}}},
+                                    {"read", "ui"})
+    assert err and json.loads(text)["error"] == "notes_permission_required"
+    assert not run_tool_display(ctx, "update_component", {"component_id": cid, "pin": True}, {"read", "ui"})[1]
+    assert not run_tool_display(ctx, "show_checklist", {**spec, "sync_todos": False}, {"read", "ui"})[1]

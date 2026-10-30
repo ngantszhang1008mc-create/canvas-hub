@@ -5,6 +5,7 @@ the artifact block's Copy and Download (#8/#9)."""
 import socket
 import threading
 import time
+from contextlib import contextmanager
 
 import pytest
 
@@ -20,13 +21,12 @@ pytestmark = pytest.mark.browser
 SPEC_TEXT = "SPEC: Canvas Hub components to add\n" + "\n".join(f"{i}. item {i} — details" for i in range(1, 60))
 
 
-@pytest.fixture
-def app_server(hub, account):
+@contextmanager
+def serve(hub, plan):
+    """The app on a free port, with a scripted model that calls the tools in ``plan``."""
     import uvicorn
     api = HubAPI(hub)
-    fake = FakeLLM([("show_score_model", {**HMAW, "pin": True}),
-                    ("show_artifact", {"title": "Component spec", "content": SPEC_TEXT, "language": "markdown",
-                                       "filename": "canvas-hub-spec.md"})])
+    fake = FakeLLM(plan)
     api.assistant = AssistantService(hub, api)
     api.assistant.update_config({"preset": "custom", "base_url": fake.url + "/v1", "model": "m"})
     with socket.socket() as s:
@@ -39,9 +39,19 @@ def app_server(hub, account):
         if srv.started:
             break
         time.sleep(0.1)
-    yield f"http://127.0.0.1:{port}", tok, api
-    srv.should_exit = True
-    fake.stop()
+    try:
+        yield f"http://127.0.0.1:{port}", tok, api
+    finally:
+        srv.should_exit = True
+        fake.stop()
+
+
+@pytest.fixture
+def app_server(hub, account):
+    with serve(hub, [("show_score_model", {**HMAW, "pin": True}),
+                     ("show_artifact", {"title": "Component spec", "content": SPEC_TEXT, "language": "markdown",
+                                        "filename": "canvas-hub-spec.md"})]) as s:
+        yield s
 
 
 def test_score_model_and_artifact_in_the_browser(app_server, hub, account):
@@ -141,3 +151,24 @@ def test_edits_made_while_a_save_is_in_flight_are_kept(app_server, hub, account)
     hub.components.set_state = real
     st = hub.components.get(account["id"], v["id"])["state"]
     assert st["include"] == {"nest": False, "fyes": False}
+
+
+def test_quick_replies_after_leaving_and_reopening_a_chat(hub, account):
+    # Cached components are reused across chat views; their buttons must send into the view on screen.
+    from playwright.sync_api import expect, sync_playwright
+    with serve(hub, [("show_choices", {"question": "Which week?", "options": ["Week 9", "Week 10"]})]) as (base, tok, _), \
+            sync_playwright() as p:
+        b = p.chromium.launch()
+        pg = b.new_page()
+        pg.goto(f"{base}/?token={tok}")
+        pg.goto(f"{base}/#/assistant")
+        pg.locator(".composer textarea").fill("Plan a week")
+        pg.get_by_role("button", name="Send").click()
+        expect(pg.locator(".cmp-choices")).to_be_visible(timeout=20000)
+        expect(pg.get_by_role("button", name="Send")).to_be_enabled(timeout=20000)
+        chat = pg.url
+        pg.goto(f"{base}/#/deadlines")
+        pg.goto(chat)
+        pg.locator(".cmp-choices").get_by_role("button", name="Week 10").click()
+        expect(pg.locator(".msg.user .bubble", has_text="Week 10")).to_be_visible(timeout=10000)
+        b.close()
