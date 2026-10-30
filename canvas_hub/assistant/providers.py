@@ -164,8 +164,10 @@ class OpenAICompatibleProvider:
         key = cfg.get("api_key") or os.environ.get("OPENAI_API_KEY") or "not-needed"
         self.client = openai.OpenAI(api_key=key, base_url=(cfg.get("base_url") or "").strip() or None,
                                     timeout=600.0, max_retries=2)
-        self.extra_body = thinking_params(cfg.get("preset"), cfg.get("thinking") or "")
-        self.extra_body.update(cfg.get("extra_params") or {})
+        # Extra request settings are the setup's defaults; a reasoning level
+        # picked in the chat for this message takes precedence.
+        self.extra_body = dict(cfg.get("extra_params") or {})
+        self.extra_body.update(thinking_params(cfg.get("preset"), cfg.get("thinking") or ""))
 
     def _messages(self, system: str, transcript: list[dict]) -> list[dict]:
         out: list[dict] = [{"role": "system", "content": system}]

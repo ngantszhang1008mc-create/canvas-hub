@@ -404,8 +404,9 @@ def create_app(api: HubAPI, *, token: str, port: int) -> FastAPI:
         b = await body(request)
         api.get_account(aid)
         cid = b.get("conversation_id")
-        pid = b.get("profile_id")
-        return _assistant().send(aid, b.get("text", ""), int(cid) if cid else None, str(pid) if pid else None)
+        pid, reasoning = b.get("profile_id"), b.get("reasoning")
+        return _assistant().send(aid, b.get("text", ""), int(cid) if cid else None, str(pid) if pid else None,
+                                 str(reasoning) if reasoning else None)
 
     @app.get("/api/accounts/{aid}/assistant/conversations/{cid}")
     def assistant_conversation(aid: int, cid: int, after: int = 0):

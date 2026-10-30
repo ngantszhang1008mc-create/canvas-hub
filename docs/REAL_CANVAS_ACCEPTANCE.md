@@ -90,13 +90,13 @@ Don't paste your key into chat; enter it only in the app.
 | # | Step | Expected |
 | --- | --- | --- |
 | 8.1 | **Assistant → Settings**: pick a provider, paste your key, click **Save & test** | Shows *Connected* with the model name. Your earlier setup appears under **Saved setups**. |
-| 8.1b | **+ Add setup** for a second provider or thinking level, then switch with **Use** or with the selector under the chat box | The next answer comes from the chosen setup; the other setup's key stays saved |
+| 8.1b | **+ Add setup** for a second provider, then pick it in the selector next to the message box | The next answer comes from the chosen setup (shown under your message); the other setup's key stays saved |
 | 8.1c | Ask several questions in one chat | Only the chat area scrolls; the page itself stays put and the message box stays visible |
 | 8.2 | Ask "What's due in the next 7 days?" | Steps such as *Checked deadlines* appear; the answer matches the Deadlines page, in HKT |
 | 8.3 | Ask "Check Canvas for new announcements in MATH1023" (while signed in) | It starts a quick check limited to that course, waits for it, then answers. The job also appears under **Collection**. |
 | 8.4 | Ask "Add a to-do to start the next assignment on Saturday" | The to-do appears under **Notes & tasks**; nothing changes in Canvas |
 | 8.5 | Run `uv run canvas-hub mcp` and register it in Codex or Claude Code (command shown under **Data & settings → Connect other agents**) | The agent can list your courses and deadlines. Write tools appear only with `--allow-notes` / `--allow-writes`. |
-| 8.6 | DeepSeek: provider **DeepSeek**, model `deepseek-flash`, Thinking **max**, then **Save & test**; then ask 8.2 again | *Connected*, and the multi-step answer completes. If the test is rejected, try **high** to see whether the hosted API accepts `max`. |
+| 8.6 | DeepSeek: setup with provider **DeepSeek**, model `deepseek-flash`, **Save & test**; then in the chat pick **Reasoning: max** and ask 8.2 again | *Connected*; the multi-step answer completes and your message shows "reasoning max". If the provider rejects it, try **high** to see whether the hosted API accepts `max`. |
 
 ## 9. Planner and external-site requests
 

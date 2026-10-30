@@ -184,7 +184,27 @@ def test_anthropic_request_shape_on_claude_api(monkeypatch):
     assert turn.text == "hi"
     assert captured["model"] == "claude-opus-5-5" and captured["fallbacks"] == "default"
     assert captured["betas"] == ["server-side-fallback-2026-07-01"]
-    assert captured["tools"][0]["eager_input_streaming"] is True
+    assert captured["tools"][0]["eager_input_streaming"] is True and "output_config" not in captured
+    p = AnthropicProvider({"api_key": "k", "effort": "xhigh"})
+    monkeypatch.setattr(p.client.beta.messages, "stream", lambda **kw: captured.update(kw) or FakeStream())
+    p.complete("sys", [{"role": "user", "sent_text": "q"}], [])
+    assert captured["output_config"] == {"effort": "xhigh"}
+
+
+def test_reasoning_is_chosen_per_message(seeded, monkeypatch):
+    hub, acct = seeded
+    svc = AssistantService(hub, HubAPI(hub))
+    runs = []
+    monkeypatch.setattr(svc, "_run", lambda cid, aid, cfg, a: runs.append(cfg))
+    claude = svc.update_config({"preset": "anthropic", "api_key": "sk-ant-x-1234"})["saved_profile"]
+    assert svc.public_config()["profiles"][0]["reasoning_levels"] == ["low", "medium", "high", "xhigh", "max"]
+    svc.send(acct["id"], "q", profile_id=claude, reasoning="xhigh")
+    svc.send(acct["id"], "q", profile_id=claude)
+    assert runs[0]["effort"] == "xhigh" and runs[1]["effort"] == ""
+    with pytest.raises(InvalidInput):
+        svc.send(acct["id"], "q", profile_id=claude, reasoning="off")       # DeepSeek-only level
+    msgs = [m for c in svc.list_conversations(acct["id"]) for m in svc.get_conversation(acct["id"], c["id"])["messages"]]
+    assert {m.get("reasoning") for m in msgs if m["role"] == "user"} == {"xhigh", ""}
 
 
 def test_deepseek_thinking_max_and_reasoning_passback(seeded):
@@ -192,10 +212,10 @@ def test_deepseek_thinking_max_and_reasoning_passback(seeded):
     fake = FakeLLM([("get_deadlines", {"days_ahead": 30}), ("search", {"query": "proposal"})])
     try:
         svc = AssistantService(hub, HubAPI(hub))
-        pub = svc.update_config({"preset": "deepseek", "base_url": fake.url + "/v1", "api_key": "sk-ds-123456789",
-                                 "thinking": "max"})
-        assert pub["model"] == "deepseek-flash" and pub["thinking"] == "max"
-        r = svc.send(acct["id"], "What is due?")
+        pub = svc.update_config({"preset": "deepseek", "base_url": fake.url + "/v1", "api_key": "sk-ds-123456789"})
+        assert pub["model"] == "deepseek-flash" and pub["reasoning_levels"] == ["off", "low", "high", "max"]
+        assert "thinking" not in pub                      # chosen per message, not saved with the setup
+        r = svc.send(acct["id"], "What is due?", reasoning="max")
         svc.wait(r["conversation_id"], 30)
         conv = svc.get_conversation(acct["id"], r["conversation_id"])
         assert conv["conversation"]["run_state"] == "idle", conv["conversation"]
@@ -205,18 +225,25 @@ def test_deepseek_thinking_max_and_reasoning_passback(seeded):
         sent = [m for m in last["messages"] if m["role"] == "assistant"]
         assert [m["reasoning_content"] for m in sent] == ["thinking step 0", "thinking step 1"]
         # a follow-up turn still replays earlier reasoning (required once tools were used)
-        svc.send(acct["id"], "And next week?", r["conversation_id"])
+        svc.send(acct["id"], "And next week?", r["conversation_id"], reasoning="off")
         svc.wait(r["conversation_id"], 30)
         assert svc.get_conversation(acct["id"], r["conversation_id"])["conversation"]["run_state"] == "idle"
+        assert fake.requests[-1]["thinking"] == {"type": "disabled"} and "reasoning_effort" not in fake.requests[-1]
         # extra request settings merge in; app-owned fields are protected
-        svc.update_config({"thinking": "", "extra_params": {"reasoning_effort": "high", "top_k": 5}})
+        svc.update_config({"extra_params": {"reasoning_effort": "high", "top_k": 5}})
         svc.send(acct["id"], "hi", r["conversation_id"])
         svc.wait(r["conversation_id"], 30)
         assert fake.requests[-1]["reasoning_effort"] == "high" and "thinking" not in fake.requests[-1]
+        assert fake.requests[-1]["top_k"] == 5
+        svc.send(acct["id"], "hi", r["conversation_id"], reasoning="max")     # the chat's choice wins
+        svc.wait(r["conversation_id"], 30)
+        assert fake.requests[-1]["reasoning_effort"] == "max" and fake.requests[-1]["thinking"] == {"type": "enabled"}
         with pytest.raises(InvalidInput):
             svc.update_config({"extra_params": {"model": "other"}})
         with pytest.raises(InvalidInput):
-            svc.update_config({"thinking": "ultra"})
+            svc.send(acct["id"], "hi", reasoning="ultra")     # not a level this setup offers
+        with pytest.raises(InvalidInput):
+            svc.update_config({"thinking": "max"})           # no longer a saved setting
     finally:
         fake.stop()
 
@@ -240,7 +267,7 @@ def test_assistant_setups(seeded):
     svc = AssistantService(hub, HubAPI(hub))
     pub = svc.public_config()
     assert [(x["id"], x["name"]) for x in pub["profiles"]] == [("p1", "DeepSeek")]
-    assert pub["active_profile"] == "p1" and pub["configured"] and pub["thinking"] == "max"
+    assert pub["active_profile"] == "p1" and pub["configured"] and "thinking" not in pub["profiles"][0]
     assert pub["permissions"]["collect"] is False and pub["profiles"][0]["api_key_hint"].endswith("1111")
     # add a second setup; the first stays in use until switched
     pub = svc.update_config({"profile_id": "new", "name": "Claude", "preset": "anthropic", "api_key": "sk-ant-new-2222"})
@@ -251,8 +278,8 @@ def test_assistant_setups(seeded):
     pub = svc.activate_profile(p2)
     assert pub["active_profile"] == p2 and pub["provider"] == "anthropic" and svc._load()["api_key"] == "sk-ant-new-2222"
     # editing one setup leaves the other untouched; permissions are shared
-    svc.update_config({"profile_id": "p1", "thinking": "high", "permissions": {"collect": True}})
-    assert svc._load("p1")["thinking"] == "high" and svc._load(p2)["thinking"] == ""
+    svc.update_config({"profile_id": "p1", "model": "deepseek-pro", "permissions": {"collect": True}})
+    assert svc._load("p1")["model"] == "deepseek-pro" and svc._load(p2)["model"] != "deepseek-pro"
     assert svc._load(p2)["permissions"]["collect"] is True
     # deleting the setup in use falls back to the remaining one
     pub = svc.delete_profile(p2)

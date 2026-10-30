@@ -26,7 +26,7 @@ from zoneinfo import ZoneInfo
 
 from ..agent_tools import ToolContext, run_tool_display, tools_for
 from ..util import InvalidInput, NotFound, now_iso
-from .providers import ANTHROPIC_DEFAULT_MODEL, RESERVED_PARAMS, THINKING_LEVELS, ProviderError, make_provider
+from .providers import ANTHROPIC_DEFAULT_MODEL, RESERVED_PARAMS, ProviderError, make_provider
 
 log = logging.getLogger("canvas_hub.assistant")
 CONFIG_FILE = "assistant.json"
@@ -51,7 +51,19 @@ PRESETS = [
      "base_url": "", "model": "", "key_hint": "", "disabled": True},
 ]
 MAX_PROFILES = 20
-PROFILE_FIELDS = {"id", "name", "preset", "provider", "base_url", "model", "api_key", "effort", "thinking", "extra_params"}
+# Reasoning effort is chosen per message in the chat, not saved with a setup.
+PROFILE_FIELDS = {"id", "name", "preset", "provider", "base_url", "model", "api_key", "extra_params"}
+
+
+def reasoning_levels(cfg: dict) -> list[str]:
+    """Reasoning levels the chat can offer for a setup ("" = provider default)."""
+    if cfg.get("provider") == "anthropic":
+        return ["low", "medium", "high", "xhigh", "max"]     # output_config.effort
+    if cfg.get("preset") == "deepseek":
+        return ["off", "low", "high", "max"]                 # thinking + reasoning_effort
+    if cfg.get("provider") == "openai_compatible":
+        return ["low", "medium", "high"]                     # reasoning_effort
+    return []
 DEFAULT_CONFIG = {
     "preset": None, "provider": None, "base_url": "", "model": "", "api_key": "", "effort": "",
     "thinking": "", "extra_params": {},
@@ -161,7 +173,7 @@ class AssistantService:
         return {
             "id": prof["id"], "name": prof["name"], "configured": self.configured(prof),
             "preset": prof["preset"], "provider": prof["provider"], "base_url": prof["base_url"], "model": prof["model"],
-            "effort": prof["effort"], "thinking": prof["thinking"], "extra_params": prof["extra_params"],
+            "reasoning_levels": reasoning_levels(prof), "extra_params": prof["extra_params"],
             "api_key_saved": bool(prof["api_key"]), "api_key_hint": _mask(prof["api_key"]), "api_key_from_env": env_key,
         }
 
@@ -195,8 +207,8 @@ class AssistantService:
         """Edit a setup: `profile_id` picks which ("new" adds one; default: the
         active setup, created if there is none). Permissions are shared."""
         store = self._load_store()
-        allowed = {"profile_id", "name", "activate", "preset", "provider", "base_url", "model", "api_key", "effort",
-                   "thinking", "extra_params", "permissions", "clear_key"}
+        allowed = {"profile_id", "name", "activate", "preset", "provider", "base_url", "model", "api_key",
+                   "extra_params", "permissions", "clear_key"}
         bad = set(data) - allowed
         if bad:
             raise InvalidInput(f"unknown settings {sorted(bad)}")
@@ -255,14 +267,6 @@ class AssistantService:
                 if k == "base_url" and v and not v.startswith(("https://", "http://localhost", "http://127.0.0.1")):
                     raise InvalidInput("base URL must use https:// (plain http only for a local model server)")
                 cfg[k] = v
-        if "effort" in data:
-            if data["effort"] not in ("", None, "low", "medium", "high", "xhigh", "max"):
-                raise InvalidInput("effort must be low, medium, high, xhigh or max")
-            cfg["effort"] = data["effort"] or ""
-        if "thinking" in data:
-            if (data["thinking"] or "") not in THINKING_LEVELS:
-                raise InvalidInput(f"thinking must be one of {[x for x in THINKING_LEVELS if x]}")
-            cfg["thinking"] = data["thinking"] or ""
         if "extra_params" in data:
             ep = data["extra_params"] or {}
             if not isinstance(ep, dict):
@@ -350,7 +354,7 @@ class AssistantService:
                 continue
             v = {"seq": m["seq"], "role": m["role"]}
             if m["role"] == "user":
-                v["text"] = m["text"]
+                v.update(text=m["text"], setup=m.get("setup"), reasoning=m.get("reasoning"))
             elif m["role"] == "assistant":
                 v.update(text=m.get("text"), model=m.get("model"), stop=m.get("stop"),
                          tool_calls=[{"id": c["id"], "name": c["name"], "input": c.get("input"), "input_error": c.get("input_error")}
@@ -398,12 +402,20 @@ class AssistantService:
             c.execute("UPDATE assistant_conversations SET run_state=?, run_error=?, updated_at=? WHERE id=?",
                       (state, error, now_iso(), cid))
 
-    def send(self, account_id: int, text: str, conversation_id: int | None = None, profile_id: str | None = None) -> dict:
+    def send(self, account_id: int, text: str, conversation_id: int | None = None, profile_id: str | None = None,
+             reasoning: str | None = None) -> dict:
         # The chat names the setup it shows, so a message never goes to a
         # different provider than the one the user picked.
         cfg = self._load(profile_id)
         if not self.configured(cfg):
             raise InvalidInput("Set up the assistant first (provider, model and API key).", code="assistant_not_configured")
+        reasoning = reasoning or ""
+        if reasoning:
+            levels = reasoning_levels(cfg)
+            if reasoning not in levels:
+                raise InvalidInput(f"reasoning for this setup must be one of {levels}" if levels
+                                   else "this setup has no reasoning setting")
+            cfg["effort" if cfg["provider"] == "anthropic" else "thinking"] = reasoning
         text = (text or "").strip()
         if not text:
             raise InvalidInput("message is empty")
@@ -427,7 +439,7 @@ class AssistantService:
         self._repair(cid)
         # The time stamp is stored with the message (history stays append-only).
         sent = f"[Now: {now_local.strftime('%A %d %B %Y %H:%M %Z')}]\n\n{text}"
-        self._append(cid, "user", {"text": text, "sent_text": sent})
+        self._append(cid, "user", {"text": text, "sent_text": sent, "setup": cfg.get("name"), "reasoning": reasoning})
         self._set_state(cid, "running")
         th = threading.Thread(target=self._run, args=(cid, account_id, cfg, acct), name=f"assistant-{cid}", daemon=True)
         with self._lock:

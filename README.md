@@ -64,7 +64,7 @@ In another terminal, run `uv run canvas-hub --home /tmp/canvas-hub-demo serve`, 
 
 ## Assistant and other agents
 
-- **Assistant page:** chat with your Canvas data using your own API key. It has a **Chat** tab, where only the conversation scrolls, and a **Settings** tab, where you can save several setups (for example DeepSeek with thinking on max, and Claude) and switch between them, also from the chat.
+- **Assistant page:** chat with your Canvas data using your own API key. It has a **Chat** tab, where only the conversation scrolls, and a **Settings** tab, where you can save several setups (for example DeepSeek and Claude). Next to the message box you pick the setup and the reasoning effort for each message; the reasoning level is not part of a saved setup.
   - **Supported providers:** Anthropic (Claude), OpenAI, Google Gemini, OpenRouter, DeepSeek, a local Ollama model, or any OpenAI-compatible endpoint.
   - **What it can do:** answer from the stored data. If you allow it, it can also check Canvas for updates through the app's signed-in browser (with the same read-only rules as Quick check) and create or edit your local notes and to-dos.
   - **Your key:** stays in a private file on this computer and is never included in backups or exports. Your questions, and the course data the assistant reads, go to the provider you choose.
