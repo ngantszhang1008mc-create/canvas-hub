@@ -16,12 +16,12 @@ import json
 import re
 import threading
 
-from .. import scoring
+from .. import projections, scoring
 from ..db import Database
 from ..util import Conflict, InvalidInput, NotFound, now_iso, parse_iso
 from .annotations import AnnotationService
 
-KINDS = ("score_model", "checklist")
+KINDS = ("score_model", "checklist", "grade_projector", "hours_tracker")
 MAX_ROWS = 300
 MAX_SPEC = 200_000
 KEEP_VERSIONS = 50
@@ -100,7 +100,8 @@ class ComponentService:
             raise InvalidInput(f"kind must be one of {list(KINDS)}")
         if len(json.dumps(spec, default=str)) > MAX_SPEC:
             raise InvalidInput("the component definition is too large")
-        return scoring.normalize_model(spec) if kind == "score_model" else normalize_checklist(spec)
+        return {"score_model": scoring.normalize_model, "checklist": normalize_checklist,
+                "grade_projector": projections.normalize_projector, "hours_tracker": projections.normalize_hours}[kind](spec)
 
     @staticmethod
     def _clean_state(kind: str, spec: dict, state: dict) -> dict:
@@ -108,6 +109,12 @@ class ComponentService:
             raise InvalidInput("state must be an object")
         if kind == "score_model":
             return scoring.normalize_state(spec, state)
+        if kind == "hours_tracker":
+            return projections.clean_hours_state(state)
+        if kind == "grade_projector":
+            ids = {it["id"] for c in spec["categories"] for it in c["items"]}
+            return {"hypothetical": {k: scoring._num(v, f"score for {k}") for k, v in (state.get("hypothetical") or {}).items()
+                                     if k in ids and v is not None and v != ""}}
         ids = {r["id"] for s in spec["sections"] for r in s["rows"]}
         sids = {s["id"] for s in spec["sections"]}
         return {"done": {k: True for k, v in (state.get("done") or {}).items() if k in ids and v},
@@ -131,6 +138,10 @@ class ComponentService:
                "can_undo": bool(self.db.one("SELECT 1 FROM component_versions WHERE component_id=?", (row["id"],)))}
         if row["kind"] == "score_model":
             out["computed"] = scoring.evaluate(spec, state)
+        elif row["kind"] == "grade_projector":
+            out["computed"] = projections.project(spec, state)
+        elif row["kind"] == "hours_tracker":
+            out["computed"] = projections.hours_summary(spec, state)
         else:
             out["computed"] = checklist_totals(spec, state)
         return out
@@ -336,6 +347,13 @@ class ComponentService:
                              if x.get(k) is not None} | ({"value": x["value"]} if "value" in x else {})
                             for x in comp["lines"]]
             out["scenario"] = comp["state"]["scenario"]
+            out["alerts"] = comp["alerts"]
+        elif v["kind"] == "grade_projector":
+            out["projection"] = v["computed"]
+            out["hypothetical"] = v["state"].get("hypothetical") or {}
+        elif v["kind"] == "hours_tracker":
+            out["summary"] = v["computed"]
+            out["entries"] = v["state"].get("entries") or []
         else:
             done = v["state"].get("done") or {}
             out["totals"] = v["computed"]

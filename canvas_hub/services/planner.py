@@ -267,7 +267,7 @@ class PlannerService:
                 lines.append(f"URL:{d['source_url']}")
             lines.append("END:VEVENT")
         for t in self.db.query("SELECT id, title, body, local_due, task_state FROM annotations WHERE account_id=? AND kind='task' "
-                               "AND local_due IS NOT NULL AND task_state='open'", (account_id,)):
+                               "AND local_due IS NOT NULL AND task_state!='done'", (account_id,)):
             due = parse_iso(t["local_due"])
             if not due or due.date() < today:
                 continue

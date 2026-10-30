@@ -220,6 +220,29 @@ class HubAPI:
             raise InvalidInput(f"unknown fields {sorted(set(data) - {'enabled', 'kinds'})}")
         return self.hub.writes.set_settings(self._acct(account_id)["id"], enabled=data.get("enabled"), kinds=data.get("kinds"))
 
+    def ocr_status(self) -> dict:
+        from . import ocr
+        return {**self.hub.resources.ocr_settings(), **ocr.status(), "pending": self.hub.resources.ocr_pending(),
+                "failed": self.hub.resources.ocr_failed(),
+                "low_confidence_below": ocr.LOW_CONFIDENCE}
+
+    def set_ocr(self, data: dict) -> dict:
+        if set(data) - {"enabled", "lang"} or not isinstance(data.get("enabled"), bool):
+            raise InvalidInput("send {\"enabled\": true|false, \"lang\": \"eng\"}")
+        self.hub.resources.set_ocr_settings(data["enabled"], data.get("lang") or "eng")
+        return self.ocr_status()
+
+    def run_ocr(self, data: dict) -> dict:
+        return self.hub.run_ocr(int(data.get("limit") or 10), retry_failed=bool(data.get("retry_failed")))
+
+    def custom_html_settings(self, account_id) -> dict:
+        return self.hub.settings.get(self._acct(account_id)["id"], "custom_html")
+
+    def set_custom_html_settings(self, account_id, data: dict) -> dict:
+        if set(data) != {"enabled"} or not isinstance(data["enabled"], bool):
+            raise InvalidInput("send {\"enabled\": true|false}")
+        return self.hub.settings.set(self._acct(account_id)["id"], "custom_html", {"enabled": data["enabled"]})
+
     def list_writes(self, account_id, status=None) -> dict:
         return {"writes": self.hub.writes.list(self._acct(account_id)["id"], status or None),
                 "settings": self.hub.writes.get_settings(self._acct(account_id)["id"])}
@@ -332,6 +355,34 @@ class HubAPI:
             have.add((r["title"], r["weekday"], r["start"]))
             added += 1
         return {"found": len(rows), "added": added, "skipped": skipped, "class_times": self.hub.planner.list_classes(a["id"])}
+
+    def dashboard(self, account_id, days: int = 7) -> dict:
+        from .agent_tools import ToolContext, course_dashboard
+        aid = self._acct(account_id)["id"]
+        return course_dashboard(ToolContext(api=self, account_id=aid), aid, max(1, min(60, int(days))))
+
+    # ---- local grading rules -------------------------------------------------------------------
+    def get_grading_rules(self, account_id, course_id) -> dict:
+        return self.hub.grading.get(self._acct(account_id)["id"], str(course_id))
+
+    def set_grading_rules(self, account_id, course_id, data: dict) -> dict:
+        return self.hub.grading.set(self._acct(account_id)["id"], str(course_id), data)
+
+    # ---- reminders -----------------------------------------------------------------------------
+    def list_reminders(self, account_id, status="pending") -> dict:
+        return {"reminders": self.hub.reminders.list(self._acct(account_id)["id"], status or None)}
+
+    def create_reminder(self, account_id, data: dict) -> dict:
+        allowed = {"title", "remind_at", "item_id", "annotation_id", "note"}
+        if set(data) - allowed:
+            raise InvalidInput(f"unknown fields {sorted(set(data) - allowed)}")
+        return self.hub.reminders.create(self._acct(account_id)["id"], created_by="user", **data)
+
+    def due_reminders(self, account_id) -> dict:
+        return {"reminders": self.hub.reminders.due(self._acct(account_id)["id"])}
+
+    def dismiss_reminder(self, account_id, rid) -> dict:
+        return self.hub.reminders.dismiss(self._acct(account_id)["id"], rid)
 
     # ---- saved files ------------------------------------------------------------------------
     def list_files(self, account_id) -> dict:

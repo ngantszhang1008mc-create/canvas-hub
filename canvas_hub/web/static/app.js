@@ -255,6 +255,11 @@ async function pollBell() {
     if (first) new Notification("Canvas Hub", { body: `${first.headline}: ${first.title}${f.unread > 1 ? ` (+${f.unread - 1} more)` : ""}` });
   }
   bellLastUnread = f.unread;
+  const due = await api(A("/reminders/due"), { method: "POST" }).catch(() => null);
+  for (const r of (due && due.reminders) || []) {
+    toast(`⏰ ${r.title}`);
+    if (store.get("desktopNotify") === "1" && "Notification" in window && Notification.permission === "granted") new Notification("Canvas Hub reminder", { body: r.title });
+  }
   if (!bellEl.querySelector(".bell-panel").hidden) drawBell();
 }
 function drawBell() {
@@ -431,6 +436,7 @@ VIEWS.overview = async (main) => {
     api(A("/discrepancies")),
     api(A("/jobs") + qs({ limit: 3 })),
   ]);
+  const dash = await api(A("/dashboard")).catch(() => null);
   const gaps = cov.records.filter((r) => ["partial", "blocked"].includes(r.latest.status));
   const active = jobs.jobs.find((j) => ["running", "queued", "needs_login", "paused", "interrupted"].includes(j.state));
   const recent = ch.events.slice(-8).reverse();
@@ -459,7 +465,8 @@ VIEWS.overview = async (main) => {
       empty("Nothing due in the next 14 days", "Based on the deadlines collected so far."));
   const chCard = h("div", { class: "card" }, h("div", { class: "card-head" }, h("h2", null, "Recent changes"), h("a", { href: "#/changes", class: "small" }, "All changes")),
     recent.length ? h("ul", { class: "list" }, recent.map(eventLi)) : empty("No changes since the baseline", "Changes appear after a later check finds edits."));
-  mount(main, head, banners, stats, h("div", { class: "grid cols-2", style: "margin-top:14px" }, dlCard, chCard));
+  mount(main, head, banners, stats, dash && dash.courses.length > 1 ? h("div", { style: "margin-top:14px" }, C.dashboardView({ title: "All courses", ...dash })) : null,
+    h("div", { class: "grid cols-2", style: "margin-top:14px" }, dlCard, chCard));
 };
 
 function summarize(v) {
@@ -506,6 +513,7 @@ VIEWS.deadlines = async (main, _p, params) => {
             h("span", { title: "When the due date was last read from Canvas" }, "date read " + ago(d.date_observed_at)),
             d.source_url ? h("a", { href: d.source_url, target: "_blank", rel: "noopener noreferrer" }, "Open in Canvas") : null)),
         h("div", { class: "row", style: "justify-content:flex-end" }, submissionPill(d.submission),
+          d.item_type !== "calendar_event" ? C.remindButton({ title: `Due: ${d.title}`, due: d.date.iso, item_id: d.item_id }) : null,
           d.item_type !== "calendar_event" ? localTaskToggle(d) : null));
     })));
   })) : [empty("Nothing in this range", "No collected deadlines fall in this window.")];
@@ -591,13 +599,66 @@ VIEWS.course = async (main, parts, params) => {
         h("p", { class: "muted small" }, "Sections missing here are not guessed. Content they hide is still collected when Home, the syllabus, modules or pages link to it."),
         syl ? h("p", null, h("a", { href: `#/item/${syl.id}` }, "Read the syllabus")) : null,
         pagesHome.items.length ? h("p", { class: "small" }, `${pagesHome.items.length} page(s) collected`) : null),
-      h("div", { class: "card" }, h("h2", null, "Coverage for this course"), coverageTable(cov.records)));
+      h("div", { class: "card" }, h("h2", null, "Coverage for this course"), coverageTable(cov.records)),
+      await gradingCard(cid));
   } else {
     const list = await api(A("/items") + qs({ course_id: cid, type: tab, limit: 200 }));
     body = h("div", { class: "card" }, itemTable(list.items));
   }
   mount(main, head, tabs, body);
 };
+
+// Local grading rules: what Canvas leaves out (real group weights, pass mark). Never sent to Canvas.
+async function gradingCard(cid) {
+  const card = h("div", { class: "card grading-card", style: "grid-column:1/-1" });
+  const draw = (rules) => {
+    const rows = Object.entries(rules.groups || {}).map(([name, g]) => ({ name, weight: g.weight ?? "", drop: g.drop_lowest || "" }));
+    if (!rows.length) rows.push({ name: "", weight: "", drop: "" });
+    const body = h("tbody");
+    const addRow = (r) => {
+      const tr = h("tr", null,
+        h("td", null, h("input", { type: "text", class: "g-name", value: r.name, placeholder: "Assignment group, e.g. Homework", "aria-label": "Group name" })),
+        h("td", { class: "num" }, h("input", { class: "num-in g-weight", type: "number", min: 0, max: 100, step: "any", value: r.weight, "aria-label": "Weight (%)" })),
+        h("td", { class: "num" }, h("input", { class: "num-in g-drop", type: "number", min: 0, step: 1, value: r.drop, "aria-label": "Drop lowest" })),
+        h("td", null, h("button", { class: "ghost sm", "aria-label": "Remove this group", onclick: () => { tr.remove(); total(); } }, "×")));
+      tr.addEventListener("input", () => total());
+      body.append(tr);
+    };
+    rows.forEach(addRow);
+    const sum = h("span", { class: "small", "aria-live": "polite" });
+    const total = () => {
+      const t = [...body.querySelectorAll(".g-weight")].reduce((s, i) => s + (Number(i.value) || 0), 0);
+      sum.textContent = `Weights add up to ${Math.round(t * 100) / 100}%`;
+      sum.className = Math.abs(t - 100) < 0.01 || t === 0 ? "small muted" : "small bad-text";
+    };
+    total();
+    const thr = h("input", { class: "num-in", type: "number", min: 0, step: "any", value: rules.threshold ?? "", "aria-label": "Pass mark" });
+    const src = h("input", { type: "text", value: rules.source || "", placeholder: "e.g. syllabus p.2", "aria-label": "Source of these rules" });
+    const items = Object.entries(rules.items || {});
+    mount(card, h("div", { class: "card-head" }, h("h2", null, "Grading rules"), h("span", { class: "sub" }, "kept on this computer · used by score models and grade projections")),
+      h("p", { class: "small muted" }, "Canvas often reports 0 for every group weight. Enter the syllabus weights here (or ask the assistant to read them); nothing is sent to Canvas."),
+      h("div", { class: "table-wrap" }, h("table", { class: "t" }, h("thead", null, h("tr", null, h("th", null, "Group"), h("th", { class: "num" }, "Weight %"), h("th", { class: "num" }, "Drop lowest"), h("th", null, ""))), body)),
+      h("div", { class: "row", style: "margin-top:8px" }, h("button", { class: "sm", onclick: () => { addRow({ name: "", weight: "", drop: "" }); total(); } }, "+ Add group"), sum),
+      h("div", { class: "row", style: "margin-top:10px" }, h("label", { class: "small" }, "Pass mark ", thr), h("label", { class: "small grow" }, "Source ", src)),
+      items.length ? h("details", { style: "margin-top:10px" }, h("summary", { class: "small" }, `${items.length} assignment rule(s) set by the assistant`),
+        h("ul", { class: "small" }, items.map(([id, r]) => h("li", null, h("code", null, id), " ", Object.entries(r).map(([k, v]) => `${k}: ${v}`).join(" · "))))) : null,
+      h("div", { class: "row", style: "margin-top:12px" }, h("button", { class: "primary", onclick: async () => {
+        const groups = {};
+        for (const tr of body.querySelectorAll("tr")) {
+          const name = tr.querySelector(".g-name").value.trim();
+          if (!name) continue;
+          const w = tr.querySelector(".g-weight").value, d = tr.querySelector(".g-drop").value;
+          groups[name] = { ...(w !== "" ? { weight: Number(w) } : {}), ...(d !== "" && Number(d) ? { drop_lowest: Number(d) } : {}) };
+        }
+        const next = { ...rules, groups, threshold: thr.value === "" ? undefined : Number(thr.value), source: src.value.trim() || undefined };
+        delete next.updated_at;
+        const r = await guard(() => api(A(`/courses/${cid}/grading`), { method: "PUT", body: next }));
+        if (r) { toast("Grading rules saved"); draw(r); }
+      } }, "Save rules"), rules.updated_at ? h("span", { class: "tiny muted" }, `saved ${ago(rules.updated_at)}`) : null));
+  };
+  try { draw(await api(A(`/courses/${cid}/grading`))); } catch (e) { mount(card, h("p", { class: "muted small" }, "Grading rules unavailable: " + e.message)); }
+  return card;
+}
 
 function itemTable(items) {
   if (!items.length) return empty("Nothing here", "");
@@ -676,8 +737,10 @@ const relLabel = (r) => ({ body_link: "links to", module_item_content: "opens", 
 
 function resourceBlock(r) {
   const st = r.extraction_status;
-  const cls = st === "ok" ? "ok" : ["needs_ocr", "image_only", "unsupported_media", "unsupported_type", "empty"].includes(st) ? "warn" : st === "failed" ? "bad" : "muted";
-  const label = { ok: "Text extracted", needs_ocr: "Scanned — needs OCR", image_only: "Image only", unsupported_media: "Audio/video (not transcribed)",
+  const cls = st === "ok" || st === "ocr" ? "ok" : ["needs_ocr", "image_only", "unsupported_media", "unsupported_type", "empty", "ocr_low_confidence"].includes(st) ? "warn" : st === "failed" ? "bad" : "muted";
+  const conf = r.ocr_confidence != null ? ` · ${Math.round(r.ocr_confidence)}% confidence` : "";
+  const label = { ok: "Text extracted", ocr: `Text from OCR${conf}`, ocr_low_confidence: `OCR, low confidence${conf}`,
+    needs_ocr: "Scanned — needs OCR", image_only: "Image only", unsupported_media: "Audio/video (not transcribed)",
     unsupported_type: "No text extractor", failed: "Extraction failed", empty: "No text found", tool_unavailable: "Extractor not installed", not_attempted: "Not extracted" }[st] || st;
   const out = h("div", null);
   const textBox = h("div");
@@ -837,13 +900,54 @@ VIEWS.coverage = async (main) => {
 // ---------- notes ----------
 VIEWS.notes = async (main, _p, params) => {
   const filter = params.get("show") || "open";
-  const [r, files] = await Promise.all([api(A("/annotations") + qs(filter === "all" ? {} : filter === "notes" ? { kind: "note" } : { kind: "task", task_state: filter })),
-    api(A("/files")).catch(() => ({ files: [] }))]);
-  const title = h("input", { type: "text", placeholder: "To-do title", style: "flex:1" });
-  const due = h("input", { type: "datetime-local" });
-  const chips = h("div", { class: "chips" }, [["open", "Open to-dos"], ["done", "Done"], ["notes", "Notes"], ["all", "Everything"]].map(([k, l]) =>
+  const q = filter === "all" || filter === "board" ? {} : filter === "notes" ? { kind: "note" } : { kind: "task", task_state: filter === "open" ? "active" : filter };
+  const [r, files] = await Promise.all([api(A("/annotations") + qs(q)), api(A("/files")).catch(() => ({ files: [] }))]);
+  const title = h("input", { type: "text", placeholder: "To-do title", "aria-label": "To-do title", style: "flex:1" });
+  const due = h("input", { type: "datetime-local", "aria-label": "Due (optional)" });
+  const chips = h("div", { class: "chips" }, [["open", "Open to-dos"], ["board", "Board"], ["done", "Done"], ["notes", "Notes"], ["all", "Everything"]].map(([k, l]) =>
     h("button", { class: "chip" + (k === filter ? " on" : ""), onclick: () => { location.hash = `#/notes?show=${k}`; } }, l)));
-  mount(main, pageHead("Notes & tasks", "Your own notes and to-dos. Stored locally, kept across every refresh, and never sent to Canvas."),
+  const patch = (a, body) => guard(() => api(A(`/annotations/${a.id}`), { method: "PATCH", body }));
+  const STATES = [["open", "To do"], ["in_progress", "In progress"], ["blocked", "Blocked"], ["done", "Done"]];
+  // In place: click the title or text to edit; "- [ ]" lines in a body are checkboxes.
+  const editable = (a, field, multiline) => {
+    const show = () => {
+      const val = a[field] || "";
+      if (field === "body" && /^\s*[-*] \[[ xX]\]/m.test(val)) {
+        const lines = val.split("\n");
+        return h("div", { class: "note-body", title: "Click a line's text to edit" }, lines.map((ln, i) => {
+          const m = ln.match(/^(\s*[-*] \[)([ xX])(\]\s?)(.*)$/);
+          if (!m) return h("div", { class: "small", onclick: () => edit() }, ln || "\u00a0");
+          return h("label", { class: "check small" }, h("input", { type: "checkbox", checked: m[2] !== " " ? true : null, onchange: async (e) => {
+            lines[i] = m[1] + (e.target.checked ? "x" : " ") + m[3] + m[4]; const r2 = await patch(a, { body: lines.join("\n") }); if (r2) a.body = r2.body; } }),
+            h("span", { onclick: (e) => { e.preventDefault(); edit(); } }, m[4]));
+        }));
+      }
+      return h(field === "title" ? "span" : "div", { class: field === "title" ? "strong editable" : "small editable note-body", tabindex: "0", title: "Click to edit",
+        onclick: () => edit(), onkeydown: (e) => { if (e.key === "Enter" && field === "title") edit(); } }, val || (field === "title" ? "(untitled)" : "Add details…"));
+    };
+    const box = h("span", { class: field === "body" ? "edit-box block" : "edit-box" }, show());
+    const edit = () => {
+      const inp = h(multiline ? "textarea" : "input", { class: multiline ? "edit-area" : "edit-in", "aria-label": `Edit ${field}` });
+      inp.value = a[field] || "";
+      const save = async () => { if (inp.value !== (a[field] || "")) { const r2 = await patch(a, { [field]: inp.value }); if (r2) a[field] = r2[field]; } mount(box, show()); };
+      inp.addEventListener("blur", save);
+      inp.addEventListener("keydown", (e) => { if (e.key === "Escape") mount(box, show()); if (e.key === "Enter" && (!multiline || e.metaKey || e.ctrlKey)) { e.preventDefault(); inp.blur(); } });
+      mount(box, inp); inp.focus();
+    };
+    return box;
+  };
+  const list = r.annotations.length ? h("ul", { class: "list" }, r.annotations.map((a) => h("li", null, h("div", { class: "spread" },
+    h("div", { class: "row" }, a.kind === "task" ? h("input", { type: "checkbox", checked: a.task_state === "done" ? true : null, "aria-label": "Done (local)",
+      onchange: async (e) => { await patch(a, { task_state: e.target.checked ? "done" : "open" }); route(); } }) : pill("muted plain", "Note"),
+      editable(a, "title", false),
+      a.item_id ? h("a", { href: `#/item/${a.item_id}`, class: "small" }, a.item_title || "linked item") : null),
+    h("div", { class: "row" }, a.local_due ? h("span", { class: "small muted" }, "due " + fmtDate(a.local_due), " · ", C.countdown(a.local_due)) : null,
+      a.kind === "task" ? h("select", { class: "sm-select", "aria-label": "State", onchange: async (e) => { await patch(a, { task_state: e.target.value }); route(); } },
+        STATES.map(([v, l]) => h("option", { value: v, selected: a.task_state === v ? true : null }, l))) : null,
+      a.kind === "task" ? C.remindButton({ title: a.title || "To-do", due: a.local_due, annotation_id: a.id }) : null,
+      h("button", { class: "ghost sm", onclick: async () => { await guard(() => api(A(`/annotations/${a.id}`), { method: "DELETE" })); route(); } }, "Delete"))),
+    editable(a, "body", true)))) : empty("Nothing here", "");
+  mount(main, pageHead("Notes & tasks", "Your own notes and to-dos. Stored locally, kept across every refresh, and never sent to Canvas. Click any text to edit it."),
     h("div", { class: "card" }, h("div", { class: "row" }, title, due, h("button", { class: "primary", onclick: async () => {
       if (!title.value.trim()) return;
       const body = { kind: "task", title: title.value };
@@ -851,14 +955,7 @@ VIEWS.notes = async (main, _p, params) => {
       await guard(() => api(A("/annotations"), { method: "POST", body })); route();
     } }, "Add to-do"))),
     h("div", { style: "margin:14px 0 8px" }, chips),
-    h("div", { class: "card" }, r.annotations.length ? h("ul", { class: "list" }, r.annotations.map((a) => h("li", null, h("div", { class: "spread" },
-      h("div", { class: "row" }, a.kind === "task" ? h("input", { type: "checkbox", checked: a.task_state === "done" ? true : null, "aria-label": "Done (local)",
-        onchange: async (e) => { await guard(() => api(A(`/annotations/${a.id}`), { method: "PATCH", body: { task_state: e.target.checked ? "done" : "open" } })); route(); } }) : pill("muted plain", "Note"),
-        h("span", { class: "strong" }, a.title || (a.body || "").slice(0, 80)),
-        a.item_id ? h("a", { href: `#/item/${a.item_id}`, class: "small" }, a.item_title || "linked item") : null),
-      h("div", { class: "row" }, a.local_due ? h("span", { class: "small muted" }, "due " + fmtDate(a.local_due)) : null,
-        h("button", { class: "ghost sm", onclick: async () => { await guard(() => api(A(`/annotations/${a.id}`), { method: "DELETE" })); route(); } }, "Delete"))),
-      a.body && a.title ? h("div", { class: "small", style: "white-space:pre-wrap;margin-top:4px" }, a.body) : null))) : empty("Nothing here", "")),
+    filter === "board" ? C.kanbanView({ title: "To-do board" }) : h("div", { class: "card" }, list),
     h("div", { style: "margin-top:16px" }, C.filesCard(files.files)));
 };
 
@@ -967,6 +1064,35 @@ function scopeEditor(scope, courses) {
 }
 
 // ---------- settings ----------
+// Optional OCR (app-wide): text from photos and scanned PDFs, with a confidence flag per document.
+function ocrCard(s) {
+  const on = h("input", { type: "checkbox", checked: s.enabled ? true : null, disabled: s.tesseract ? null : true });
+  const lang = h("input", { type: "text", value: s.lang || "eng", "aria-label": "OCR languages", style: "width:140px" });
+  const result = h("div", { class: "small", "aria-live": "polite" });
+  return h("div", { class: "card" }, h("div", { class: "card-head" }, h("h2", null, "Text from scans and photos (OCR)"),
+    pill(s.enabled && s.tesseract ? "ok" : "muted", s.enabled && s.tesseract ? "On" : "Off")),
+    h("p", { class: "small muted" }, `Reads text from photographed forms and scanned PDFs on this computer with tesseract. Each document gets a confidence score; below ${s.low_confidence_below}% it is flagged, because handwriting and formulas are often misread. Nothing is uploaded.`),
+    s.tesseract ? h("p", { class: "small" }, `Found ${s.version || "tesseract"}${s.pdf ? " and pdftoppm (scanned PDFs)" : " — scanned PDFs also need pdftoppm (brew install poppler)"}.`)
+      : h("div", { class: "banner warn" }, h("div", { class: "b-body" }, h("div", { class: "b-title" }, "tesseract is not installed"), h("div", { class: "small" }, s.install_hint))),
+    h("label", { class: "check" }, on, h("strong", null, "Read text from scans and photos")),
+    h("div", { class: "row", style: "margin-top:6px" }, h("label", { class: "small" }, "Languages ", lang), h("span", { class: "tiny muted" }, "e.g. eng, or eng+chi_tra (language packs must be installed)")),
+    h("div", { class: "row", style: "margin-top:10px" }, h("button", { class: "primary", onclick: async () => {
+      const r = await guard(() => api("/api/ocr", { method: "PUT", body: { enabled: !!on.checked, lang: lang.value.trim() || "eng" } }));
+      if (r) { toast(r.enabled ? "OCR is on" : "OCR is off"); route(); } } }, "Save"),
+      s.enabled && s.tesseract && s.pending ? h("button", { onclick: async (e) => {
+        e.target.disabled = true; result.textContent = "Reading…";
+        const r = await guard(() => api("/api/ocr/run", { method: "POST", body: { limit: 10 } }));
+        e.target.disabled = false;
+        if (r) mount(result, h("ul", { class: "list" }, r.processed.map((x) => h("li", null, x.filename || x.resource_id.slice(0, 12), " — ",
+          pill(x.status === "ocr" ? "ok" : "warn", x.status === "ocr" ? "text read" : x.status === "ocr_low_confidence" ? "low confidence" : x.status),
+          x.confidence != null ? ` ${Math.round(x.confidence)}%` : ""))), h("p", { class: "tiny muted" }, `${r.pending} still to read`));
+      } }, `Read ${Math.min(10, s.pending)} of ${s.pending} stored document${s.pending === 1 ? "" : "s"}`) : null,
+      s.enabled && s.tesseract && s.failed ? h("button", { class: "ghost", onclick: async () => {
+        const r = await guard(() => api("/api/ocr/run", { method: "POST", body: { limit: 10, retry_failed: true } }));
+        if (r) { toast(`${r.failed} still could not be read`); route(); } } }, `Retry ${s.failed} that could not be read`) : null),
+    result);
+}
+
 VIEWS.settings = async (main) => {
   const [backups, info] = await Promise.all([api("/api/backups"), api("/api/info")]);
   const inst = currentInstance();
@@ -981,7 +1107,7 @@ VIEWS.settings = async (main) => {
           if (!confirm("Restore this backup? Current data will be moved aside (not deleted).")) return;
           const r = await guard(() => api(`/api/backups/${encodeURIComponent(f.name)}/restore`, { method: "POST" }));
           if (r) { toast("Restored"); await loadIdentities(); route(); } } }, "Restore") : null))))) : null));
-  const file = h("input", { type: "file", accept: ".zip" });
+  const file = h("input", { type: "file", accept: ".zip", "aria-label": "Export archive to import (.zip)" });
   cards.push(h("div", { class: "card" }, h("h2", null, "Import"), h("p", { class: "muted small" }, "Import a portable export created by Canvas Hub. Data is attached to the account named inside the export and never merged into a different account."),
     h("div", { class: "row" }, file, h("button", { onclick: async () => {
       if (!file.files[0]) return;
@@ -1001,6 +1127,9 @@ VIEWS.settings = async (main) => {
       } }, "Delete data"))));
   }
   if (S.accountId) { const ws = await api(A("/writes")).catch(() => null); if (ws) cards.push(C.writesSettingsCard(ws)); }
+  if (S.accountId) { const ch = await api(A("/custom-html")).catch(() => null); if (ch) cards.push(C.customHtmlCard(ch)); }
+  const ocrS = await api("/api/ocr").catch(() => null);
+  if (ocrS) cards.push(ocrCard(ocrS));
   const acfg = await api("/api/assistant/config").catch(() => null);
   if (acfg) {
     const active = acfg.profiles.find((x) => x.id === acfg.active_profile);

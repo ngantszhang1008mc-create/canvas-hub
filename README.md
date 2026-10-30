@@ -96,6 +96,14 @@ In another terminal, run `uv run canvas-hub --home /tmp/canvas-hub-demo serve`, 
   - A timetable `.ics` can be imported into the Planner. Each saved class time repeats every week; fortnightly events are skipped and reported.
 - **Files:** finished work the assistant writes can be saved under **Notes & tasks → Files**, downloaded, or attached to a prepared submission. Uploaded UTF-8 text files (such as Markdown, CSV and JSON) can also be read back by the assistant.
 - **Trackers page:** the assistant can build a **score model** for a course, with each assessed line, its points, gating rules (all-or-nothing, minimum hours) and the pass mark. Untick lines you plan to skip and the total, ceiling and margin update immediately. It can also build a **checklist** that can be linked to your to-dos. Both are saved, with undo, and the assistant can read back what you ticked.
+- **Grade projections and hours:** the assistant can build a **grade projector** for a course. You enter what-if scores and see your letter, and the score you need on the rest for each letter. It can also build an **hours tracker** for service hours, where nothing counts until the minimum and the line is lost if the deadline passes below it. Both show warnings when a plan is at risk.
+- **To-dos:** to do / in progress / blocked / done, with a **Board** view you can drag cards across. Click any title or body to edit it, and tick `- [ ]` lines in place.
+- **Reminders:** the ⏰ button on a deadline or to-do reminds you inside the app (and optionally with a desktop notification) while it is open.
+- **More views:** a term timeline of modules and exams, and a workload heatmap. Anything with dates can be exported as `.ics`; any component can be saved as an HTML snapshot or printed to PDF.
+- **Grading rules and formulas:** Canvas usually reports 0 for every group weight. Each course page has a **Grading rules** card for the syllabus weights and the pass mark, and the assistant can also save rules Canvas lacks (minimum hours, all-or-nothing lines, a formula such as `if(hours >= 10, 20 * min(1, hours / 20), 0)`). Score models and projections use them; they stay on this computer.
+- **All courses at a glance:** the Overview shows every course on one scale: grade so far, work done, what is lost, and what is due next.
+- **Custom blocks (advanced, off by default):** when no built-in view fits, the assistant can write its own HTML. It runs only when you press **Run**, in an isolated frame with no network access.
+- **Text from scans and photos (optional):** with [tesseract](https://tesseract-ocr.github.io/) installed (`brew install tesseract poppler`), Canvas Hub can read photographed forms and scanned PDFs. Each document shows a confidence score, and low-confidence text is flagged.
 - **Planner page:** add your class times, see your week with deadlines and to-dos, get suggested study blocks, and export to Apple Calendar (`.ics`). It's a local plan only.
 - **Agent requests page:** for sites outside Canvas (like a separate course website), leave a request that a connected agent with its own browser access can fulfil. Run the MCP server with `--allow-fulfil` for that agent. The text it sends back is stored, searchable, and labelled as agent-provided.
 - **Direct Codex connection:** reserved for Codex to build (see `CODEX_HANDOFF.md` §6). Codex can already use the MCP server.
@@ -133,6 +141,8 @@ uv sync
 uv run pytest -q                    # all tests, including real-Chromium end-to-end runs (~35 s)
 uv run pytest -q -m "not browser"   # fast tests (~2 s)
 ```
+
+To use an existing Chromium installation for both collection and browser tests, set `CANVAS_HUB_CHROMIUM` to its executable path before running these commands.
 
 Code map:
 

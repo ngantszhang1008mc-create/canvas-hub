@@ -555,6 +555,72 @@ canvas-hub mcp --allow-settings     # + scope changes
   - LTI tools are not launched, because launching can record attendance or start attempts.
   - OCR is phase 4.
 
+### Phase 3: projections, hours, board, timeline, workload, reminders
+
+- **Grade projector** (`projections.py`, component kind `grade_projector`, tool `show_grade_projector`):
+  - Categories with weights and items with max and score; ungraded items take *what-if* scores from the saved state.
+  - Like Canvas, only categories with counted items are included, with weights re-normalised; with no weights, points are pooled. `drop_lowest` is supported.
+  - For each letter it reports the uniform score needed on everything still ungraded, found by bisection. A value over 100 means out of reach (shown as "102% (over 100)").
+  - `course_id` alone drafts categories from Canvas assignment groups. Canvas weights are often 0, so the tool tells the assistant to ask for the syllabus weights.
+- **Hours tracker** (kind `hours_tracker`, tool `show_hours_tracker`):
+  - Logged entries add up. Nothing counts until `minimum`, then points scale up to `target`.
+  - Below the minimum when the deadline passes, the line is *lost* (the reset rule).
+  - It shows the hours needed per week, and when the total was last checked against the source portal.
+- **Score alerts:** `scoring.alerts` (mirrored in `components.js`) warns about:
+  - a ceiling below the pass mark;
+  - a plan that fails, or a thin margin;
+  - gated lines currently worth 0;
+  - planned lines past due;
+  - all-or-nothing lines due within a week.
+- **To-do states:** to-dos are now open / in_progress / blocked / done. `task_state="active"` means not done.
+  - `show_kanban` shows a board with drag-and-drop and ← / → buttons for keyboard users.
+  - **Notes & tasks** edits titles and bodies in place, ticks `- [ ]` lines, and has a **Board** view.
+- **Timeline** (`show_timeline`): a course's modules across the term, with unlock dates, prerequisites, and due/exam markers. **Workload heatmap** (`show_heatmap`): deadlines per day, weighted by points.
+- **Reminders** (`services/reminders.py`, table `reminders`):
+  - Set from Deadlines rows, to-dos and the board, or with `set_reminder` / `list_reminders`.
+  - The page asks `POST /reminders/due` when it polls the bell; each reminder fires once, as a toast and optionally a desktop notification.
+  - In-app only: no OS or external schedule is created.
+- **Export:** the component menu adds:
+  - `.ics` for anything with dates;
+  - a self-contained HTML snapshot, with its own CSP and no scripts;
+  - **Print / Save as PDF** for one component.
+
+### Phase 4: formulas, local grading rules, custom HTML, dashboard, accessibility, OCR
+
+- **Formula language** (`formula.py`, browser twin `web/static/formula.js`):
+  - One small grammar, two hand-written parsers. There is no `eval` (the page CSP forbids it anyway). Both refuse nesting deeper than 32 levels.
+  - Arithmetic, comparisons, and/or/not, and the functions min, max, round, floor, ceil, abs, sqrt, clamp and lazy `if(c, a, b)`.
+  - Rounding is half away from zero, and `%` takes the sign of the divisor on both sides. A non-finite value at any step is an error, so both sides agree on edge cases.
+  - `tests/fixtures/formula_vectors.json` runs through both. The Node run must match Python bit for bit.
+- **Formula lines:** a score-model bucket can carry `formula`, for rules Canvas shows only as an image, e.g. `if(hours >= 10, 20 * min(1, hours / 20), 0)`.
+  - Names available: value, hours, max, full_at, min_value. The result is kept between 0 and max, and gating still applies.
+  - The page recomputes formula lines live with `formula.js`.
+- **Local grading rules** (`services/grading.py`, `account_settings` key `grading:<course id>`):
+  - Group weights and drop-lowest.
+  - Per assignment (by Canvas id): unit, gating, min_value, full_at, formula, exclude, note.
+  - Pass mark, letter scale and source.
+  - `course_score_lines` and the projector draft apply them. Tools: `get_grading_rules`, `set_grading_rules` (the latter needs notes permission).
+  - The course page has a **Grading rules** card. Rules are never sent to Canvas. Category nesting is not modelled: use one group per graded category.
+- **Custom HTML blocks** (`show_html`; `/sandbox` + `web/static/sandbox.html`):
+  - Off by default (`account_settings.custom_html`), and each block runs only after **Run**.
+  - The frame is `sandbox="allow-scripts"` (opaque origin: no cookies, storage or parent access). `/sandbox` has its own CSP: inline only, `connect-src 'none'`, images only from `data:`/`blob:`, `frame-ancestors 'self'`.
+  - Data arrives by `postMessage` as frozen `window.hubData`.
+  - The app CSP changed only `frame-src 'none'` → `'self'`.
+  - **Residual risk:** a sandboxed frame can still navigate itself to another site, and no browser control blocks that; the setting text says so.
+- **Dashboard** (`show_dashboard`, `GET /api/accounts/{id}/dashboard`, also on Overview when there is more than one course):
+  - Grade so far, weighted when local or Canvas weights exist.
+  - Work done / lost, due within N days, and the next deadline.
+- **Accessibility:**
+  - Every control, meter and graphic on the main views has an accessible name; `test_every_control_has_an_accessible_name` audits them in Chromium.
+  - Heatmap days with deadlines are announced with what is due, and empty days are hidden from screen readers.
+  - Timeline bars and the dashboard table have labels and a caption.
+  - Focus outlines are visible.
+- **OCR** (`ocr.py`; app setting `ocr` in `app_settings`, off by default):
+  - Runs local tesseract on images, and on scanned PDFs page by page via pdftoppm (up to 40 pages).
+  - Status `ocr`, or `ocr_low_confidence` below 70% mean word confidence; the text is kept but flagged. `resources.ocr_confidence` (migration 0007) holds the score.
+  - **Data & settings → Text from scans and photos** runs it on stored documents, 10 at a time, and re-indexes search. `get_item` adds a caution to OCR'd documents.
+  - Install on the Mac: `brew install tesseract poppler`.
+
 ### Still left for Codex
 
 1. **Codex-side configuration.** Register `canvas-hub mcp` (with whatever flags the user chooses) in Codex's MCP configuration. Re-check [MCP tools for Codex](https://learn.chatgpt.com/docs/extend/mcp).
@@ -573,9 +639,11 @@ Notes for that work:
 
 ## 7. Test results, limitations and manual acceptance
 
-### Automated tests (ran in this environment, Linux, Python 3.13)
+### Automated tests
 
-`uv run pytest -q` gives **59 passed** (about 45 s). `tests/test_agents.py` covers the MCP server over stdio, tool permissions and validation, account binding, the assistant loop with both provider types against scripted endpoints, permission gating, key storage and masking, and the Claude API request shape.
+The complete four-phase stack passed **203 tests** on Linux with Python 3.12 and system Chromium 154, including real browser collection, the sandbox and accessibility checks, Python/JavaScript formula parity, and real tesseract OCR. No tests were skipped. Real institution and live AI-provider checks remain separate below.
+
+Run `uv run pytest -q` for the complete suite, including browser, formula, projection, grading, and OCR checks. Set `CANVAS_HUB_CHROMIUM` to use a system browser; otherwise install the pinned Playwright Chromium first. `tests/test_agents.py` covers the MCP server over stdio, tool permissions and validation, account binding, the assistant loop with both provider types against scripted endpoints, permission gating, key storage and masking, and the Claude API request shape.
 
 **`tests/test_parsing.py`** covers:
 - URL normalization and rejection, and link classification.
@@ -619,7 +687,7 @@ Notes for that work:
 - **Session expires mid-job:** the job moves to `needs_login`, partial data is kept, sign-in again resumes it automatically to completion, and the database integrity check passes.
 - **Simulated crash:** the job becomes `interrupted`, resumes from its checkpoint and completes; a cancelled job keeps prior data.
 - **A different user signed in:** the first account's job refuses, and no data is mixed.
-- **Closed window:** background polling never launches a browser; after the window closes, a real check reports `expired`, not `signed_in`.
+- **Closed window:** background polling never launches a browser or assumes the account is signed in. A real check reopens the saved profile headlessly and verifies the session with Canvas: persistent valid sessions are accepted, and server-expired sessions report `expired` even if the browser retained a cookie.
 
 UI walk-through, scripted in Playwright against the synthetic Canvas:
 - Setup, sign-in, baseline, then every view checked at 1280 px and 390 px wide, with no console or CSP errors.
@@ -646,6 +714,6 @@ The step-by-step checklist is in `docs/REAL_CANVAS_ACCEPTANCE.md`.
 - **Discussion replies:** read only in thorough mode. "Staff" means course teachers plus announcement authors, so TAs who never post announcements are not recognised as staff.
 - **Read state:** viewing a discussion's reply view may mark it read on some Canvas versions; the brief accepts this. Inbox reads use `auto_mark_as_read=false`.
 - **Discrepancy detection:** heuristic. It flags an announcement sentence that names an assignment and states a different month/day.
-- **OCR:** no OCR is performed. Scanned PDFs are marked `needs_ocr`, and images are marked `image_only`.
+- **OCR:** optional and off by default. Scanned PDFs and images can be processed locally when tesseract (plus pdftoppm for PDFs) is installed; low-confidence text is flagged. PDF OCR processes up to 40 pages per document.
 - **Inline images:** images embedded in Canvas pages are not displayed in the app. The strict CSP blocks remote loads, and the images need a Canvas sign-in. Their alt text is shown, and links open in Canvas.
-- **Scheduling:** no background or recurring collection, and no external schedules were created. Collection is user-initiated.
+- **Scheduling:** optional automatic quick checks and reminders run only while the app is open. No external or operating-system schedules are created.

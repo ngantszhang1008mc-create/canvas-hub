@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Custom block</title>
+<style>
+  html { color-scheme: light dark; }
+  body { margin: 0; padding: 8px; font: 14px/1.45 system-ui, sans-serif; }
+</style>
+<script data-shell>
+// Canvas Hub sandbox shell. Framed with sandbox="allow-scripts" (opaque origin: no cookies, no access to the
+// app) and served with a CSP that blocks every network request. It waits for one message from the app page
+// holding the HTML to show and the read-only data (exposed as window.hubData), then reports its height.
+(function () {
+  var shown = false;
+  function freeze(o) {
+    if (o && typeof o === "object") { Object.getOwnPropertyNames(o).forEach(function (k) { freeze(o[k]); }); Object.freeze(o); }
+    return o;
+  }
+  function report() {
+    // the body, not the document: the document is never shorter than the frame, so it could not shrink
+    var r = document.body.getBoundingClientRect();
+    parent.postMessage({ type: "canvas-hub-height", height: Math.ceil(r.height + r.top + 8) }, "*");
+  }
+  addEventListener("message", function (e) {
+    if (shown || e.source !== parent || !e.data || e.data.type !== "canvas-hub-render") return;
+    shown = true;
+    Object.defineProperty(window, "hubData", { value: freeze(e.data.data == null ? null : e.data.data), writable: false, configurable: false });
+    var doc = new DOMParser().parseFromString(String(e.data.html || ""), "text/html");
+    [[doc.head, document.head], [doc.body, document.body]].forEach(function (pair) {
+      Array.prototype.slice.call(pair[0].childNodes).forEach(function (n) { pair[1].appendChild(document.adoptNode(n)); });
+    });
+    // Parsed scripts never run; re-create them (all of them, in document order, after the markup is in place).
+    Array.prototype.slice.call(document.querySelectorAll("script")).forEach(function (old) {
+      if (old === document.currentScript || old.hasAttribute("data-shell")) return;
+      var s = document.createElement("script");
+      Array.prototype.forEach.call(old.attributes, function (a) { s.setAttribute(a.name, a.value); });
+      s.textContent = old.textContent;
+      old.replaceWith(s);
+    });
+    if (window.ResizeObserver) new ResizeObserver(report).observe(document.body);
+    report();
+  });
+  parent.postMessage({ type: "canvas-hub-ready" }, "*");
+})();
+</script>
+</head>
+<body></body>
+</html>

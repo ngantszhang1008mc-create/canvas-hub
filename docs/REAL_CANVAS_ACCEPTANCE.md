@@ -135,3 +135,26 @@ Writing to Canvas is real: use a low-stakes assignment or a draft.
 | 11.7 | **Deadlines → Dates found in course pages** | The COMP2711H midterm (Rm 2503/2504, 19:00–22:00) is suggested. **Confirm** puts it in the Planner |
 | 11.8 | **Courses** | AISC1000A / COMP4900 / LANG1406 duplicates show *Possible duplicate*; TEMG1011 shows *Not accessible*; empty or hidden shells are labelled |
 | 11.9 | Start `canvas-hub mcp --allow-fulfil` in Codex and ask it to serve requests | **Agent requests** shows Codex as connected; an open COMP1023 request is claimed |
+
+## 12. Projections, hours, board and reminders
+
+| # | Step | Expected |
+| --- | --- | --- |
+| 12.1 | Ask "Project my grade in <course> — the syllabus weights are …" | A grade projector with your graded items. The current percent matches Canvas's (graded categories only). Each letter shows the score needed on the rest, and an unreachable letter shows "over 100" |
+| 12.2 | Drag a what-if slider, or press **Assume on the rest: 80%** | The percent and letter update at once and are kept after a reload |
+| 12.3 | Ask for an SDE service-hours tracker (20 h, 10 h minimum, deadline from the syllabus), then log your hours | Below 10 h it shows *0 until 10 h* and an alert. It shows the hours needed per week and when you last checked Engage |
+| 12.4 | **Notes & tasks → Board**: move a to-do to *In progress* and another to *Blocked* | The states are kept, and the assistant's `show_kanban` shows the same board |
+| 12.5 | On a Deadlines row press ⏰ → **In 1 hour** (or a custom time a few minutes away) and leave the app open | A toast (and a desktop notification if enabled) appears once at that time |
+| 12.6 | Ask for a timeline of a course's modules and a workload heatmap | Locked modules show their unlock date and prerequisites; busy days are darker |
+| 12.7 | On a deadlines card choose **Copy ▾ → Download .ics (calendar)**, then open it in Calendar; on the projector choose **Print / Save as PDF** | The events import; the PDF contains only that component |
+
+## 13. Formulas, grading rules, dashboard, custom blocks and OCR
+
+| # | Step | Expected |
+| --- | --- | --- |
+| 13.1 | On a course page, open **Grading rules**, enter the syllabus weights (e.g. HMAW1905B) and the pass mark, then **Save rules** | The weights add up to 100% (otherwise a red note). Asking for a grade projection of that course uses them |
+| 13.2 | Ask "Track my SDE hours in the score model; 0 until 10 h, then 20 × hours / 20" | The SDE line shows the formula. Entering 8.5 h gives 0 and 15 h gives 15, both on the page and in the assistant's read-back |
+| 13.3 | **Overview** | **All courses** lists each course with grade so far, work done, lost lines and the next deadline; course names open the course |
+| 13.4 | **Data & settings → Custom HTML blocks**: switch on. Ask for "a custom chart of my hours by week" | A block appears with **Run**; nothing runs before you press it. After **Run** the chart shows, and the block cannot load anything from the internet |
+| 13.5 | Install tesseract (`brew install tesseract poppler`), restart, then **Data & settings → Text from scans and photos**: switch on and press **Read … stored documents** | Photographed forms and scanned problem sheets get text with a confidence score. Low-confidence ones say *OCR, low confidence*. Their words become searchable |
+| 13.6 | With VoiceOver (⌘F5), tab through **Trackers** and the workload heatmap | Every control is announced by name, and heatmap days with deadlines read out what is due |

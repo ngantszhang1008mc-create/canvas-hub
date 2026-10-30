@@ -6,6 +6,8 @@
 // same rules as canvas_hub/scoring.py. Clicking an item opens a side panel with
 // its full content.
 
+import { evaluate as formulaEval } from "./formula.js";
+
 export function makeComponents(env) {
   const { h, mount, api, A, toast, guard, fmtDate, until, ago, pill, submissionPill, TYPE_LABEL, renderTimetable,
     fieldValue, store } = env;
@@ -54,6 +56,49 @@ export function makeComponents(env) {
     for (const m of document.querySelectorAll(".cmp-menu:not([hidden])")) if (!m.parentElement.contains(e.target)) m.hidden = true;
   });
 
+  // ---------- exports: calendar, snapshot, print ----------
+  const icsEsc = (t) => String(t ?? "").replace(/\\/g, "\\\\").replace(/;/g, "\\;").replace(/,/g, "\\,").replace(/\n/g, "\\n");
+  const icsTime = (iso) => new Date(iso).toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
+  function toICS(events, name) {
+    const stamp = icsTime(new Date().toISOString());
+    const lines = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//Canvas Hub//Components//EN", `X-WR-CALNAME:${icsEsc(name)}`];
+    events.forEach((e, i) => {
+      const start = new Date(e.start); if (Number.isNaN(start.getTime())) return;
+      const end = e.end ? new Date(e.end) : new Date(start.getTime() + 30 * 60000);
+      lines.push("BEGIN:VEVENT", `UID:canvashub-${slug(name)}-${i}-${icsTime(start.toISOString())}@local`, `DTSTAMP:${stamp}`,
+        `DTSTART:${icsTime(start.toISOString())}`, `DTEND:${icsTime(end.toISOString())}`, `SUMMARY:${icsEsc(e.title)}`,
+        e.description ? `DESCRIPTION:${icsEsc(e.description)}` : null, "END:VEVENT");
+    });
+    lines.push("END:VCALENDAR");
+    return lines.filter(Boolean).join("\r\n") + "\r\n";
+  }
+  const htmlEsc = (t) => String(t ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  function snapshotHTML(d, title) {
+    // A read-only, self-contained copy: the Markdown rendered as escaped text and tables, no scripts.
+    const body = d.markdown.split("\n\n").map((block) => {
+      const rows = block.split("\n").filter((l) => /^\|.*\|$/.test(l.trim()));
+      if (rows.length >= 2 && rows.length === block.split("\n").length) {
+        const cells = rows.filter((_, i) => i !== 1).map((r) => r.trim().slice(1, -1).split(" | "));
+        return `<table><thead><tr>${cells[0].map((c) => `<th>${htmlEsc(c)}</th>`).join("")}</tr></thead><tbody>${cells.slice(1).map((r) => `<tr>${r.map((c) => `<td>${htmlEsc(c)}</td>`).join("")}</tr>`).join("")}</tbody></table>`;
+      }
+      return `<p>${htmlEsc(block).replace(/\n/g, "<br>")}</p>`;
+    }).join("\n");
+    return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
+<title>${htmlEsc(d.title || title || "Canvas Hub snapshot")}</title><style>body{font:15px/1.5 system-ui,sans-serif;max-width:900px;margin:24px auto;padding:0 16px;color:#1e1b16;background:#faf8f2}
+table{border-collapse:collapse;width:100%;margin:12px 0}th,td{border-bottom:1px solid #ddd5c4;padding:6px 8px;text-align:left}th{font-size:12px;text-transform:uppercase;color:#554d40}
+footer{margin-top:24px;font-size:12px;color:#8b8170}</style></head><body><h1>${htmlEsc(d.title || title || "Snapshot")}</h1>${body}
+<footer>Read-only snapshot from Canvas Hub, ${htmlEsc(new Date().toLocaleString())}. Values are as stored when exported.</footer></body></html>`;
+  }
+  function printOnly(el) {
+    el.classList.add("print-target");
+    document.body.classList.add("printing-one");
+    const done = () => { el.classList.remove("print-target"); document.body.classList.remove("printing-one"); window.removeEventListener("afterprint", done); };
+    window.addEventListener("afterprint", done);
+    window.print();
+    setTimeout(done, 1500);
+  }
+
   // ---------- frame: title + universal toolbar ----------
   // getData() -> { title, markdown, csv?, json, filename? , text? }
   function frame(kind, title, body, getData, { extra = [], sticky = false, full: startFull = false, onFull = null } = {}) {
@@ -71,6 +116,9 @@ export function makeComponents(env) {
       opts.push(["Download .md", () => download(d.markdown, `${base}.md`, "text/markdown")]);
       if (d.csv != null) opts.push(["Download .csv", () => download(d.csv, `${base}.csv`, "text/csv")]);
       opts.push(["Download .json", () => download(JSON.stringify(d.json, null, 2), `${base}.json`, "application/json")]);
+      if (d.ics && d.ics.length) opts.push(["Download .ics (calendar)", () => download(toICS(d.ics, d.title || title), `${base}.ics`, "text/calendar")]);
+      opts.push(["Download snapshot (.html)", () => download(snapshotHTML(d, title), `${base}-snapshot.html`, "text/html")]);
+      opts.push(["Print / Save as PDF", () => printOnly(wrap)]);
       mount(menu, opts.map(([l, fn]) => h("button", { class: "cmp-menu-item", role: "menuitem", onclick: () => { menu.hidden = true; fn(); } }, l)));
     };
     copyBtn.addEventListener("click", (e) => { e.stopPropagation(); if (menu.hidden) fill(); menu.hidden = !menu.hidden; });
@@ -157,10 +205,12 @@ export function makeComponents(env) {
         submissionPill(x.submission ? { ...x.submission, state: x.submission.state } : null)),
       h("div", { class: "row", style: "margin-top:8px" },
         h("button", { class: "sm", onclick: async (ev) => { const r = await guard(() => api(A("/annotations"), { method: "POST", body: { kind: "task", item_id: x.item_id, title: x.title } })); if (r) { ev.target.textContent = "✓ Added"; ev.target.disabled = true; } } }, "+ To-do"),
-        x.source_url ? h("a", { class: "btn sm", href: x.source_url, target: "_blank", rel: "noopener noreferrer" }, "Open in Canvas") : null))) : h("div", { class: "muted small" }, "No deadlines in that range."));
+        x.source_url ? h("a", { class: "btn sm", href: x.source_url, target: "_blank", rel: "noopener noreferrer" }, "Open in Canvas") : null,
+        remindButton({ title: `Due: ${x.title}`, due: x.due_local, item_id: x.item_id })))) : h("div", { class: "muted small" }, "No deadlines in that range."));
     afterRender();
     return frame("deadlines", "Deadlines", body, () => ({ title: "Deadlines", markdown: toMD(["Title", "Course", "Due", "Status"], rows),
-      csv: toCSV(["Title", "Course", "Due", "Status"], rows), json: d.deadlines }));
+      csv: toCSV(["Title", "Course", "Due", "Status"], rows), json: d.deadlines,
+      ics: d.deadlines.map((x) => ({ title: `Due: ${x.title}`, start: new Date(new Date(x.due_local) - 30 * 60000).toISOString(), end: x.due_local, description: x.course || "" })) }));
   }
   function itemsView(d) {
     const rows = d.items.map((x) => [x.title || "", TYPE_LABEL[x.type] || x.type, x.course || "", x.due || "", x.source_url || ""]);
@@ -429,7 +479,16 @@ export function makeComponents(env) {
       r.included = st.include[b.id] !== false;
       if (!r.included) return { ...r, note: "skipped" };
       let pts;
-      if (b.unit === "hours") {
+      if (b.formula) {
+        const val = st.values[b.id] ?? b.full_at ?? b.max;
+        r.value = val;
+        try {
+          pts = Math.min(b.max, Math.max(0, formulaEval(b.formula, { value: val, hours: b.unit === "hours" ? val : 0, max: b.max,
+            full_at: b.full_at || 0, min_value: b.min_value || 0 })));
+          if (b.gating === "min_threshold" && val < (b.min_value || 0)) { pts = 0; r.gated = true; r.note = `0 until ${fmtN(b.min_value)}${b.unit === "hours" ? " h" : ""}`; }
+          else if (b.gating === "all_or_nothing" && pts < b.max) { pts = 0; r.gated = true; r.note = "all or nothing"; }
+        } catch (e) { pts = 0; r.gated = true; r.note = e.message; }
+      } else if (b.unit === "hours") {
         const hrs = st.values[b.id] ?? b.full_at ?? 0;
         r.value = hrs;
         pts = b.full_at ? b.max * Math.min(1, hrs / b.full_at) : b.max;
@@ -460,8 +519,28 @@ export function makeComponents(env) {
       else if (x.status === "pending") { if (x.included) g.remaining += x.points; else g.skipped += x.max; }
       g.lost += x.lost;
     }
-    return { lines, totals: t, groups };
+    return { lines, totals: t, groups, alerts: alerts(model, lines, t) };
   }
+  // Mirror of canvas_hub/scoring.py alerts().
+  function alerts(model, lines, t) {
+    const out = [], now = Date.now(), byId = Object.fromEntries(model.buckets.map((b) => [b.id, b])), thr = t.threshold;
+    if (thr != null) {
+      if (t.ceiling < thr - 1e-9) out.push({ level: "bad", text: `Even full marks on everything left gives ${fmtN(t.ceiling)}, below the pass mark ${fmtN(thr)}.` });
+      else if (!t.passes) out.push({ level: "bad", text: `Below the pass mark by ${fmtN(thr - t.projected)} with this plan.` });
+      else if (t.margin < Math.max(1, 0.05 * thr)) out.push({ level: "warn", text: `Only ${fmtN(t.margin)} to spare: losing any line worth more fails.` });
+    }
+    for (const x of lines) {
+      const b = byId[x.id];
+      if (x.status !== "pending" || !x.included) continue;
+      const due = b.due && b.due.length > 10 ? new Date(b.due).getTime() : null;
+      if (x.gated && b.unit === "hours" && b.gating === "min_threshold" && (x.value ?? 0) < (b.min_value || 0)) out.push({ level: "bad", text: `${b.label}: counts 0 until ${fmtN(b.min_value)} h are reached.` });
+      else if (x.gated) out.push({ level: "bad", text: `${b.label}: ${x.note} — currently worth 0.` });
+      if (due && due < now) out.push({ level: "warn", text: `${b.label} is past its due date but still planned.` });
+      else if (b.gating === "all_or_nothing" && due && due - now < 7 * 86400e3) out.push({ level: "warn", text: `At risk: ${b.label} is all-or-nothing and due within a week.` });
+    }
+    return out;
+  }
+  const alertList = (list) => list && list.length ? h("div", { class: "alerts", role: "status" }, list.map((a) => h("div", { class: `alert ${a.level}` }, a.level === "bad" ? "⚠ " : "• ", a.text))) : null;
 
   // Shared plumbing for saved components: debounced save with version check, undo, pin.
   // Saves run one at a time. Each carries the edit number it was taken at; when a
@@ -575,14 +654,21 @@ export function makeComponents(env) {
         const pending = b.status === "pending";
         const box = h("input", { type: "checkbox", checked: x.included && b.status !== "locked" ? true : null, disabled: pending ? null : true,
           "aria-label": `Include ${b.label}`, onchange: (e) => ctl.setState((s) => ({ ...s, scenario: null, include: { ...(s.include || {}), [b.id]: e.target.checked } })) });
-        const input = pending && x.included ? h("input", { type: "number", class: "num-in", min: 0, step: b.unit === "hours" ? 0.5 : 1, max: b.unit === "hours" ? null : b.max,
-          value: x.value ?? "", "aria-label": `${b.unit === "hours" ? "Hours" : "Points"} for ${b.label}`,
-          onchange: (e) => { const n = e.target.value === "" ? null : Number(e.target.value); ctl.setState((s) => { const vals = { ...(s.values || {}) }; if (n == null || Number.isNaN(n)) delete vals[b.id]; else vals[b.id] = n; return { ...s, scenario: null, values: vals }; }); } }) : null;
+        const setVal = (n) => ctl.setState((s) => { const vals = { ...(s.values || {}) }; if (n == null || Number.isNaN(n)) delete vals[b.id]; else vals[b.id] = n; return { ...s, scenario: null, values: vals }; });
+        const top = b.unit === "hours" ? Math.max(b.full_at || b.max, (x.value || 0)) : b.max;
+        const input = pending && x.included ? h("div", { class: "num-pair" },
+          h("input", { type: "range", class: "num-slider", min: 0, max: top, step: b.unit === "hours" ? 0.5 : (b.max <= 10 ? 0.5 : 1), value: x.value ?? top,
+            "aria-label": `${b.unit === "hours" ? "Hours" : "Points"} for ${b.label} (slider)`,
+            oninput: (e) => { const n = e.target.nextSibling; if (n) n.value = e.target.value; }, onchange: (e) => setVal(Number(e.target.value)) }),
+          h("input", { type: "number", class: "num-in", min: 0, step: b.unit === "hours" ? 0.5 : 1, max: b.unit === "hours" ? null : b.max,
+            value: x.value ?? "", "aria-label": `${b.unit === "hours" ? "Hours" : "Points"} for ${b.label}`,
+            onchange: (e) => setVal(e.target.value === "" ? null : Number(e.target.value)) })) : null;
         return h("tr", { class: (x.included ? "" : "off ") + (x.gated ? "gated" : "") },
           h("td", null, box),
           h("td", null, itemLink(b.item_id, b.label), h("span", { class: "st-inline" }, pill(STATUS[b.status][0], STATUS[b.status][1])), b.due ? h("div", { class: "tiny" }, fmtDate(b.due, { weekday: true }), " · ", countdown(b.due)) : null,
             b.note ? h("div", { class: "tiny muted" }, b.note) : null),
-          h("td", null, pill(STATUS[b.status][0], STATUS[b.status][1]), b.gating !== "none" ? h("div", { class: "tiny muted" }, b.gating === "all_or_nothing" ? "all or nothing" : `min ${fmtN(b.min_value)}${b.unit === "hours" ? " h" : ""}`) : null),
+          h("td", null, pill(STATUS[b.status][0], STATUS[b.status][1]), b.gating !== "none" ? h("div", { class: "tiny muted" }, b.gating === "all_or_nothing" ? "all or nothing" : `min ${fmtN(b.min_value)}${b.unit === "hours" ? " h" : ""}`) : null,
+            b.formula ? h("div", { class: "tiny muted formula-text", title: "Formula for this line" }, h("code", null, b.formula)) : null),
           h("td", { class: "num" }, input || (b.unit === "hours" && x.value != null ? `${fmtN(x.value)} h` : "")),
           h("td", { class: "num" }, h("span", { class: "strong" }, fmtN(x.points)), ` / ${fmtN(b.max)}`, x.note && x.note !== "skipped" ? h("div", { class: "tiny bad-text" }, x.note) : null));
       });
@@ -597,8 +683,9 @@ export function makeComponents(env) {
       const cols = ["Line", "Status", "Included", "Points", "Max", "Note"];
       const rows = comp.lines.map((x) => [x.label, x.status, x.included ? "yes" : "no", x.points, byId[x.id].max, x.note || ""]);
       const data = () => ({ title: model.title, csv: toCSV(cols, rows), json: { model, state, totals: t },
+        ics: model.buckets.filter((b) => b.status === "pending" && b.due && b.due.length > 10 && (state.include || {})[b.id] !== false).map((b) => ({ title: `${b.label} (${fmtN(b.max)} ${model.unit_label || "pts"})`, start: b.due })),
         markdown: `**${model.title}** — projected ${fmtN(t.projected)}${t.threshold != null ? ` / ${fmtN(t.threshold)} (${t.passes ? "pass" : "below"}, margin ${fmtN(t.margin)})` : ""}, booked ${fmtN(t.booked)}, ceiling ${fmtN(t.ceiling)}, lost ${fmtN(t.lost)}\n\n${toMD(cols, rows)}` });
-      return frame("score", model.title, h("div", { class: "sidebar-layout" }, summary, h("div", { class: "sl-main" }, scen, table, gchart)), data,
+      return frame("score", model.title, h("div", { class: "sidebar-layout" }, summary, h("div", { class: "sl-main" }, alertList(comp.alerts), scen, table, gchart)), data,
         { extra: savedTools(v, ctl), full: ctl.full, onFull: ctl.onFull });
     });
   }
@@ -609,13 +696,14 @@ export function makeComponents(env) {
       const all = spec.sections.flatMap((s) => s.rows);
       const pts = all.reduce((s, r) => s + (r.points || 0), 0), dpts = all.reduce((s, r) => s + (done[r.id] ? r.points || 0 : 0), 0);
       const dc = all.filter((r) => done[r.id]).length;
-      const progress = (a, b) => h("div", { class: "progress", role: "progressbar", "aria-valuemin": 0, "aria-valuemax": b, "aria-valuenow": a },
+      const progress = (a, b, what = "Checklist") => h("div", { class: "progress", role: "progressbar", "aria-valuemin": 0, "aria-valuemax": b, "aria-valuenow": a,
+        "aria-label": `${what}: ${a} of ${b} done` },
         h("span", { style: `width:${b ? a / b * 100 : 0}%` }));
       const sections = spec.sections.map((s) => {
         const sp = s.rows.reduce((t, r) => t + (r.points || 0), 0), sd = s.rows.reduce((t, r) => t + (done[r.id] ? r.points || 0 : 0), 0);
         const sc = s.rows.filter((r) => done[r.id]).length;
         const det = h("details", { class: "cl-sec", open: collapsed[s.id] ? null : true },
-          h("summary", null, h("span", { class: "strong" }, s.title || "Items"), h("span", { class: "tiny muted" }, ` ${sc}/${s.rows.length}${sp ? ` · ${fmtN(sd)}/${fmtN(sp)} pts` : ""}`), progress(sc, s.rows.length)),
+          h("summary", null, h("span", { class: "strong" }, s.title || "Items"), h("span", { class: "tiny muted" }, ` ${sc}/${s.rows.length}${sp ? ` · ${fmtN(sd)}/${fmtN(sp)} pts` : ""}`), progress(sc, s.rows.length, s.title || "Items")),
           h("ul", { class: "cl-rows" }, s.rows.map((r) => h("li", { class: done[r.id] ? "done" : "" },
             h("label", { class: "check" }, h("input", { type: "checkbox", checked: done[r.id] ? true : null,
               onchange: (e) => ctl.setState((x) => { const d2 = { ...(x.done || {}) }; if (e.target.checked) d2[r.id] = true; else delete d2[r.id]; return { ...x, done: d2 }; }) }),
@@ -630,10 +718,11 @@ export function makeComponents(env) {
       const cols = ["Section", "Item", "Done", "Points", "Due"];
       const rows = spec.sections.flatMap((s) => s.rows.map((r) => [s.title, r.label, done[r.id] ? "yes" : "no", r.points ?? "", r.due || ""]));
       const data = () => ({ title: spec.title, csv: toCSV(cols, rows), json: { spec, state },
+        ics: all.filter((r) => r.due && !done[r.id]).map((r) => ({ title: r.label, start: r.due.length === 10 ? `${r.due}T23:59:00` : r.due })),
         markdown: `**${spec.title}** — ${dc}/${all.length} done${pts ? `, ${fmtN(dpts)}/${fmtN(pts)} pts` : ""}\n\n` + spec.sections.map((s) => `${s.title ? `### ${s.title}\n` : ""}${s.rows.map((r) => `- [${done[r.id] ? "x" : " "}] ${r.label}${r.points != null ? ` (${fmtN(r.points)} pts)` : ""}${r.due ? ` — due ${r.due}` : ""}`).join("\n")}`).join("\n\n") });
       afterRender();
       return frame("checklist", spec.title, h("div", null,
-        h("div", { class: "cl-top" }, h("span", { class: "small" }, `${dc}/${all.length} done${pts ? ` · ${fmtN(dpts)}/${fmtN(pts)} pts` : ""}${spec.sync_todos ? " · linked to your to-dos" : ""}`), progress(dc, all.length)),
+        h("div", { class: "cl-top" }, h("span", { class: "small" }, `${dc}/${all.length} done${pts ? ` · ${fmtN(dpts)}/${fmtN(pts)} pts` : ""}${spec.sync_todos ? " · linked to your to-dos" : ""}`), progress(dc, all.length, spec.title)),
         sections), data, { extra: savedTools(v, ctl), full: ctl.full, onFull: ctl.onFull });
     });
   }
@@ -734,6 +823,338 @@ ${pv.body || ""}`, json: w })));
         h("div", { class: "muted small" }, "No files yet."));
   }
 
+  // ---------- reminders ----------
+  function remindButton({ title, due, item_id, annotation_id }) {
+    const box = h("span", { class: "remind" });
+    const btn = h("button", { class: "sm ghost", title: "Remind me", "aria-haspopup": "menu" }, "⏰");
+    const menu = h("div", { class: "cmp-menu", hidden: true, role: "menu" });
+    const make = async (when, label) => {
+      menu.hidden = true;
+      const r = await guard(() => api(A("/reminders"), { method: "POST", body: { title, remind_at: when.toISOString(), item_id: item_id || undefined, annotation_id: annotation_id || undefined } }));
+      if (r) { btn.textContent = "⏰✓"; toast(`Reminder set: ${label}`); }
+    };
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const opts = [];
+      const d = due ? new Date(due) : null;
+      if (d && d - Date.now() > 86400e3) opts.push(["1 day before", new Date(d - 86400e3)]);
+      if (d && d - Date.now() > 3 * 3600e3) opts.push(["3 hours before", new Date(d - 3 * 3600e3)]);
+      const tm = new Date(); tm.setDate(tm.getDate() + 1); tm.setHours(9, 0, 0, 0); opts.push(["Tomorrow 9:00", tm]);
+      opts.push(["In 1 hour", new Date(Date.now() + 3600e3)]);
+      const custom = h("input", { type: "datetime-local", "aria-label": "Custom reminder time" });
+      mount(menu, opts.map(([l, w]) => h("button", { class: "cmp-menu-item", role: "menuitem", onclick: () => make(w, l) }, l)),
+        h("div", { class: "row", style: "padding:4px" }, custom, h("button", { class: "sm", onclick: () => { if (custom.value) make(new Date(custom.value), "custom"); } }, "Set")));
+      menu.hidden = !menu.hidden;
+    });
+    box.append(btn, menu);
+    return box;
+  }
+
+  // ---------- grade projector ----------
+  function projectGrades(spec, state) {
+    const hyp = (state && state.hypothetical) || {};
+    const catPct = (c, fill) => {
+      let pts = [];
+      for (const it of c.items) {
+        let sc = it.score != null ? it.score : hyp[it.id];
+        if (sc == null && fill != null) sc = it.max * fill / 100;
+        if (sc != null && it.max > 0) pts.push([Math.min(sc, it.max * 2), it.max]);
+      }
+      if (c.drop_lowest && pts.length > c.drop_lowest) pts = pts.sort((a, b) => a[0] / a[1] - b[0] / b[1]).slice(c.drop_lowest);
+      const got = pts.reduce((s, p) => s + p[0], 0), mx = pts.reduce((s, p) => s + p[1], 0);
+      return [mx ? 100 * got / mx : null, got, mx];
+    };
+    const overall = (fill) => {
+      const rows = spec.categories.map((c) => [c, ...catPct(c, fill)]);
+      if (spec.weighted) {
+        const counted = rows.filter(([c, p]) => p != null && (c.weight || 0) > 0);
+        const w = counted.reduce((s, [c]) => s + c.weight, 0);
+        return [w ? counted.reduce((s, [c, p]) => s + c.weight * p, 0) / w : null, rows];
+      }
+      const got = rows.reduce((s, r) => s + r[2], 0), mx = rows.reduce((s, r) => s + r[3], 0);
+      return [mx ? 100 * got / mx : null, rows];
+    };
+    const [pct, rows] = overall(null);
+    const letter = (v) => { for (const s of spec.scale) if (v >= s.min - 1e-9) return s.letter; return spec.scale.length ? spec.scale[spec.scale.length - 1].letter : null; };
+    const remaining = spec.categories.flatMap((c) => c.items).filter((it) => it.score == null && hyp[it.id] == null);
+    const needed = remaining.length ? spec.scale.map((s) => {
+      let lo = 0, hi = 200; const [best] = overall(hi);
+      if (best == null || best < s.min) return { letter: s.letter, needs: null, reachable: false };
+      for (let i = 0; i < 40; i++) { const mid = (lo + hi) / 2; const [v] = overall(mid); if (v != null && v >= s.min) hi = mid; else lo = mid; }
+      return { letter: s.letter, needs: Math.round(hi * 10) / 10, reachable: hi <= 100 + 1e-6 };
+    }) : [];
+    return { percent: pct, letter: pct != null ? letter(pct) : null, rows, needed, remaining: remaining.length };
+  }
+  function gradeProjectorView(view) {
+    return savedComponent(view, (v, ctl) => {
+      const spec = v.spec, hyp = (v.state || {}).hypothetical || {};
+      const pj = projectGrades(spec, v.state || {});
+      const setHyp = (id, n) => ctl.setState((s) => { const x = { ...(s.hypothetical || {}) }; if (n == null || Number.isNaN(n)) delete x[id]; else x[id] = n; return { ...s, hypothetical: x }; });
+      const fillAll = (pctFill) => ctl.setState((s) => { const x = { ...(s.hypothetical || {}) };
+        for (const c of spec.categories) for (const it of c.items) if (it.score == null) x[it.id] = Math.round(it.max * pctFill) / 100; return { ...s, hypothetical: x }; });
+      const side = h("div", { class: "sl-side" },
+        h("div", { class: "sl-big" }, h("span", { class: "num" }, pj.percent == null ? "–" : `${fmtN(Math.round(pj.percent * 10) / 10)}%`), h("span", { class: "muted small" }, pj.letter ? `  ${pj.letter}` : "")),
+        spec.weighted ? null : h("div", { class: "alert warn" }, "No category weights: points are pooled. Add the syllabus weights for a real projection."),
+        pj.needed.length ? h("dl", { class: "sl-kv" }, h("dt", { class: "strong", style: "grid-column:1/-1" }, "Needed on the rest"),
+          pj.needed.map((n) => [h("dt", null, n.letter), h("dd", { class: n.reachable ? "num" : "num bad-text" }, n.needs == null ? "out of reach" : n.reachable ? `${fmtN(n.needs)}%` : `${fmtN(n.needs)}% (over 100)`)])) : h("div", { class: "small muted" }, "Everything is graded or filled in."),
+        h("div", { class: "row", role: "group", "aria-label": "Assume a score on everything not graded" }, h("span", { class: "tiny muted" }, "Assume on the rest:"),
+          [60, 80, 100].map((f) => h("button", { class: "chip", onclick: () => fillAll(f) }, `${f}%`)),
+          h("button", { class: "chip", onclick: () => ctl.setState((s) => ({ ...s, hypothetical: {} })) }, "clear")));
+      const cats = pj.rows.map(([c, p, got, mx]) => h("tbody", null,
+        h("tr", { class: "t-group" }, h("td", { colspan: 4 }, h("div", { class: "spread" },
+          h("span", null, `${c.name}${c.weight != null ? ` · ${fmtN(c.weight)}%` : ""}${c.drop_lowest ? ` · drop ${c.drop_lowest}` : ""}`),
+          h("span", { class: "num" }, p == null ? "–" : `${fmtN(Math.round(p * 10) / 10)}%`)))),
+        c.items.map((it) => {
+          const graded = it.score != null;
+          const val = graded ? it.score : hyp[it.id];
+          return h("tr", { class: graded ? "" : "hyp" }, h("td", null, itemLink(it.item_id, it.label)),
+            h("td", null, graded ? pill("ok", "Graded") : pill("info", "What if")),
+            h("td", { class: "num" }, graded ? `${fmtN(it.score)}` : h("div", { class: "num-pair" },
+              h("input", { type: "range", class: "num-slider", min: 0, max: it.max, step: it.max <= 10 ? 0.5 : 1, value: val ?? 0, "aria-label": `What-if score for ${it.label} (slider)`,
+                oninput: (e) => { const n = e.target.nextSibling; if (n) n.value = e.target.value; }, onchange: (e) => setHyp(it.id, Number(e.target.value)) }),
+              h("input", { type: "number", class: "num-in", min: 0, max: it.max, step: "any", value: val ?? "", placeholder: "–", "aria-label": `What-if score for ${it.label}`,
+                onchange: (e) => setHyp(it.id, e.target.value === "" ? null : Number(e.target.value)) }))),
+            h("td", { class: "num" }, `/ ${fmtN(it.max)}`));
+        })));
+      const cols = ["Category", "Item", "Score", "Max", "Kind"];
+      const rows = spec.categories.flatMap((c) => c.items.map((it) => [c.name, it.label, it.score ?? hyp[it.id] ?? "", it.max, it.score != null ? "graded" : hyp[it.id] != null ? "what-if" : "open"]));
+      return frame("projector", spec.title, h("div", { class: "sidebar-layout" }, side,
+        h("div", { class: "sl-main" }, h("div", { class: "table-wrap" }, h("table", { class: "t score-t proj-t" }, h("thead", null, h("tr", null, h("th", null, "Item"), h("th", null, ""), h("th", { class: "num" }, "Score"), h("th", { class: "num" }, "Max"))), cats)))),
+      () => ({ title: spec.title, csv: toCSV(cols, rows), json: { spec, state: v.state, projection: pj },
+        markdown: `**${spec.title}** — ${pj.percent == null ? "no scores" : `${fmtN(Math.round(pj.percent * 10) / 10)}% (${pj.letter})`}\n\n${toMD(cols, rows)}` }),
+      { extra: savedTools(v, ctl), full: ctl.full, onFull: ctl.onFull });
+    });
+  }
+
+  // ---------- hours tracker ----------
+  function hoursTrackerView(view) {
+    return savedComponent(view, (v, ctl) => {
+      const spec = v.spec, st = v.state || {}, entries = st.entries || [];
+      const lastDay = spec.deadline ? spec.deadline.slice(0, 10) : null;          // as projections.hours_summary
+      const total = entries.reduce((s, e) => s + (!lastDay || e.date <= lastDay ? e.hours : 0), 0);
+      const late = entries.reduce((s, e) => s + (lastDay && e.date > lastDay ? e.hours : 0), 0);
+      const now = Date.now(), dl = spec.deadline ? new Date(spec.deadline).getTime() : null;
+      const counting = total >= spec.minimum;
+      const status = counting ? (total >= spec.target ? "complete" : "counting") : dl && dl < now ? "lost" : "below_minimum";
+      const pts = spec.points != null ? (counting ? spec.points * Math.min(1, total / spec.target) : 0) : null;
+      const left = Math.max(0, spec.target - total), days = dl ? (dl - now) / 86400e3 : null;
+      const perWeek = days && days > 0 && left ? left / Math.max(days / 7, 1 / 7) : null;
+      const date = h("input", { type: "date", value: new Date().toISOString().slice(0, 10), "aria-label": "Date" });
+      const hrs = h("input", { type: "number", min: 0, step: 0.5, placeholder: "hours", class: "num-in", "aria-label": "Hours" });
+      const note = h("input", { type: "text", placeholder: "what (optional)", "aria-label": "Note" });
+      const STAT = { complete: ["ok", "Target reached"], counting: ["info", "Counting"], below_minimum: ["warn", `0 until ${fmtN(spec.minimum)} ${spec.unit}`], lost: ["bad", "Below minimum at the deadline: lost"] };
+      const body = h("div", { class: "sidebar-layout" },
+        h("div", { class: "sl-side" }, h("div", { class: "sl-big" }, h("span", { class: "num" }, fmtN(total)), h("span", { class: "muted small" }, ` / ${fmtN(spec.target)} ${spec.unit}`)),
+          pill(STAT[status][0], STAT[status][1]),
+          gaugeEl([{ label: "Logged", value: Math.min(total, spec.target) }], spec.target, spec.minimum || null, ` ${spec.unit}`),
+          h("dl", { class: "sl-kv" }, pts != null ? [h("dt", null, "Points now"), h("dd", { class: "num" }, `${fmtN(Math.round(pts * 100) / 100)} / ${fmtN(spec.points)}`)] : null,
+            h("dt", null, "To minimum"), h("dd", { class: "num" }, `${fmtN(Math.max(0, spec.minimum - total))} ${spec.unit}`),
+            h("dt", null, "To target"), h("dd", { class: "num" }, `${fmtN(left)} ${spec.unit}`),
+            perWeek ? [h("dt", null, "Needed per week"), h("dd", { class: "num" }, `${fmtN(Math.round(perWeek * 10) / 10)} ${spec.unit}`)] : null,
+            spec.deadline ? [h("dt", null, "Deadline"), h("dd", null, countdown(spec.deadline))] : null,
+            late ? [h("dt", null, "After the deadline"), h("dd", { class: "num muted" }, `${fmtN(late)} ${spec.unit} (not counted)`)] : null),
+          h("div", { class: "tiny muted" }, st.refreshed_at ? `Checked against ${spec.source || "the source"} ${ago(st.refreshed_at)}` : `Not yet checked against ${spec.source || "the official count"}`),
+          h("button", { class: "sm", onclick: () => ctl.setState((s) => ({ ...s, refreshed_at: new Date().toISOString() })) }, "I checked it just now")),
+        h("div", { class: "sl-main" }, alertList(status === "below_minimum" ? [{ level: "bad", text: `Counts 0 until ${fmtN(spec.minimum)} ${spec.unit} are logged (${fmtN(spec.minimum - total)} to go).` }] : status === "lost" ? [{ level: "bad", text: "The deadline passed below the minimum, so this line is lost." }] : []),
+          h("div", { class: "table-wrap" }, h("table", { class: "t" }, h("thead", null, h("tr", null, h("th", null, "Date"), h("th", { class: "num" }, "Hours"), h("th", null, "Note"), h("th", null, ""))),
+            h("tbody", null, entries.map((e) => h("tr", null, h("td", null, e.date), h("td", { class: "num" }, fmtN(e.hours)), h("td", null, e.note),
+              h("td", null, h("button", { class: "sm ghost", "aria-label": `Remove ${e.date} entry`, onclick: () => ctl.setState((s) => ({ ...s, entries: (s.entries || []).filter((x) => x.id !== e.id) })) }, "✕"))))))),
+          h("div", { class: "row" }, date, hrs, note, h("button", { class: "sm primary", onclick: () => {
+            const n = Number(hrs.value); if (!n || n < 0) { toast("Enter the hours", true); return; }
+            ctl.setState((s) => ({ ...s, entries: [...(s.entries || []), { id: `e${Date.now()}`, date: date.value, hours: n, note: note.value }] }));
+          } }, "Log hours"))));
+      const cols = ["Date", "Hours", "Note"];
+      return frame("hours", spec.title, body, () => ({ title: spec.title, csv: toCSV(cols, entries.map((e) => [e.date, e.hours, e.note])), json: { spec, state: st },
+        markdown: `**${spec.title}** — ${fmtN(total)} of ${fmtN(spec.target)} ${spec.unit} (minimum ${fmtN(spec.minimum)})\n\n${toMD(cols, entries.map((e) => [e.date, e.hours, e.note]))}`,
+        ics: spec.deadline ? [{ title: `${spec.title} deadline`, start: spec.deadline }] : [] }),
+        { extra: savedTools(v, ctl), full: ctl.full, onFull: ctl.onFull });
+    });
+  }
+
+  // ---------- kanban of local to-dos ----------
+  const COLS = [["open", "To do"], ["in_progress", "In progress"], ["blocked", "Blocked"], ["done", "Done"]];
+  function kanbanView(d) {
+    const host = h("div", { class: "kanban" });
+    let tasks = [];
+    const move = async (t, state) => {
+      const r = await guard(() => api(A(`/annotations/${t.id}`), { method: "PATCH", body: { task_state: state } }));
+      if (r) { t.task_state = state; draw(); }
+    };
+    const draw = () => {
+      mount(host, COLS.map(([state, label], ci) => {
+        const col = h("div", { class: `kb-col kb-${state}`, "aria-label": label },
+          h("div", { class: "kb-head" }, label, h("span", { class: "tiny muted" }, ` ${tasks.filter((t) => t.task_state === state).length}`)),
+          tasks.filter((t) => t.task_state === state).map((t) => h("div", { class: "kb-card", draggable: "true", tabindex: "0",
+            ondragstart: (e) => { e.dataTransfer.setData("text/plain", String(t.id)); } },
+            h("div", { class: "small strong" }, t.title || (t.body || "").slice(0, 60) || "To-do"),
+            t.local_due ? h("div", { class: "tiny" }, fmtDate(t.local_due, { weekday: true }), " · ", countdown(t.local_due)) : null,
+            t.item_id ? h("div", { class: "tiny" }, itemLink(t.item_id, t.item_title || "linked item")) : null,
+            h("div", { class: "kb-moves" },
+              ci > 0 ? h("button", { class: "sm ghost", "aria-label": `Move ${t.title} to ${COLS[ci - 1][1]}`, onclick: () => move(t, COLS[ci - 1][0]) }, "←") : null,
+              ci < COLS.length - 1 ? h("button", { class: "sm ghost", "aria-label": `Move ${t.title} to ${COLS[ci + 1][1]}`, onclick: () => move(t, COLS[ci + 1][0]) }, "→") : null,
+              remindButton({ title: t.title || "To-do", due: t.local_due, annotation_id: t.id })))));
+        col.addEventListener("dragover", (e) => { e.preventDefault(); col.classList.add("over"); });
+        col.addEventListener("dragleave", () => col.classList.remove("over"));
+        col.addEventListener("drop", (e) => { e.preventDefault(); col.classList.remove("over"); const t = tasks.find((x) => String(x.id) === e.dataTransfer.getData("text/plain")); if (t && t.task_state !== state) move(t, state); });
+        return col;
+      }));
+    };
+    const load = async () => {
+      const r = await api(A("/annotations") + `?kind=task`).catch(() => ({ annotations: [] }));
+      tasks = r.annotations.filter((t) => !d.course_id || t.course_canvas_id === d.course_id);
+      draw();
+    };
+    load();
+    const add = h("input", { type: "text", placeholder: "New to-do", "aria-label": "New to-do" });
+    add.addEventListener("keydown", async (e) => {
+      if (e.key !== "Enter" || !add.value.trim()) return;
+      const r = await guard(() => api(A("/annotations"), { method: "POST", body: { kind: "task", title: add.value.trim(), course_id: d.course_id || undefined } }));
+      if (r) { add.value = ""; load(); }
+    });
+    return frame("kanban", d.title || "To-do board", h("div", null, add, host), () => {
+      const cols = ["State", "Title", "Due"], rows = tasks.map((t) => [t.task_state, t.title || "", t.local_due || ""]);
+      return { title: d.title || "To-do board", markdown: COLS.map(([s, l]) => `### ${l}\n${tasks.filter((t) => t.task_state === s).map((t) => `- ${t.title || ""}`).join("\n")}`).join("\n\n"),
+        csv: toCSV(cols, rows), json: tasks, ics: tasks.filter((t) => t.local_due && t.task_state !== "done").map((t) => ({ title: t.title || "To-do", start: t.local_due })) };
+    });
+  }
+
+  // ---------- term timeline ----------
+  function timelineView(d) {
+    const times = [...d.modules.map((m) => m.unlock_iso).filter(Boolean), ...d.marks.map((m) => m.when)].map((x) => new Date(x).getTime());
+    const nowT = new Date(d.now).getTime();
+    const t0 = Math.min(nowT, ...times) - 3 * 86400e3, t1 = Math.max(nowT, ...times) + 7 * 86400e3;
+    const pos = (t) => `${Math.max(0, Math.min(100, (t - t0) / (t1 - t0) * 100))}%`;
+    const weeks = [];
+    for (let t = t0; t < t1; t += 7 * 86400e3) weeks.push(t);
+    const mods = d.modules;
+    const rows = mods.map((m, i) => {
+      const start = m.unlock_iso ? new Date(m.unlock_iso).getTime() : (i ? null : t0);
+      const nextU = mods.slice(i + 1).map((x) => x.unlock_iso).find(Boolean);
+      const end = nextU ? new Date(nextU).getTime() : t1;
+      const locked = m.state === "locked" || (start && start > nowT);
+      return h("div", { class: "tl-row" }, h("div", { class: "tl-label" }, h("div", { class: "small strong" }, m.title),
+        m.prerequisites.length ? h("div", { class: "tiny muted" }, "after ", m.prerequisites.join(", ")) : null,
+        m.sequential ? h("div", { class: "tiny muted" }, "in order") : null),
+        h("div", { class: "tl-track" }, start != null ? h("span", { class: `tl-bar${locked ? " locked" : ""}${m.state === "completed" ? " done" : ""}`, role: "img",
+          "aria-label": `${m.title}: ${locked ? "locked" : m.state === "completed" ? "completed" : "open"}${m.unlock_at ? `, opens ${m.unlock_at}` : ""}`,
+          style: `left:${pos(start)};width:calc(${pos(end)} - ${pos(start)})`, title: `${m.title}${m.unlock_at ? ` · opens ${m.unlock_at}` : ""}${m.state ? ` · ${m.state}` : ""}` }) : h("span", { class: "tiny muted" }, "no date")));
+    });
+    const marks = h("div", { class: "tl-row" }, h("div", { class: "tl-label small strong" }, "Due & exams"),
+      h("div", { class: "tl-track marks" }, d.marks.map((m) => h("a", { class: `tl-mark ${m.done ? "done" : ""} ${m.kind}`, href: `#/item/${m.item_id}`, style: `left:${pos(new Date(m.when).getTime())}`,
+        title: `${m.title} · ${fmtDate(m.when, { weekday: true })}`, "aria-label": `${m.title}, ${fmtDate(m.when)}`, onclick: (e) => { e.preventDefault(); openDrawer(m.item_id); } }))));
+    const axis = h("div", { class: "tl-row tl-axis" }, h("div", { class: "tl-label" }), h("div", { class: "tl-track" },
+      weeks.map((t) => h("span", { class: "tl-week", style: `left:${pos(t)}` }, new Date(t).toLocaleDateString([], { month: "short", day: "numeric" }))),
+      h("span", { class: "tl-now", style: `left:${pos(nowT)}`, title: "today" })));
+    const cols = ["Module", "Opens", "After", "State"];
+    return frame("timeline", d.title, h("div", { class: "timeline-wrap" }, axis, rows, marks),
+      () => ({ title: d.title, csv: toCSV(cols, mods.map((m) => [m.title, m.unlock_at || "", m.prerequisites.join("; "), m.state || ""])), json: d,
+        markdown: toMD(cols, mods.map((m) => [m.title, m.unlock_at || "", m.prerequisites.join("; "), m.state || ""])) + "\n\n" + d.marks.map((m) => `- ${m.title}: ${m.when}`).join("\n"),
+        ics: d.marks.filter((m) => !m.done).map((m) => ({ title: m.title, start: m.when })) }));
+  }
+
+  // ---------- workload heatmap ----------
+  function heatmapView(d) {
+    const start = new Date(d.start + "T00:00:00Z");
+    const monday = new Date(start); monday.setUTCDate(monday.getUTCDate() - ((monday.getUTCDay() + 6) % 7));
+    // label a column only where a new month starts, so the labels never overlap
+    const monthOf = (w) => new Date(monday.getTime() + w * 7 * 86400e3);
+    const monthLabel = (w) => (w === 0 || monthOf(w).getUTCMonth() !== monthOf(w - 1).getUTCMonth()
+      ? monthOf(w).toLocaleDateString([], { month: "short", timeZone: "UTC" }) : "");
+    const max = Math.max(1, ...Object.values(d.days).map((x) => x.count));
+    const cells = [];
+    for (let w = 0; w < d.weeks + 1; w++) {
+      const col = [];
+      for (let k = 0; k < 7; k++) {
+        const day = new Date(monday.getTime() + (w * 7 + k) * 86400e3).toISOString().slice(0, 10);
+        const e = d.days[day];
+        const lvl = e ? Math.min(4, Math.ceil(e.count / max * 4)) : 0;
+        // days with deadlines are announced (with what is due); empty days are left out for screen readers
+        col.push(h("span", { class: `hm-cell l${lvl}${day === new Date().toISOString().slice(0, 10) ? " today" : ""}`, title: e ? `${day}: ${e.titles.join("; ")}` : day,
+          ...(e ? { role: "img", "aria-label": `${fmtDate(day + "T12:00:00Z", { weekday: true, time: false, year: false })}: ${e.count} due — ${e.titles.join("; ")}` } : { "aria-hidden": "true" }) }));
+      }
+      cells.push(h("div", { class: "hm-col" }, h("span", { class: "hm-wk tiny muted", "aria-hidden": "true" }, monthLabel(w)), col));
+    }
+    const rows = Object.entries(d.days).sort().map(([k, v]) => [k, v.count, v.points, v.titles.join("; ")]);
+    const busiest = Object.entries(d.days).sort((a, b) => b[1].count - a[1].count)[0];
+    const summary = `${Object.values(d.days).reduce((t, x) => t + x.count, 0)} deadlines over ${d.weeks} weeks` +
+      (busiest ? `; busiest day ${busiest[0]} with ${busiest[1].count}` : "");
+    return frame("heatmap", d.title, h("div", null, h("div", { class: "heatmap", role: "group", "aria-label": summary }, h("div", { class: "hm-days tiny muted", "aria-hidden": "true" }, ["", "Mon", "", "Wed", "", "Fri", "", ""].map((x) => h("span", null, x))), cells),
+      h("div", { class: "legend", style: "margin-top:8px", "aria-hidden": "true" }, "Less ", [0, 1, 2, 3, 4].map((l) => h("span", { class: `hm-cell l${l}` })), " More")),
+    () => ({ title: d.title, csv: toCSV(["Date", "Due", "Points", "Items"], rows), markdown: toMD(["Date", "Due", "Points", "Items"], rows), json: d }));
+  }
+
+  // ---------- multi-course dashboard ----------
+  // Every course on one scale. Bars carry text labels, so they read the same without colour or sight.
+  function meter(value, max, label, cls = "") {
+    const pctv = max ? Math.max(0, Math.min(100, (100 * value) / max)) : 0;
+    return h("div", { class: `meter ${cls}`, role: "meter", "aria-valuemin": 0, "aria-valuemax": max || 0, "aria-valuenow": value, "aria-label": label },
+      h("span", { style: `width:${pctv}%` }));
+  }
+  function dashboardView(d) {
+    const rows = d.courses;
+    const body = rows.length ? h("div", { class: "table-wrap" }, h("table", { class: "t dash-t" },
+      h("caption", { class: "sr-only" }, `${rows.length} courses: grade so far, work done and what is due in the next ${d.days} days`),
+      h("thead", null, h("tr", null, h("th", { scope: "col" }, "Course"), h("th", { scope: "col" }, "Grade so far"), h("th", { scope: "col" }, "Work done"),
+        h("th", { scope: "col", class: "num" }, `Due ≤ ${d.days} d`), h("th", { scope: "col" }, "Next deadline"))),
+      h("tbody", null, rows.map((c) => h("tr", null,
+        h("th", { scope: "row" }, h("a", { href: `#/course/${encodeURIComponent(c.course_id)}` }, c.code || c.title),
+          c.code && c.title !== c.code ? h("div", { class: "tiny muted" }, c.title) : null),
+        h("td", null, c.grade_percent == null ? h("span", { class: "small muted" }, "nothing graded yet") : [
+          h("div", { class: "spread" }, h("strong", null, `${fmtN(c.grade_percent)}%${c.letter ? ` ${c.letter}` : ""}`),
+            h("span", { class: "tiny muted" }, c.weighted ? "weighted" : "points only")),
+          meter(c.grade_percent, 100, `Grade so far ${fmtN(c.grade_percent)} percent`)]),
+        h("td", null, h("div", { class: "spread" }, h("span", { class: "small" }, `${c.done}/${c.assignments}`),
+          c.lost ? pill("bad", `${c.lost} lost`) : null), meter(c.done, c.assignments, `${c.done} of ${c.assignments} done`, "done")),
+        h("td", { class: "num" }, c.due_soon ? h("strong", null, c.due_soon) : h("span", { class: "muted" }, "0")),
+        h("td", null, c.next_due ? [h("div", { class: "small" }, c.next_due.item_id ? h("a", { href: `#/item/${c.next_due.item_id}` }, c.next_due.title) : c.next_due.title),
+          h("div", { class: "tiny muted" }, fmtDate(c.next_due.due), " · ", countdown(c.next_due.due))] : h("span", { class: "small muted" }, "none")))))))
+      : h("p", { class: "muted small" }, "No courses with graded work collected yet.");
+    const cols = ["Course", "Grade %", "Weighted", "Done", "Assignments", "Lost", `Due in ${d.days} d`, "Next deadline", "Next due"];
+    const data = rows.map((c) => [c.code || c.title, c.grade_percent ?? "", c.weighted ? "yes" : "no", c.done, c.assignments, c.lost, c.due_soon,
+      c.next_due ? c.next_due.title : "", c.next_due ? c.next_due.due : ""]);
+    return frame("dashboard", d.title || "All courses", body, () => ({ title: d.title || "All courses", csv: toCSV(cols, data), json: d,
+      markdown: `**${d.title || "All courses"}**\n\n| ${cols.join(" | ")} |\n|${cols.map(() => "---").join("|")}|\n` + data.map((r) => `| ${r.join(" | ")} |`).join("\n"),
+      ics: rows.filter((c) => c.next_due).map((c) => ({ title: `${c.code || c.title}: ${c.next_due.title}`, start: c.next_due.due })) }));
+  }
+
+  // ---------- custom HTML block (opt-in; runs in /sandbox, see sandbox.html) ----------
+  // The frame is sandboxed without allow-same-origin, so it has an opaque origin: no cookies, no
+  // access to this page or the API, and the sandbox page's CSP blocks every network request.
+  function htmlView(d) {
+    const box = h("div", { class: "html-box" });
+    const run = async () => {
+      const s = await guard(() => api(A("/custom-html")));
+      if (!s) return;
+      if (!s.enabled) { mount(box, h("p", { class: "small muted" }, "Custom HTML blocks are off. Turn them on under Data & settings to run this one.")); return; }
+      const frameEl = h("iframe", { class: "html-frame", sandbox: "allow-scripts", src: "/sandbox", referrerpolicy: "no-referrer",
+        title: d.title || "Custom block", loading: "lazy" });
+      const onMsg = (e) => {
+        if (e.source !== frameEl.contentWindow || !e.data) return;
+        if (e.data.type === "canvas-hub-ready") frameEl.contentWindow.postMessage({ type: "canvas-hub-render", html: d.html, data: d.data ?? null }, "*");
+        else if (e.data.type === "canvas-hub-height" && Number.isFinite(e.data.height)) frameEl.style.height = `${Math.max(60, Math.min(2000, e.data.height + 4))}px`;
+      };
+      window.addEventListener("message", onMsg);
+      mount(box, frameEl, h("div", { class: "tiny muted", style: "margin-top:4px" }, "Running in an isolated frame · no network · ",
+        h("button", { class: "linkish tiny", onclick: () => { window.removeEventListener("message", onMsg); mount(box, intro()); } }, "Stop")));
+    };
+    const intro = () => h("div", { class: "html-intro" },
+      h("p", { class: "small" }, "The assistant wrote a custom HTML block. It runs only when you press Run, in an isolated frame that cannot reach Canvas Hub, your sign-in or the network."),
+      h("div", { class: "row" }, h("button", { class: "primary sm", onclick: run }, "Run"),
+        h("details", null, h("summary", { class: "small" }, "View source"), h("pre", { class: "html-src" }, d.html))));
+    mount(box, intro());
+    return frame("html", d.title, box, () => ({ title: d.title, text: d.html, filename: slug(d.title || "custom-block"),
+      markdown: "```html\n" + d.html + "\n```", json: { html: d.html, data: d.data ?? null } }));
+  }
+  function customHtmlCard(s) {
+    const on = h("input", { type: "checkbox", checked: s.enabled ? true : null });
+    return h("div", { class: "card" }, h("div", { class: "card-head" }, h("h2", null, "Custom HTML blocks"), pill(s.enabled ? "warn" : "muted", s.enabled ? "On" : "Off")),
+      h("p", { class: "small muted" }, "Advanced. When on, the assistant may answer with its own HTML and JavaScript when no built-in view fits. Each block runs only after you press Run, in an isolated frame with no network access and no access to Canvas Hub or your sign-in. A frame can still navigate itself to another site, so only run blocks you expect."),
+      h("label", { class: "check" }, on, h("strong", null, "Allow custom HTML blocks")),
+      h("div", { class: "row", style: "margin-top:10px" }, h("button", { class: "primary", onclick: async () => {
+        const r = await guard(() => api(A("/custom-html"), { method: "PUT", body: { enabled: on.checked } }));
+        if (r) { toast(r.enabled ? "Custom HTML blocks are on" : "Custom HTML blocks are off"); env.route(); } } }, "Save")));
+  }
+
   // ---------- dispatcher with a per-result cache ----------
   // The chat re-renders while the assistant works; keep the same element so
   // sorting, expanded rows and unsaved inputs survive. Callbacks read the chat
@@ -758,11 +1179,18 @@ ${pv.body || ""}`, json: w })));
       else if (d.component === "chart") el = chartView(d);
       else if (d.component === "gauge") el = gaugeView(d);
       else if (d.component === "artifact") el = artifactView(d);
+      else if (d.component === "html") el = htmlView(d);
+      else if (d.component === "dashboard") el = dashboardView(d);
       else if (d.component === "json") el = jsonView(d);
       else if (d.component === "diff") el = diffView(d);
       else if (d.component === "score_model") el = scoreModelView(d.view);
       else if (d.component === "checklist") el = checklistView(d.view);
       else if (d.component === "write_preview") el = writePreviewView(d.write);
+      else if (d.component === "grade_projector") el = gradeProjectorView(d.view);
+      else if (d.component === "hours_tracker") el = hoursTrackerView(d.view);
+      else if (d.component === "kanban") el = kanbanView(d);
+      else if (d.component === "timeline") el = timelineView(d);
+      else if (d.component === "heatmap") el = heatmapView(d);
       else if (d.component === "choices") el = h("div", { class: "cmp cmp-choices" }, h("div", { class: "small" }, d.question),
         h("div", { class: "chips", style: "margin-top:6px" }, d.options.map((o) => h("button", { class: "chip", onclick: () => ref.ctx.send && ref.ctx.send(o) }, o))));
     } catch (e) {
@@ -776,16 +1204,17 @@ ${pv.body || ""}`, json: w })));
   async function trackersView(main, pageHead, empty) {
     const [pinned, all] = await Promise.all([api(A("/components?pinned=true")), api(A("/components"))]);
     const others = all.components.filter((c) => !c.pinned);
-    const cards = pinned.components.map((v) => v.kind === "score_model" ? scoreModelView(v) : checklistView(v));
+    const VIEW = { score_model: scoreModelView, checklist: checklistView, grade_projector: gradeProjectorView, hours_tracker: hoursTrackerView };
+    const cards = pinned.components.map((v) => (VIEW[v.kind] || checklistView)(v));
     mount(main, pageHead("Trackers", "Score models and checklists you pinned. Ticks and values are saved on this computer; the assistant can read them back."),
       cards.length ? h("div", { class: "stack" }, cards) : empty("Nothing pinned yet", "Ask the assistant for a score model or checklist, then press ☆ Pin on it."),
       others.length ? h("div", { class: "card", style: "margin-top:16px" }, h("h2", null, "Other saved components"),
-        h("ul", { class: "list" }, others.map((c) => h("li", { class: "spread" }, h("div", null, h("span", { class: "strong" }, c.title), h("span", { class: "tiny muted" }, ` · ${c.kind === "score_model" ? "score model" : "checklist"} · ${ago(c.updated_at)}`)),
+        h("ul", { class: "list" }, others.map((c) => h("li", { class: "spread" }, h("div", null, h("span", { class: "strong" }, c.title), h("span", { class: "tiny muted" }, ` · ${{ score_model: "score model", checklist: "checklist", grade_projector: "grade projection", hours_tracker: "hours tracker" }[c.kind] || c.kind} · ${ago(c.updated_at)}`)),
           h("div", { class: "row" }, h("button", { class: "sm", onclick: async () => { if (await guard(() => api(A(`/components/${c.id}`), { method: "PATCH", body: { pinned: true } }))) env.route(); } }, "☆ Pin"),
             h("button", { class: "sm ghost", onclick: async () => { if (!confirm(`Delete “${c.title}”?`)) return; if (await guard(() => api(A(`/components/${c.id}`), { method: "DELETE" }))) env.route(); } }, "Delete")))))) : null);
     afterRender();
   }
 
-  return { componentView, openDrawer, closeDrawer, trackersView, countdown, copyText, download, evaluate, diffPair,
-    writesSettingsCard, writesLog, filesCard };
+  return { componentView, openDrawer, closeDrawer, trackersView, countdown, copyText, download, evaluate, diffPair, remindButton, kanbanView, alertList,
+    writesSettingsCard, writesLog, filesCard, customHtmlCard, dashboardView };
 }
