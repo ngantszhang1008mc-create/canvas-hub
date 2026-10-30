@@ -470,6 +470,7 @@ export function makeComponents(env) {
   function savedComponent(view, render) {
     let v = view, timer = null, saving = Promise.resolve(), isFull = false, edits = 0;
     let seen = view.state;                 // the last state the server confirmed: sent as `base` so it can merge
+    let acked = 0;                         // edits the server has confirmed; fewer than `edits` = local changes pending
     const el = h("div", { class: "saved-cmp" });
     const status = h("span", { class: "tiny muted save-state", "aria-live": "polite" });
     const redraw = () => { mount(el, render(v, api_)); };
@@ -503,11 +504,12 @@ export function makeComponents(env) {
         try {
           const r = await api(A(`/components/${v.id}`), { method: "PATCH", body: { state: sentState, base: seen, expected_version: v.version } });
           seen = r.state;
+          if (edits === sent) acked = sent;
           v = edits === sent ? r : { ...r, state: rebase(sentState, v.state, r.state) };
           if (edits === sent) redraw();
           status.textContent = edits === sent ? `Saved ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : "Saving…";
         } catch (e) {
-          if (e.status === 409) { v = await api(A(`/components/${v.id}`)); seen = v.state; redraw(); status.textContent = "Reloaded (changed elsewhere)"; }
+          if (e.status === 409) { v = await api(A(`/components/${v.id}`)); seen = v.state; acked = edits; redraw(); status.textContent = "Reloaded (changed elsewhere)"; }
           else { status.textContent = "Not saved"; toast(e.message || "Could not save", true); }
         }
       });
@@ -518,7 +520,7 @@ export function makeComponents(env) {
       setState: (fn) => { edits += 1; v = { ...v, state: fn(structuredClone(v.state)) }; redraw(); persist(); },
       undo: () => { flush(); return queue(async () => {
         const r = await guard(() => api(A(`/components/${v.id}`), { method: "PATCH", body: { undo: true } }));
-        if (r) { edits += 1; v = r; seen = r.state; redraw(); status.textContent = "Undone"; }
+        if (r) { edits += 1; acked = edits; v = r; seen = r.state; redraw(); status.textContent = "Undone"; }
       }); },
       pin: () => queue(async () => {
         const r = await guard(() => api(A(`/components/${v.id}`), { method: "PATCH", body: { pinned: !v.pinned } }));
@@ -529,9 +531,14 @@ export function makeComponents(env) {
       onFull: (on) => { isFull = on; },
       get view() { return v; },
     };
+    // The chat holds the definition from when it was created, and a cached copy may be shown again after
+    // edits elsewhere (Trackers, the assistant): load the latest, unless local changes are still unsaved.
+    const reload = () => api(A(`/components/${v.id}`)).then((fresh) => {
+      if (edits === acked && !pending && fresh.version !== v.version) { v = fresh; seen = fresh.state; redraw(); }
+    }).catch(() => {});
+    el.refresh = reload;
     redraw();
-    // The chat holds the definition from when it was created; load the latest state.
-    api(A(`/components/${v.id}`)).then((fresh) => { if (!edits) { v = fresh; seen = fresh.state; redraw(); } }).catch(() => {});
+    reload();
     return el;
   }
   const savedTools = (v, ctl) => [ctl.status,
@@ -734,7 +741,13 @@ ${pv.body || ""}`, json: w })));
   const cache = new Map();
   function componentView(d, ctx = {}, key = null) {
     if (!d) return null;
-    if (key && cache.has(key)) { const hit = cache.get(key); hit.ref.ctx = ctx; return hit.el; }
+    if (key && cache.has(key)) {
+      const hit = cache.get(key);
+      // Shown again in a different chat view: a saved component may have changed meanwhile (not on every re-render).
+      if (hit.ref.ctx !== ctx && hit.el.refresh) hit.el.refresh();
+      hit.ref.ctx = ctx;
+      return hit.el;
+    }
     const ref = { ctx };
     let el = null;
     try {

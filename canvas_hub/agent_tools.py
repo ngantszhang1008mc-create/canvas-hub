@@ -687,6 +687,9 @@ def h_course_score_lines(ctx, a):
             line["status"] = "excused"
         elif sub.get("score") is not None and sub.get("workflow_state") == "graded":
             line.update(status="earned", earned=float(sub["score"]))
+        elif sub.get("workflow_state") == "graded":
+            # Graded but the score is hidden (e.g. on-paper work not yet released): unknown, not lost.
+            line.update(status="pending", note="graded, but the score is not visible yet")
         elif sub.get("missing") or (due and due < now and not sub.get("submitted_at")):
             line.update(status="lost", earned=0.0)
         elif f.get("locked_for_user") and (not due or due < now):

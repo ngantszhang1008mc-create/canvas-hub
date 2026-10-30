@@ -1131,6 +1131,7 @@ VIEWS.assistant = async (main, parts, params) => {
   let current = convId; let lastSeq = 0; let all = []; let stick = true; let wasBusy = false;
   showConvs(convs);
 
+  const chatCtx = { send: (t) => send(t) };   // one per chat view: components can tell a new view from a re-render
   const refresh = async () => {
     if (!current) return;
     const d = await api(A(`/assistant/conversations/${current}`) + qs({ after: 0 })).catch(() => null);
@@ -1139,7 +1140,7 @@ VIEWS.assistant = async (main, parts, params) => {
     const atBottom = stick || scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 60;
     const prevTop = scroller.scrollTop;
     all = d.messages;
-    renderMessages(log, all, { send });
+    renderMessages(log, all, chatCtx);
     const st = d.conversation.run_state;
     const busy = st === "running" || st === "cancelling";
     sendBtn.disabled = busy; stopBtn.hidden = !busy;

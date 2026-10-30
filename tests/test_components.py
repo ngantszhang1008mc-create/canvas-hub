@@ -299,6 +299,22 @@ def test_uncollected_submissions_stay_open(hub, account, fixture_pkg):
     assert b["status"] == "pending" and "not collected" in b["note"]
 
 
+def test_hidden_grades_stay_open(hub, account, fixture_pkg):
+    # Graded on paper, score not released, no online submission: unknown, not lost.
+    hub.importer.import_package(fixture_pkg)
+    aid = account["id"]
+    sub = hub.db.one("SELECT id FROM items WHERE account_id=? AND item_type='submission'", (aid,))["id"]
+    with hub.db.tx() as c:
+        for field, value in (("workflow_state", "graded"), ("score", None), ("submitted_at", None), ("missing", False)):
+            c.execute("UPDATE item_fields SET value_json=? WHERE item_id=? AND field=?", (json.dumps(value), sub, field))
+        c.execute("""UPDATE item_fields SET value_json=? WHERE field='due_at' AND item_id IN
+                     (SELECT id FROM items WHERE account_id=? AND item_type='assignment')""",
+                  (json.dumps({"raw": "2026-01-01T00:00:00Z", "iso": "2026-01-01T00:00:00Z", "precision": "instant"}), aid))
+    ctx = ToolContext(api=HubAPI(hub), account_id=aid)
+    b = json.loads(run_tool_display(ctx, "course_score_lines", {"course_id": "4242"}, {"read"})[0])["buckets"][0]
+    assert b["status"] == "pending" and "not visible" in b["note"]
+
+
 def test_renamed_or_rescheduled_rows_update_their_todos(hub, account):
     aid = account["id"]
     svc = hub.components
