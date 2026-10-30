@@ -261,3 +261,16 @@ def test_assistant_setups(seeded):
     with pytest.raises(NotFound):
         svc.update_config({"profile_id": "p2", "model": "x"})
     assert stat.S_IMODE(os.stat(p).st_mode) == 0o600
+
+
+def test_assistant_setup_changes_are_serialised(seeded):
+    import threading
+    hub, _ = seeded
+    svc = AssistantService(hub, HubAPI(hub))
+    threads = [threading.Thread(target=svc.update_config, args=({"profile_id": "new", "preset": "deepseek", "name": f"s{i}"},))
+               for i in range(12)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert sorted(x["name"] for x in svc.public_config()["profiles"]) == sorted(f"s{i}" for i in range(12))

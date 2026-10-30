@@ -1185,7 +1185,7 @@ function assistantSettingsCard(cfg, prof) {
       effort: effort.value, thinking: thinking.value, extra_params: extraParams };
     if (key.value) body.api_key = key.value;
     const r = await guard(() => api("/api/assistant/config", { method: "PUT", body }));
-    if (r) { key.value = ""; toast("Setup saved"); return r; }
+    if (r) { key.value = ""; cur.id = r.saved_profile; toast("Setup saved"); return r; }   // later saves edit this setup
     return null;
   };
   const goTo = (pid) => { const h2 = `#/assistant/settings?p=${encodeURIComponent(pid)}`; if (location.hash === h2) route(); else location.hash = h2; };

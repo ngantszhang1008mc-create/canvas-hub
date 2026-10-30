@@ -94,6 +94,7 @@ class AssistantService:
         self.api = api
         self.worker = worker
         self._lock = threading.Lock()
+        self._cfg_lock = threading.RLock()     # serialises read-modify-write of the settings file
         self._threads: dict[int, threading.Thread] = {}
         self._cancel: set[int] = set()
         with self.hub.db.tx() as c:   # runs interrupted by an app restart
@@ -186,6 +187,10 @@ class AssistantService:
         return False
 
     def update_config(self, data: dict) -> dict:
+        with self._cfg_lock:
+            return self._update_config(data)
+
+    def _update_config(self, data: dict) -> dict:
         """Edit a setup: `profile_id` picks which ("new" adds one; default: the
         active setup, created if there is none). Permissions are shared."""
         store = self._load_store()
@@ -272,6 +277,10 @@ class AssistantService:
             cfg["api_key"] = key
 
     def activate_profile(self, profile_id: str) -> dict:
+        with self._cfg_lock:
+            return self._activate_profile(profile_id)
+
+    def _activate_profile(self, profile_id: str) -> dict:
         store = self._load_store()
         if not any(x["id"] == profile_id for x in store["profiles"]):
             raise NotFound("that assistant setup no longer exists", code="assistant_profile_not_found")
@@ -280,6 +289,10 @@ class AssistantService:
         return self.public_config()
 
     def delete_profile(self, profile_id: str) -> dict:
+        with self._cfg_lock:
+            return self._delete_profile(profile_id)
+
+    def _delete_profile(self, profile_id: str) -> dict:
         store = self._load_store()
         if not any(x["id"] == profile_id for x in store["profiles"]):
             raise NotFound("that assistant setup no longer exists", code="assistant_profile_not_found")
