@@ -138,8 +138,8 @@ def test_assistant_errors_and_key_storage(seeded):
     svc = AssistantService(hub, HubAPI(hub))
     with pytest.raises(InvalidInput):
         svc.send(acct["id"], "hello")          # not configured
-    with pytest.raises(InvalidInput):
-        svc.update_config({"preset": "codex"})   # reserved, not implemented
+    codex = svc.update_config({"preset": "codex"})
+    assert codex["configured"] and not codex["api_key_saved"]
     with pytest.raises(InvalidInput):
         svc.update_config({"preset": "custom", "base_url": "http://evil.example/v1"})
     pub = svc.update_config({"preset": "anthropic", "api_key": "sk-ant-secret-abcd"})

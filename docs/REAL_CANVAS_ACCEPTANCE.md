@@ -158,3 +158,16 @@ Writing to Canvas is real: use a low-stakes assignment or a draft.
 | 13.4 | **Data & settings → Custom HTML blocks**: switch on. Ask for "a custom chart of my hours by week" | A block appears with **Run**; nothing runs before you press it. After **Run** the chart shows, and the block cannot load anything from the internet |
 | 13.5 | Install tesseract (`brew install tesseract poppler`), restart, then **Data & settings → Text from scans and photos**: switch on and press **Read … stored documents** | Photographed forms and scanned problem sheets get text with a confidence score. Low-confidence ones say *OCR, low confidence*. Their words become searchable |
 | 13.6 | With VoiceOver (⌘F5), tab through **Trackers** and the workload heatmap | Every control is announced by name, and heatmap days with deadlines read out what is due |
+
+## 14. Codex in the assistant
+
+These checks require a working Codex CLI login on the computer running Canvas Hub.
+
+| # | Step | Expected |
+| --- | --- | --- |
+| 14.1 | Install Codex CLI 0.163.0 or newer, run `codex login`, then add a **Codex** setup under Assistant settings | API-key, base-URL and extra-settings fields are hidden; the setup explains that Codex manages its own login |
+| 14.2 | Leave Model empty and choose **Save & test** | The test connects using the CLI's default model and existing login; no credentials are copied into Canvas Hub |
+| 14.3 | Select the Codex setup in chat and ask for upcoming deadlines and a saved tracker | The reply streams; deadlines come from the selected account and the tracker appears and can be read back |
+| 14.4 | Turn off notes and collection permissions, then ask Codex to create a note or refresh Canvas | Those tools are unavailable, and no note or collection job is created |
+| 14.5 | Press **Stop** while Codex is reasoning, then send another message after it stops | The process closes, the chat becomes available again, and any already streamed text is preserved |
+| 14.6 | Switch away from Codex and later return to the same conversation | Chat history is retained and supplied to the chosen provider; no persistent native Codex thread is required |

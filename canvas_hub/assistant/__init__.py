@@ -1,4 +1,4 @@
-"""In-app assistant: chat with your Canvas databank using your own API key.
+"""In-app assistant: chat with your Canvas data through an API provider or Codex.
 
 The assistant answers from the local store through the shared agent tools
 (canvas_hub/agent_tools.py) and, when allowed, asks the app's collector to
@@ -7,7 +7,8 @@ check Canvas for updates or edits the user's local notes and to-dos.
 Settings, including the API key, live in <home>/runtime/assistant.json (mode
 0600), outside the data directory, so backups and exports never contain the
 key. The key is only sent to the provider endpoint the user configured, and
-is never returned to the UI.
+is never returned to the UI. Codex keeps its own CLI authentication; Canvas Hub
+does not read or store its credentials.
 
 Privacy: questions, and whatever course data the model reads through tools,
 are sent to the chosen provider. The assistant is off until configured.
@@ -47,8 +48,8 @@ PRESETS = [
      "model": "", "key_hint": "no key needed"},
     {"id": "custom", "label": "Other OpenAI-compatible endpoint", "provider": "openai_compatible", "base_url": "",
      "model": "", "key_hint": ""},
-    {"id": "codex", "label": "Codex (direct connection — reserved, not implemented yet)", "provider": "codex",
-     "base_url": "", "model": "", "key_hint": "", "disabled": True},
+    {"id": "codex", "label": "Codex (your Codex CLI login)", "provider": "codex",
+     "base_url": "", "model": "", "key_hint": ""},
 ]
 MAX_PROFILES = 20
 # Reasoning effort is chosen per message in the chat, not saved with a setup.
@@ -63,6 +64,8 @@ def reasoning_levels(cfg: dict) -> list[str]:
         return ["off", "low", "high", "max"]                 # thinking + reasoning_effort
     if cfg.get("provider") == "openai_compatible":
         return ["low", "medium", "high"]                     # reasoning_effort
+    if cfg.get("provider") == "codex":
+        return ["low", "medium", "high", "xhigh"]
     return []
 DEFAULT_CONFIG = {
     "preset": None, "provider": None, "base_url": "", "model": "", "api_key": "", "effort": "",
@@ -210,6 +213,8 @@ class AssistantService:
             return True    # key may come from the saved key, ANTHROPIC_API_KEY or an `ant auth login` profile
         if cfg.get("provider") == "openai_compatible":
             return bool(cfg.get("model") and cfg.get("base_url"))
+        if cfg.get("provider") == "codex":
+            return True    # the connection test checks the CLI and its own login
         return False
 
     def update_config(self, data: dict) -> dict:
@@ -272,6 +277,8 @@ class AssistantService:
                 cfg["base_url"] = p["base_url"]
             if "model" not in data and p["model"]:
                 cfg["model"] = p["model"]
+            elif p["provider"] == "codex" and "model" not in data:
+                cfg["model"] = ""
         for k in ("base_url", "model"):
             if k in data:
                 v = str(data[k] or "").strip()
@@ -297,6 +304,10 @@ class AssistantService:
             if len(key) > 500 or any(ch.isspace() for ch in key):
                 raise InvalidInput("that does not look like an API key")
             cfg["api_key"] = key
+        if cfg["provider"] == "codex":
+            if data.get("api_key") or data.get("base_url") or data.get("extra_params"):
+                raise InvalidInput("Codex uses its own CLI login and configuration; do not enter an API key, base URL, or extra request settings here.")
+            cfg.update(api_key="", base_url="", extra_params={})
 
     def activate_profile(self, profile_id: str) -> dict:
         with self._cfg_lock:
@@ -331,11 +342,17 @@ class AssistantService:
         cfg = self._load(profile_id)
         if not self.configured(cfg):
             raise InvalidInput("Choose a provider (and model) first", code="assistant_not_configured")
+        provider = None
         try:
             provider = make_provider(cfg)
+            if cfg["provider"] == "codex":
+                provider.turn_timeout = 30  # connection checks should not wait ten minutes on an offline backend
             turn = provider.complete("Reply with the single word OK.", [{"role": "user", "sent_text": "Connection test"}], [])
         except ProviderError as e:
             return {"ok": False, "message": str(e)}
+        finally:
+            if provider and callable(getattr(provider, "close", None)):
+                provider.close()
         return {"ok": True, "model": turn.model, "reply": (turn.text or "")[:200]}
 
     # ---- conversations ---------------------------------------------------------
@@ -490,6 +507,8 @@ class AssistantService:
         tools = [{"name": t.name, "description": t.description, "schema": t.schema()} for t in tools_for(perms)]
         ctx = ToolContext(api=self.api, account_id=account_id, worker=self.worker, conversation_id=cid)
         system = self._system(acct, perms)
+        provider = None
+        final_state, final_error = "idle", None
         try:
             provider = make_provider(cfg)
             for _step in range(MAX_STEPS):
@@ -539,15 +558,21 @@ class AssistantService:
             else:
                 self._append(cid, "assistant", {"text": "I stopped after many steps without finishing. Try a narrower question.",
                                                 "stop": "end", "tool_calls": [], "raw": {"provider": "canvas_hub"}})
-            self._set_state(cid, "idle")
         except ProviderError as e:
-            self._set_state(cid, "error", str(e))
+            final_state, final_error = "error", str(e)
         except Exception as e:  # noqa: BLE001
             log.exception("assistant run failed")
-            self._set_state(cid, "error", f"{type(e).__name__}: {e}")
+            final_state, final_error = "error", f"{type(e).__name__}: {e}"
         finally:
+            try:
+                if provider and callable(getattr(provider, "close", None)):
+                    provider.close()
+            except Exception:  # noqa: BLE001
+                log.exception("assistant provider cleanup failed")
+                final_state, final_error = "error", "The assistant connection could not close cleanly. Restart Canvas Hub before retrying."
             with self._live_lock:
                 self._live.pop(cid, None)
             self._cancel.discard(cid)
             with self._lock:
+                self._set_state(cid, final_state, final_error)
                 self._threads.pop(cid, None)
