@@ -649,7 +649,10 @@ def h_course_score_lines(ctx, a):
                 "group": f.get("assignment_group")}
         if due:
             line["due"] = due.isoformat()
-        if sub.get("excused"):
+        if sub.get("state") == "not_collected":
+            # Unknown, not missed: keep it open (counted in the ceiling) and say so.
+            line.update(status="pending", note="submission state not collected yet; check Canvas")
+        elif sub.get("excused"):
             line["status"] = "excused"
         elif sub.get("score") is not None and sub.get("workflow_state") == "graded":
             line.update(status="earned", earned=float(sub["score"]))

@@ -269,3 +269,31 @@ def test_undo_keeps_todos_finished_elsewhere(hub, account):
     assert v["state"]["done"] == {"r1": True}
     assert hub.annotations.get(aid, links["r1"])["task_state"] == "done"
     assert hub.annotations.get(aid, links["r2"])["task_state"] == "open"
+
+
+def test_stale_page_does_not_reopen_todos_finished_elsewhere(hub, account):
+    aid = account["id"]
+    svc = hub.components
+    v = svc.create(aid, "checklist", {"title": "T", "sync_todos": True, "sections": [
+        {"id": "s", "rows": [{"id": "r1", "label": "One"}, {"id": "r2", "label": "Two"}]}]})
+    links, seen = v["state"]["links"], v["state"]
+    hub.annotations.update(aid, links["r1"], task_state="done")         # finished under Notes & tasks
+    v = svc.set_state(aid, v["id"], {**seen, "done": {"r2": True}}, base=seen)   # the page never saw that
+    assert v["state"]["done"] == {"r1": True, "r2": True}
+    assert hub.annotations.get(aid, links["r1"])["task_state"] == "done"
+    # a row the page did change still wins
+    v = svc.set_state(aid, v["id"], {**v["state"], "done": {"r2": True}}, base=v["state"])
+    assert v["state"]["done"] == {"r2": True} and hub.annotations.get(aid, links["r1"])["task_state"] == "open"
+
+
+def test_uncollected_submissions_stay_open(hub, account, fixture_pkg):
+    hub.importer.import_package(fixture_pkg)
+    aid = account["id"]
+    with hub.db.tx() as c:                                               # the submission was never collected
+        c.execute("DELETE FROM items WHERE account_id=? AND item_type='submission'", (aid,))
+        c.execute("""UPDATE item_fields SET value_json=? WHERE field='due_at' AND item_id IN
+                     (SELECT id FROM items WHERE account_id=? AND item_type='assignment')""",
+                  (json.dumps({"raw": "2026-01-01T00:00:00Z", "iso": "2026-01-01T00:00:00Z", "precision": "instant"}), aid))
+    ctx = ToolContext(api=HubAPI(hub), account_id=aid)
+    b = json.loads(run_tool_display(ctx, "course_score_lines", {"course_id": "4242"}, {"read"})[0])["buckets"][0]
+    assert b["status"] == "pending" and "not collected" in b["note"]

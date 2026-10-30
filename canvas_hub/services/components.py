@@ -193,17 +193,28 @@ class ComponentService:
         return self.get(account_id, row["id"])
 
     def set_state(self, account_id: int, cid: int, state: dict, *, expected_version: int | None = None,
-                  by: str = "user") -> dict:
+                  base: dict | None = None, by: str = "user") -> dict:
+        """``base`` is the state the caller last saw. For a checklist linked to to-dos, rows the caller did not
+        change since then keep their to-do's current state, so a page that loaded before a to-do was finished
+        elsewhere cannot reopen it by saving an unrelated row."""
         with self._lock:
-            return self._set_state(account_id, cid, state, expected_version=expected_version, by=by)
+            return self._set_state(account_id, cid, state, expected_version=expected_version, base=base, by=by)
 
-    def _set_state(self, account_id: int, cid: int, state: dict, *, expected_version: int | None, by: str) -> dict:
+    def _set_state(self, account_id: int, cid: int, state: dict, *, expected_version: int | None, by: str,
+                   base: dict | None = None) -> dict:
         row = self._row(account_id, cid)
         if expected_version is not None and int(expected_version) != row["version"]:
             raise Conflict("this component changed elsewhere; reload it", code="version_conflict")
         spec = json.loads(row["spec_json"])
         before = self._effective_state_json(account_id, row)
         st = self._clean_state(row["kind"], spec, state)
+        if row["kind"] == "checklist" and spec.get("sync_todos") and isinstance(base, dict):
+            seen = self._clean_state("checklist", spec, base)["done"]
+            current = json.loads(before)["done"]                    # ticks as they are now, to-dos included
+            ids = {r["id"] for s in spec["sections"] for r in s["rows"]}
+            # a row the caller changed takes the caller's tick; any other row keeps its current one
+            st["done"] = {i: True for i in ids if (st["done"].get(i, False) if st["done"].get(i, False) != seen.get(i, False)
+                                                   else current.get(i, False))}
         if row["kind"] == "checklist" and spec.get("sync_todos"):
             # Links are server-owned: a client that sends stale or missing links must not create duplicate to-dos.
             saved = json.loads(row["state_json"]).get("links") or {}

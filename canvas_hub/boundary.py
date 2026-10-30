@@ -213,7 +213,7 @@ class HubAPI:
 
     def update_component(self, account_id, component_id, data: dict) -> dict:
         aid = self._acct(account_id)["id"]
-        allowed = {"state", "expected_version", "pinned", "undo"}
+        allowed = {"state", "base", "expected_version", "pinned", "undo"}
         if set(data) - allowed:
             raise InvalidInput(f"unknown fields {sorted(set(data) - allowed)}")
         if data.get("undo"):
@@ -222,7 +222,7 @@ class HubAPI:
         if "pinned" in data:
             out = self.hub.components.pin(aid, component_id, self._bool(data["pinned"]))
         if "state" in data:
-            out = self.hub.components.set_state(aid, component_id, data["state"],
+            out = self.hub.components.set_state(aid, component_id, data["state"], base=data.get("base"),
                                                 expected_version=data.get("expected_version"), by="user")
         return out or self.hub.components.get(aid, component_id)
 
