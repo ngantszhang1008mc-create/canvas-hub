@@ -722,7 +722,11 @@ footer{margin-top:24px;font-size:12px;color:#8b8170}</style></head><body><h1>${h
           h("button", { class: "danger", onclick: async (e) => {
             e.target.disabled = true; e.target.textContent = "Sending…";
             const r = await guard(() => api(A(`/writes/${w.id}/confirm`), { method: "POST", body: { preview_hash: pv.hash } }));
-            if (r) { draw(r); toast(r.status === "sent" ? "Sent to Canvas" : `Not sent: ${r.error || r.status}`, r.status !== "sent"); }
+            if (r) {
+              draw(r);
+              if (r.status === "sending") { toast("Still sending — the browser is busy; this updates when Canvas answers"); follow(w.id); }
+              else toast(r.status === "sent" ? "Sent to Canvas" : `Not sent: ${r.error || r.status}`, r.status !== "sent");
+            }
             else { e.target.disabled = false; e.target.textContent = "Yes, send it"; }
           } }, "Yes, send it"),
           h("button", { class: "ghost", onclick: () => { confirmRow.hidden = true; actions.hidden = false; } }, "Back")));
@@ -752,7 +756,14 @@ footer{margin-top:24px;font-size:12px;color:#8b8170}</style></head><body><h1>${h
 
 ${pv.body || ""}`, json: w })));
     };
+    // A send that outlasts the request stays "sending" on the server until the browser finishes; poll for it.
+    const follow = (id) => { const t = setInterval(async () => {
+      if (!host.isConnected) { clearInterval(t); return; }
+      const r = await api(A(`/writes/${id}`)).catch(() => null);
+      if (r && r.status !== "sending") { clearInterval(t); draw(r); toast(r.status === "sent" ? "Sent to Canvas" : `Not sent: ${r.error || r.status}`, r.status !== "sent"); }
+    }, 3000); };
     draw(initial);
+    if (initial.status === "sending") follow(initial.id);
     api(A(`/writes/${initial.id}`)).then(draw).catch(() => {});
     return host;
   }

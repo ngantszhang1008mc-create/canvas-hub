@@ -259,7 +259,14 @@ def parse_ics(text: str, time_zone: str | None) -> list[dict]:
                 until = (datetime.strptime(u[:8], "%Y%m%d")).date().isoformat()
             except ValueError:
                 until = None
-        days = [_DAYS[d[-2:]] for d in rr.get("BYDAY", "").split(",") if d[-2:] in _DAYS] or [s.weekday()]
+        # BYDAY names days in the event's own zone; moving the times to the account's zone can cross midnight
+        # (23:00 UTC on Tuesday is Wednesday 07:00 in Hong Kong), so the weekdays move by the same number of days.
+        try:
+            v = e["DTSTART"][0]
+            shift = (s.date() - date(int(v[:4]), int(v[4:6]), int(v[6:8]))).days
+        except ValueError:
+            shift = 0
+        days = [(_DAYS[d[-2:]] + shift) % 7 for d in rr.get("BYDAY", "").split(",") if d[-2:] in _DAYS] or [s.weekday()]
         title = (e.get("SUMMARY", ("", {}))[0] or "Class").replace("\\,", ",").replace("\\;", ";")[:200]
         loc = (e.get("LOCATION", ("", {}))[0] or "").replace("\\,", ",")[:200] or None
         for wd in days:

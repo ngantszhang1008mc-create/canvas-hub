@@ -21,6 +21,8 @@ import hashlib
 import html
 import json
 import re
+from concurrent.futures import Future
+from concurrent.futures import TimeoutError as FutureTimeout
 from datetime import datetime, timedelta, timezone
 
 from .. import dates
@@ -245,9 +247,14 @@ class WriteService:
         return self.get(account_id, wid)
 
     # ---- confirm and send --------------------------------------------------------------------
+    SEND_WAIT = 300     # seconds to wait for the browser before answering "still sending"
+
     def confirm(self, account_id: int, wid: int, preview_hash: str, send) -> dict:
         """Send a prepared write. ``send(job)`` performs the Canvas requests in the
-        signed-in browser and returns a result dict (or raises)."""
+        signed-in browser and returns a result dict (or raises), or a Future of one.
+        A Future that has not finished within SEND_WAIT leaves the write `sending`
+        (never `failed`: the browser may still submit it) and records the outcome
+        when it arrives, so a second attempt cannot be made in the meantime."""
         r = self.get(account_id, wid)
         if r["status"] != "prepared":
             raise InvalidInput(f"this write is {r['status']} and cannot be sent", code="write_not_open")
@@ -275,13 +282,31 @@ class WriteService:
         if n != 1:
             raise Conflict("this write is already being sent", code="write_not_open")
         try:
-            result = send(job)
+            out = send(job)
+            if isinstance(out, Future):
+                try:
+                    out = out.result(timeout=self.SEND_WAIT)
+                except FutureTimeout:
+                    if not out.done():                      # still running in the browser: decide when it ends
+                        out.add_done_callback(lambda f: self._record(r["id"], f))
+                        return self.get(account_id, wid)
+                    raise
         except Exception as e:  # noqa: BLE001 - the error is recorded for the user
-            with self.db.tx() as c:
-                c.execute("UPDATE canvas_writes SET status='failed', error=?, finished_at=? WHERE id=?",
-                          (f"{type(e).__name__}: {e}"[:2000], now_iso(), r["id"]))
+            self._record_failed(r["id"], e)
             return self.get(account_id, wid)
-        with self.db.tx() as c:
-            c.execute("UPDATE canvas_writes SET status='sent', result_json=?, finished_at=? WHERE id=?",
-                      (json.dumps(result, default=str), now_iso(), r["id"]))
+        self._record_sent(r["id"], out)
         return self.get(account_id, wid)
+
+    def _record(self, wid: int, fut: Future) -> None:
+        e = fut.exception()
+        self._record_failed(wid, e) if e else self._record_sent(wid, fut.result())
+
+    def _record_failed(self, wid: int, e: BaseException) -> None:
+        with self.db.tx() as c:
+            c.execute("UPDATE canvas_writes SET status='failed', error=?, finished_at=? WHERE id=? AND status='sending'",
+                      (f"{type(e).__name__}: {e}"[:2000], now_iso(), wid))
+
+    def _record_sent(self, wid: int, result) -> None:
+        with self.db.tx() as c:
+            c.execute("UPDATE canvas_writes SET status='sent', result_json=?, finished_at=? WHERE id=? AND status='sending'",
+                      (json.dumps(result, default=str), now_iso(), wid))
