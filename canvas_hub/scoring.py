@@ -24,21 +24,31 @@ Gating
 - min_threshold:   counts 0 until the value reaches ``min_value``.
 Hour lines (``unit: "hours"``) score ``max * min(1, hours / full_at)``;
 ``min_value`` is then a number of hours (the "zero until minimum hours" rule).
+Formula
+- a pending line may give ``formula`` (see ``formula.py``) instead of the
+  rules above, for scores Canvas only shows as an image, e.g.
+  ``if(hours >= 10, 20 * min(1, hours / 20), 0)``. Names: ``value`` (and
+  ``hours`` on hour lines), ``max``, ``full_at``, ``min_value``. The result is
+  kept between 0 and the maximum; min_threshold gating still applies to the
+  value, all_or_nothing to full marks.
 """
 
 from __future__ import annotations
 
 import math
 import re
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from .util import InvalidInput
+from . import formula as formula_lang
+from .util import InvalidInput, parse_iso
 
 STATUSES = ("earned", "pending", "lost", "locked", "excused")
 GATING = ("none", "all_or_nothing", "min_threshold")
 UNITS = ("points", "hours")
 MAX_BUCKETS = 200
 MAX_SCENARIOS = 6
+FORMULA_NAMES = {"value", "hours", "max", "full_at", "min_value"}
 _ID = re.compile(r"^[\w.:-]{1,64}$")
 
 
@@ -90,6 +100,14 @@ def normalize_model(spec: dict) -> dict:
             full_at = min_value or mx
         out = {"id": bid, "label": str(b.get("label") or bid)[:200], "max": mx, "earned": earned, "status": status,
                "gating": gating, "min_value": min_value, "unit": unit, "full_at": full_at}
+        if b.get("formula"):
+            try:
+                unknown = formula_lang.names(formula_lang.parse(str(b["formula"]))) - FORMULA_NAMES
+            except InvalidInput as e:
+                raise InvalidInput(f"{bid}: {e}") from e
+            if unknown:
+                raise InvalidInput(f"{bid}: formula can use {sorted(FORMULA_NAMES)}, not {sorted(unknown)}")
+            out["formula"] = str(b["formula"])
         for k in ("group", "due", "note"):
             if b.get(k) is not None:
                 out[k] = str(b[k])[:300]
@@ -144,6 +162,8 @@ def _line(b: dict, state: dict) -> dict:
     if not included:
         res["note"] = "skipped"
         return res
+    if b.get("formula"):
+        return _formula_line(b, state, res)
     if b["unit"] == "hours":
         hours = state["values"].get(b["id"], b["full_at"] or 0.0)
         res["value"] = hours
@@ -162,6 +182,54 @@ def _line(b: dict, state: dict) -> dict:
             pts, res["gated"], res["note"] = 0.0, True, f"0 below {b['min_value']:g}"
     res["points"] = round(pts, 4)
     return res
+
+
+def _formula_line(b: dict, state: dict, res: dict) -> dict:
+    mx = b["max"]
+    val = state["values"].get(b["id"], b["full_at"] if b["full_at"] is not None else mx)
+    res["value"] = val
+    env = {"value": val, "hours": val if b["unit"] == "hours" else 0.0, "max": mx, "full_at": b["full_at"] or 0.0,
+           "min_value": b["min_value"] or 0.0}
+    try:
+        pts = min(mx, max(0.0, formula_lang.evaluate(b["formula"], env)))
+    except InvalidInput as e:
+        pts, res["gated"], res["note"] = 0.0, True, str(e)
+    else:
+        if b["gating"] == "min_threshold" and val < (b["min_value"] or 0):
+            pts, res["gated"], res["note"] = 0.0, True, f"0 until {b['min_value']:g}{' h' if b['unit'] == 'hours' else ''}"
+        elif b["gating"] == "all_or_nothing" and pts < mx:
+            pts, res["gated"], res["note"] = 0.0, True, "all or nothing"
+    res["points"] = round(pts, 4)
+    return res
+
+
+def alerts(model: dict, lines: list[dict], totals: dict, now: datetime | None = None) -> list[dict]:
+    """Rule-driven warnings; the page computes the same list."""
+    now = now or datetime.now(timezone.utc)
+    out = []
+    thr = totals.get("threshold")
+    by = {b["id"]: b for b in model["buckets"]}
+    if thr is not None:
+        if totals["ceiling"] < thr - 1e-9:
+            out.append({"level": "bad", "text": f"Even full marks on everything left gives {totals['ceiling']:g}, below the pass mark {thr:g}."})
+        elif not totals["passes"]:
+            out.append({"level": "bad", "text": f"Below the pass mark by {thr - totals['projected']:g} with this plan."})
+        elif totals["margin"] < max(1.0, 0.05 * thr):
+            out.append({"level": "warn", "text": f"Only {totals['margin']:g} to spare: losing any line worth more fails."})
+    for x in lines:
+        b = by[x["id"]]
+        if x["status"] != "pending" or not x["included"]:
+            continue
+        due = parse_iso(b["due"]) if b.get("due") and len(b["due"]) > 10 else None
+        if x["gated"] and b["unit"] == "hours" and b["gating"] == "min_threshold" and (x.get("value") or 0) < (b["min_value"] or 0):
+            out.append({"level": "bad", "text": f"{b['label']}: counts 0 until {b['min_value']:g} h are reached."})
+        elif x["gated"]:
+            out.append({"level": "bad", "text": f"{b['label']}: {x['note']} — currently worth 0."})
+        if due and due < now:
+            out.append({"level": "warn", "text": f"{b['label']} is past its due date but still planned."})
+        elif b["gating"] == "all_or_nothing" and due and due - now < timedelta(days=7):
+            out.append({"level": "warn", "text": f"At risk: {b['label']} is all-or-nothing and due within a week."})
+    return out
 
 
 def evaluate(model: dict, state: dict | None = None) -> dict:
@@ -191,4 +259,4 @@ def evaluate(model: dict, state: dict | None = None) -> dict:
         elif x["status"] == "pending":
             g["remaining" if x["included"] else "skipped"] += x["points"] if x["included"] else x["max"]
         g["lost"] += x["lost"]
-    return {"lines": lines, "totals": totals, "groups": groups, "state": st}
+    return {"lines": lines, "totals": totals, "groups": groups, "state": st, "alerts": alerts(model, lines, totals)}

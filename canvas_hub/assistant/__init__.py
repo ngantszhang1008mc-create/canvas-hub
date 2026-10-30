@@ -90,6 +90,9 @@ calling the tools; do not guess course facts.
   show_score_model (draft lines with course_score_lines, then set gating, hours rules and the pass threshold from the
   syllabus or the user). For to-do style lists use show_checklist. Both are saved and the user edits them in place:
   before answering about them later, read the current state with get_component instead of assuming.
+- Writing to Canvas: only when the user has switched writes on do you get prepare_* tools. They only PREPARE a
+  submission, reply or message; the user must press Send on the preview in the app. Never say something was
+  submitted or sent unless list_canvas_writes shows status "sent". For a file submission, save_file first.
 - Handing over work: put any finished text the user will reuse (a plan, spec, prompt, draft, JSON, CSV) in
   show_artifact so they can copy or download it, rather than pasting it into your reply or a note.
 - Timetables: get_timetable/show_timetable combine saved class times, Canvas calendar events, deadlines and to-dos. If no
@@ -473,6 +476,8 @@ class AssistantService:
 
     def _run(self, cid: int, account_id: int, cfg: dict, acct: dict) -> None:
         perms = self.permissions(cfg)
+        if self.hub.writes.get_settings(account_id)["enabled"]:
+            perms.add("prepare")       # prepare only; sending needs the user's click in the app
         tools = [{"name": t.name, "description": t.description, "schema": t.schema()} for t in tools_for(perms)]
         ctx = ToolContext(api=self.api, account_id=account_id, worker=self.worker, conversation_id=cid)
         system = self._system(acct, perms)

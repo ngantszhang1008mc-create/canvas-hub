@@ -104,7 +104,7 @@ FIELD_SPECS: dict[str, dict[str, FieldSpec]] = {
     "file": {"modified_at": _DATE, "display_name": FieldSpec("text", searchable=True)},
     "folder": {"modified_at": _DATE},
     "conversation": {"messages": FieldSpec("json", searchable=True), "last_message_at": _DATE,
-                     "workflow_state": _VOL},
+                     "workflow_state": _VOL, "unread": _VOL},
     "calendar_event": {"location_name": FieldSpec("text", searchable=True)},
     # Content read by a connected agent for a view request (agent-provided, untrusted).
     "external_link": {"content": FieldSpec("text", searchable=True), "read_at": _DATE_TEXT},

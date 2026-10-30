@@ -52,6 +52,7 @@ const store = {
 async function api(path, opts = {}) {
   const init = { method: opts.method || "GET", headers: { "Accept": "application/json" } };
   if (init.method !== "GET") init.headers["X-Canvas-Hub"] = "1";
+  if (opts.headers) Object.assign(init.headers, opts.headers);
   if (opts.body !== undefined) {
     if (opts.raw) { init.body = opts.body; init.headers["Content-Type"] = opts.contentType || "application/octet-stream"; }
     else { init.body = JSON.stringify(opts.body); init.headers["Content-Type"] = "application/json"; }
@@ -223,7 +224,64 @@ function renderTopbar() {
   }
   if (inst && st === "signed_in" && S.accountId)
     kids.push(h("button", { onclick: () => startJob("quick") }, "Quick check"));
+  if (S.accountId) kids.push(bell());
   mount($("#topbar"), kids);
+}
+
+// ---------- change bell ----------
+let bellEl = null, bellFeed = null, bellLastUnread = 0;
+function bell() {
+  if (!bellEl) {
+    const btn = h("button", { class: "ghost bell", "aria-haspopup": "dialog", "aria-label": "What's new" }, "🔔", h("span", { class: "bell-n", hidden: true }));
+    const panel = h("div", { class: "bell-panel", hidden: true, role: "dialog", "aria-label": "What's new" });
+    btn.addEventListener("click", (e) => { e.stopPropagation(); panel.hidden = !panel.hidden; if (!panel.hidden) drawBell(); });
+    document.addEventListener("click", (e) => { if (!bellEl.contains(e.target)) panel.hidden = true; });
+    bellEl = h("div", { class: "bell-wrap" }, btn, panel);
+    pollBell();
+    setInterval(pollBell, 60000);
+  }
+  return bellEl;
+}
+async function pollBell() {
+  if (!S.accountId) return;
+  const f = await api(A("/notifications") + qs({ limit: 30 })).catch(() => null);
+  if (!f) return;
+  bellFeed = f;
+  const n = bellEl.querySelector(".bell-n");
+  n.hidden = !f.unread; n.textContent = f.unread > 99 ? "99+" : String(f.unread);
+  bellEl.querySelector(".bell").setAttribute("aria-label", f.unread ? `What's new: ${f.unread} unread` : "What's new");
+  if (f.unread > bellLastUnread && store.get("desktopNotify") === "1" && "Notification" in window && Notification.permission === "granted") {
+    const first = f.items.find((x) => x.unread);
+    if (first) new Notification("Canvas Hub", { body: `${first.headline}: ${first.title}${f.unread > 1 ? ` (+${f.unread - 1} more)` : ""}` });
+  }
+  bellLastUnread = f.unread;
+  const due = await api(A("/reminders/due"), { method: "POST" }).catch(() => null);
+  for (const r of (due && due.reminders) || []) {
+    toast(`⏰ ${r.title}`);
+    if (store.get("desktopNotify") === "1" && "Notification" in window && Notification.permission === "granted") new Notification("Canvas Hub reminder", { body: r.title });
+  }
+  if (!bellEl.querySelector(".bell-panel").hidden) drawBell();
+}
+function drawBell() {
+  const panel = bellEl.querySelector(".bell-panel");
+  const f = bellFeed || { items: [], unread: 0 };
+  const desk = h("input", { type: "checkbox", checked: store.get("desktopNotify") === "1" ? true : null });
+  desk.addEventListener("change", async () => {
+    if (desk.checked && "Notification" in window && Notification.permission !== "granted") {
+      const p = await Notification.requestPermission();
+      if (p !== "granted") { desk.checked = false; toast("The browser did not allow notifications", true); return; }
+    }
+    store.set("desktopNotify", desk.checked ? "1" : "0");
+  });
+  mount(panel,
+    h("div", { class: "spread" }, h("strong", null, "What's new"),
+      f.unread ? h("button", { class: "sm ghost", onclick: async () => { const r = await guard(() => api(A("/notifications/seen"), { method: "POST", body: { up_to: f.latest_change_id } })); if (r) { bellFeed = r; pollBell(); } } }, "Mark all read") : null),
+    f.items.length ? h("ul", { class: "bell-list" }, f.items.map((x) => h("li", { class: x.unread ? "unread" : "" },
+      h("a", { href: `#/item/${x.item_id}`, onclick: () => { panel.hidden = true; } }, h("div", { class: "small strong" }, x.headline, " · ", x.title || ""),
+        h("div", { class: "tiny muted" }, [x.course, x.detail, ago(x.when)].filter(Boolean).join(" · ")))))) :
+      h("div", { class: "small muted", style: "padding:10px 0" }, "Nothing new since the last collection."),
+    h("label", { class: "check tiny", style: "margin-top:8px" }, desk, "Desktop notifications while Canvas Hub is open"),
+    h("a", { class: "tiny", href: "#/collect" }, "Automatic refresh settings →"));
 }
 
 function renderAccountSwitch() {
@@ -241,7 +299,7 @@ function renderAccountSwitch() {
 function renderFoot() {
   const v = S.info ? `v${S.info.version}` : "";
   const coll = S.info && S.info.collection_available ? "Collector ready" : "Collector not available in this process";
-  mount($("#sidebar-foot"), h("div", null, v), h("div", null, coll), h("div", { class: "tiny" }, "Local only. Read-only toward Canvas."));
+  mount($("#sidebar-foot"), h("div", null, v), h("div", null, coll), h("div", { class: "tiny" }, "Local only. Read-only toward Canvas unless you confirm a write."));
 }
 
 function selectAccount(id) {
@@ -378,6 +436,7 @@ VIEWS.overview = async (main) => {
     api(A("/discrepancies")),
     api(A("/jobs") + qs({ limit: 3 })),
   ]);
+  const dash = await api(A("/dashboard")).catch(() => null);
   const gaps = cov.records.filter((r) => ["partial", "blocked"].includes(r.latest.status));
   const active = jobs.jobs.find((j) => ["running", "queued", "needs_login", "paused", "interrupted"].includes(j.state));
   const recent = ch.events.slice(-8).reverse();
@@ -406,7 +465,8 @@ VIEWS.overview = async (main) => {
       empty("Nothing due in the next 14 days", "Based on the deadlines collected so far."));
   const chCard = h("div", { class: "card" }, h("div", { class: "card-head" }, h("h2", null, "Recent changes"), h("a", { href: "#/changes", class: "small" }, "All changes")),
     recent.length ? h("ul", { class: "list" }, recent.map(eventLi)) : empty("No changes since the baseline", "Changes appear after a later check finds edits."));
-  mount(main, head, banners, stats, h("div", { class: "grid cols-2", style: "margin-top:14px" }, dlCard, chCard));
+  mount(main, head, banners, stats, dash && dash.courses.length > 1 ? h("div", { style: "margin-top:14px" }, C.dashboardView({ title: "All courses", ...dash })) : null,
+    h("div", { class: "grid cols-2", style: "margin-top:14px" }, dlCard, chCard));
 };
 
 function summarize(v) {
@@ -453,14 +513,26 @@ VIEWS.deadlines = async (main, _p, params) => {
             h("span", { title: "When the due date was last read from Canvas" }, "date read " + ago(d.date_observed_at)),
             d.source_url ? h("a", { href: d.source_url, target: "_blank", rel: "noopener noreferrer" }, "Open in Canvas") : null)),
         h("div", { class: "row", style: "justify-content:flex-end" }, submissionPill(d.submission),
+          d.item_type !== "calendar_event" ? C.remindButton({ title: `Due: ${d.title}`, due: d.date.iso, item_id: d.item_id }) : null,
           d.item_type !== "calendar_event" ? localTaskToggle(d) : null));
     })));
   })) : [empty("Nothing in this range", "No collected deadlines fall in this window.")];
   const unresolved = data.unresolved_dates.length ? h("div", { class: "card", style: "margin-top:14px" }, h("h2", null, "Dates that could not be placed"),
     h("p", { class: "muted small" }, "These dates were shown without a year or time zone. They are kept exactly as written rather than guessed."),
     h("ul", { class: "list" }, data.unresolved_dates.map((d) => h("li", null, h("a", { href: `#/item/${d.item_id}` }, d.title), " — ", d.date.raw)))) : null;
+  const found = await api(A("/date-candidates/scan"), { method: "POST" }).catch(() => ({ candidates: [] }));
+  const sugg = found.candidates.filter((c) => c.status === "suggested" && new Date(c.starts_at) > Date.now() - 86400000);
+  const conf = found.candidates.filter((c) => c.status === "confirmed" && new Date(c.starts_at) > Date.now() - 86400000);
+  const fromText = sugg.length || conf.length ? h("div", { class: "card", style: "margin-top:14px" },
+    h("div", { class: "card-head" }, h("h2", null, "Dates found in course pages"), h("span", { class: "sub" }, "exams and other dates that are not Canvas deadlines")),
+    sugg.length ? h("ul", { class: "list" }, sugg.map((c) => h("li", null, h("div", { class: "spread" },
+      h("div", null, h("span", { class: "strong" }, c.label), h("div", { class: "small" }, fmtDate(c.starts_at, { weekday: true }), c.ends_at ? `–${c.ends_at.slice(11, 16)}` : "", c.location ? ` · ${c.location}` : "", " · ", C.countdown(c.starts_at)),
+        h("div", { class: "tiny muted" }, c.course_title || "", " · from ", h("a", { href: `#/item/${c.item_id}` }, c.item_title || "page"), ": “", c.snippet, "”")),
+      h("div", { class: "row" }, h("button", { class: "sm primary", onclick: async () => { if (await guard(() => api(A(`/date-candidates/${c.id}/confirm`), { method: "POST", body: {} }))) { toast("Added to your planner"); route(); } } }, "Confirm"),
+        h("button", { class: "sm ghost", onclick: async () => { if (await guard(() => api(A(`/date-candidates/${c.id}/dismiss`), { method: "POST" }))) route(); } }, "Not a date")))))) : null,
+    conf.length ? h("div", { class: "small", style: "margin-top:8px" }, h("strong", null, "Confirmed: "), conf.map((c, i) => [i ? " · " : "", `${c.label} (${fmtDate(c.starts_at, { weekday: true })})`])) : null) : null;
   mount(main, pageHead("Deadlines", `Times in ${data.time_zone}. Submission states are as Canvas reported them when last read.`), chips,
-    h("div", { style: "margin-top:18px" }, body), unresolved,
+    h("div", { style: "margin-top:18px" }, body), fromText, unresolved,
     h("p", { class: "muted small", style: "margin-top:16px" }, "The ✓ toggle is a private reminder stored locally. It never submits anything or changes Canvas."));
 };
 
@@ -491,6 +563,14 @@ VIEWS.courses = async (main) => {
         h("div", { class: "li-meta" }, c.course_code ? h("span", null, c.course_code) : null, c.term ? h("span", null, c.term) : null,
           c.published === false ? h("span", null, "unpublished") : null),
         accessible ? h("div", { class: "li-meta" }, ["assignment", "announcement", "file", "page"].filter((t) => counts[t]).map((t) => h("span", null, `${counts[t]} ${TYPE_LABEL[t].toLowerCase()}${counts[t] === 1 ? "" : "s"}`))) : h("div", { class: "small muted", style: "margin-top:6px" }, "Listed in All Courses but cannot be opened; not collected."),
+        accessible && c.content_state && c.content_state !== "has_content" ? h("div", { class: "small", style: "margin-top:6px" },
+          pill({ empty: "muted", hidden: "warn", not_checked: "muted" }[c.content_state] || "muted", { empty: "Empty", hidden: "Hidden from students", not_checked: "Not checked" }[c.content_state] || c.content_state),
+          h("span", { class: "tiny muted" }, " ", c.content_state_reason || "")) : null,
+        (c.possible_duplicates || []).map((o) => { const other = d.courses.find((x) => x.course_id === o);
+          return h("div", { class: "dup-note small", onclick: (e) => e.stopPropagation() }, "Possible duplicate of ", h("strong", null, other ? other.title : o), " ",
+            h("button", { class: "sm", onclick: async () => { if (await guard(() => api(A(`/courses/${c.course_id}/link`), { method: "PUT", body: { other_course_id: o, relation: "same" } }))) route(); } }, "Same course"), " ",
+            h("button", { class: "sm ghost", onclick: async () => { if (await guard(() => api(A(`/courses/${c.course_id}/link`), { method: "PUT", body: { other_course_id: o, relation: "different" } }))) route(); } }, "Different")); }),
+        (c.linked_shells || []).length ? h("div", { class: "tiny muted", style: "margin-top:4px" }, "Same course as ", c.linked_shells.map((o) => (d.courses.find((x) => x.course_id === o) || {}).title || o).join(", ")) : null,
         h("div", { class: "tiny muted", style: "margin-top:6px" }, "last read " + ago(c.last_observed_at)));
     }))) : null;
   mount(main, pageHead("Courses", "From Courses → All Courses, including entries not shown on the Dashboard."),
@@ -519,13 +599,66 @@ VIEWS.course = async (main, parts, params) => {
         h("p", { class: "muted small" }, "Sections missing here are not guessed. Content they hide is still collected when Home, the syllabus, modules or pages link to it."),
         syl ? h("p", null, h("a", { href: `#/item/${syl.id}` }, "Read the syllabus")) : null,
         pagesHome.items.length ? h("p", { class: "small" }, `${pagesHome.items.length} page(s) collected`) : null),
-      h("div", { class: "card" }, h("h2", null, "Coverage for this course"), coverageTable(cov.records)));
+      h("div", { class: "card" }, h("h2", null, "Coverage for this course"), coverageTable(cov.records)),
+      await gradingCard(cid));
   } else {
     const list = await api(A("/items") + qs({ course_id: cid, type: tab, limit: 200 }));
     body = h("div", { class: "card" }, itemTable(list.items));
   }
   mount(main, head, tabs, body);
 };
+
+// Local grading rules: what Canvas leaves out (real group weights, pass mark). Never sent to Canvas.
+async function gradingCard(cid) {
+  const card = h("div", { class: "card grading-card", style: "grid-column:1/-1" });
+  const draw = (rules) => {
+    const rows = Object.entries(rules.groups || {}).map(([name, g]) => ({ name, weight: g.weight ?? "", drop: g.drop_lowest || "" }));
+    if (!rows.length) rows.push({ name: "", weight: "", drop: "" });
+    const body = h("tbody");
+    const addRow = (r) => {
+      const tr = h("tr", null,
+        h("td", null, h("input", { type: "text", class: "g-name", value: r.name, placeholder: "Assignment group, e.g. Homework", "aria-label": "Group name" })),
+        h("td", { class: "num" }, h("input", { class: "num-in g-weight", type: "number", min: 0, max: 100, step: "any", value: r.weight, "aria-label": "Weight (%)" })),
+        h("td", { class: "num" }, h("input", { class: "num-in g-drop", type: "number", min: 0, step: 1, value: r.drop, "aria-label": "Drop lowest" })),
+        h("td", null, h("button", { class: "ghost sm", "aria-label": "Remove this group", onclick: () => { tr.remove(); total(); } }, "×")));
+      tr.addEventListener("input", () => total());
+      body.append(tr);
+    };
+    rows.forEach(addRow);
+    const sum = h("span", { class: "small", "aria-live": "polite" });
+    const total = () => {
+      const t = [...body.querySelectorAll(".g-weight")].reduce((s, i) => s + (Number(i.value) || 0), 0);
+      sum.textContent = `Weights add up to ${Math.round(t * 100) / 100}%`;
+      sum.className = Math.abs(t - 100) < 0.01 || t === 0 ? "small muted" : "small bad-text";
+    };
+    total();
+    const thr = h("input", { class: "num-in", type: "number", min: 0, step: "any", value: rules.threshold ?? "", "aria-label": "Pass mark" });
+    const src = h("input", { type: "text", value: rules.source || "", placeholder: "e.g. syllabus p.2", "aria-label": "Source of these rules" });
+    const items = Object.entries(rules.items || {});
+    mount(card, h("div", { class: "card-head" }, h("h2", null, "Grading rules"), h("span", { class: "sub" }, "kept on this computer · used by score models and grade projections")),
+      h("p", { class: "small muted" }, "Canvas often reports 0 for every group weight. Enter the syllabus weights here (or ask the assistant to read them); nothing is sent to Canvas."),
+      h("div", { class: "table-wrap" }, h("table", { class: "t" }, h("thead", null, h("tr", null, h("th", null, "Group"), h("th", { class: "num" }, "Weight %"), h("th", { class: "num" }, "Drop lowest"), h("th", null, ""))), body)),
+      h("div", { class: "row", style: "margin-top:8px" }, h("button", { class: "sm", onclick: () => { addRow({ name: "", weight: "", drop: "" }); total(); } }, "+ Add group"), sum),
+      h("div", { class: "row", style: "margin-top:10px" }, h("label", { class: "small" }, "Pass mark ", thr), h("label", { class: "small grow" }, "Source ", src)),
+      items.length ? h("details", { style: "margin-top:10px" }, h("summary", { class: "small" }, `${items.length} assignment rule(s) set by the assistant`),
+        h("ul", { class: "small" }, items.map(([id, r]) => h("li", null, h("code", null, id), " ", Object.entries(r).map(([k, v]) => `${k}: ${v}`).join(" · "))))) : null,
+      h("div", { class: "row", style: "margin-top:12px" }, h("button", { class: "primary", onclick: async () => {
+        const groups = {};
+        for (const tr of body.querySelectorAll("tr")) {
+          const name = tr.querySelector(".g-name").value.trim();
+          if (!name) continue;
+          const w = tr.querySelector(".g-weight").value, d = tr.querySelector(".g-drop").value;
+          groups[name] = { ...(w !== "" ? { weight: Number(w) } : {}), ...(d !== "" && Number(d) ? { drop_lowest: Number(d) } : {}) };
+        }
+        const next = { ...rules, groups, threshold: thr.value === "" ? undefined : Number(thr.value), source: src.value.trim() || undefined };
+        delete next.updated_at;
+        const r = await guard(() => api(A(`/courses/${cid}/grading`), { method: "PUT", body: next }));
+        if (r) { toast("Grading rules saved"); draw(r); }
+      } }, "Save rules"), rules.updated_at ? h("span", { class: "tiny muted" }, `saved ${ago(rules.updated_at)}`) : null));
+  };
+  try { draw(await api(A(`/courses/${cid}/grading`))); } catch (e) { mount(card, h("p", { class: "muted small" }, "Grading rules unavailable: " + e.message)); }
+  return card;
+}
 
 function itemTable(items) {
   if (!items.length) return empty("Nothing here", "");
@@ -604,8 +737,10 @@ const relLabel = (r) => ({ body_link: "links to", module_item_content: "opens", 
 
 function resourceBlock(r) {
   const st = r.extraction_status;
-  const cls = st === "ok" ? "ok" : ["needs_ocr", "image_only", "unsupported_media", "unsupported_type", "empty"].includes(st) ? "warn" : st === "failed" ? "bad" : "muted";
-  const label = { ok: "Text extracted", needs_ocr: "Scanned — needs OCR", image_only: "Image only", unsupported_media: "Audio/video (not transcribed)",
+  const cls = st === "ok" || st === "ocr" ? "ok" : ["needs_ocr", "image_only", "unsupported_media", "unsupported_type", "empty", "ocr_low_confidence"].includes(st) ? "warn" : st === "failed" ? "bad" : "muted";
+  const conf = r.ocr_confidence != null ? ` · ${Math.round(r.ocr_confidence)}% confidence` : "";
+  const label = { ok: "Text extracted", ocr: `Text from OCR${conf}`, ocr_low_confidence: `OCR, low confidence${conf}`,
+    needs_ocr: "Scanned — needs OCR", image_only: "Image only", unsupported_media: "Audio/video (not transcribed)",
     unsupported_type: "No text extractor", failed: "Extraction failed", empty: "No text found", tool_unavailable: "Extractor not installed", not_attempted: "Not extracted" }[st] || st;
   const out = h("div", null);
   const textBox = h("div");
@@ -704,7 +839,9 @@ VIEWS.changes = async (main, _p, params) => {
     h("label", { class: "check small" }, h("input", { type: "checkbox", checked: baseline ? true : null, onchange: (e) => { location.hash = `#/changes${qs({ baseline: e.target.checked ? 1 : 0, first: first ? 1 : 0 })}`; } }), "Include first baseline"));
   const groups = new Map();
   for (const e of evs) { const k = dayKey(e.recorded_at || e.observed_at); if (!groups.has(k)) groups.set(k, []); groups.get(k).push(e); }
+  const sentWrites = ((await api(A("/writes")).catch(() => ({ writes: [] }))).writes || []).filter((w) => ["sent", "failed"].includes(w.status)).slice(0, 10);
   mount(main, pageHead("Changes", "Edits, newly read fields and items that stopped appearing. Reading something for the first time is shown separately from an actual change."),
+    sentWrites.length ? h("div", { class: "card" }, h("div", { class: "card-head" }, h("h2", null, "What you sent to Canvas"), h("span", { class: "sub" }, "confirmed writes, newest first")), C.writesLog(sentWrites)) : null,
     h("div", { class: "card" }, toggles,
       h("div", { class: "legend", style: "margin-top:8px" }, Object.entries(EVENT_LABEL).map(([k, l]) => h("span", null, pill(EVENT_CLASS[k], l))))),
     groups.size ? [...groups.entries()].map(([k, list]) => h("div", { class: "card" }, h("div", { class: "day-label" }, fmtDate(list[0].recorded_at || list[0].observed_at, { weekday: true, time: false })),
@@ -763,12 +900,54 @@ VIEWS.coverage = async (main) => {
 // ---------- notes ----------
 VIEWS.notes = async (main, _p, params) => {
   const filter = params.get("show") || "open";
-  const r = await api(A("/annotations") + qs(filter === "all" ? {} : filter === "notes" ? { kind: "note" } : { kind: "task", task_state: filter }));
-  const title = h("input", { type: "text", placeholder: "To-do title", style: "flex:1" });
-  const due = h("input", { type: "datetime-local" });
-  const chips = h("div", { class: "chips" }, [["open", "Open to-dos"], ["done", "Done"], ["notes", "Notes"], ["all", "Everything"]].map(([k, l]) =>
+  const q = filter === "all" || filter === "board" ? {} : filter === "notes" ? { kind: "note" } : { kind: "task", task_state: filter === "open" ? "active" : filter };
+  const [r, files] = await Promise.all([api(A("/annotations") + qs(q)), api(A("/files")).catch(() => ({ files: [] }))]);
+  const title = h("input", { type: "text", placeholder: "To-do title", "aria-label": "To-do title", style: "flex:1" });
+  const due = h("input", { type: "datetime-local", "aria-label": "Due (optional)" });
+  const chips = h("div", { class: "chips" }, [["open", "Open to-dos"], ["board", "Board"], ["done", "Done"], ["notes", "Notes"], ["all", "Everything"]].map(([k, l]) =>
     h("button", { class: "chip" + (k === filter ? " on" : ""), onclick: () => { location.hash = `#/notes?show=${k}`; } }, l)));
-  mount(main, pageHead("Notes & tasks", "Your own notes and to-dos. Stored locally, kept across every refresh, and never sent to Canvas."),
+  const patch = (a, body) => guard(() => api(A(`/annotations/${a.id}`), { method: "PATCH", body }));
+  const STATES = [["open", "To do"], ["in_progress", "In progress"], ["blocked", "Blocked"], ["done", "Done"]];
+  // In place: click the title or text to edit; "- [ ]" lines in a body are checkboxes.
+  const editable = (a, field, multiline) => {
+    const show = () => {
+      const val = a[field] || "";
+      if (field === "body" && /^\s*[-*] \[[ xX]\]/m.test(val)) {
+        const lines = val.split("\n");
+        return h("div", { class: "note-body", title: "Click a line's text to edit" }, lines.map((ln, i) => {
+          const m = ln.match(/^(\s*[-*] \[)([ xX])(\]\s?)(.*)$/);
+          if (!m) return h("div", { class: "small", onclick: () => edit() }, ln || "\u00a0");
+          return h("label", { class: "check small" }, h("input", { type: "checkbox", checked: m[2] !== " " ? true : null, onchange: async (e) => {
+            lines[i] = m[1] + (e.target.checked ? "x" : " ") + m[3] + m[4]; const r2 = await patch(a, { body: lines.join("\n") }); if (r2) a.body = r2.body; } }),
+            h("span", { onclick: (e) => { e.preventDefault(); edit(); } }, m[4]));
+        }));
+      }
+      return h(field === "title" ? "span" : "div", { class: field === "title" ? "strong editable" : "small editable note-body", tabindex: "0", title: "Click to edit",
+        onclick: () => edit(), onkeydown: (e) => { if (e.key === "Enter" && field === "title") edit(); } }, val || (field === "title" ? "(untitled)" : "Add details…"));
+    };
+    const box = h("span", { class: field === "body" ? "edit-box block" : "edit-box" }, show());
+    const edit = () => {
+      const inp = h(multiline ? "textarea" : "input", { class: multiline ? "edit-area" : "edit-in", "aria-label": `Edit ${field}` });
+      inp.value = a[field] || "";
+      const save = async () => { if (inp.value !== (a[field] || "")) { const r2 = await patch(a, { [field]: inp.value }); if (r2) a[field] = r2[field]; } mount(box, show()); };
+      inp.addEventListener("blur", save);
+      inp.addEventListener("keydown", (e) => { if (e.key === "Escape") mount(box, show()); if (e.key === "Enter" && (!multiline || e.metaKey || e.ctrlKey)) { e.preventDefault(); inp.blur(); } });
+      mount(box, inp); inp.focus();
+    };
+    return box;
+  };
+  const list = r.annotations.length ? h("ul", { class: "list" }, r.annotations.map((a) => h("li", null, h("div", { class: "spread" },
+    h("div", { class: "row" }, a.kind === "task" ? h("input", { type: "checkbox", checked: a.task_state === "done" ? true : null, "aria-label": "Done (local)",
+      onchange: async (e) => { await patch(a, { task_state: e.target.checked ? "done" : "open" }); route(); } }) : pill("muted plain", "Note"),
+      editable(a, "title", false),
+      a.item_id ? h("a", { href: `#/item/${a.item_id}`, class: "small" }, a.item_title || "linked item") : null),
+    h("div", { class: "row" }, a.local_due ? h("span", { class: "small muted" }, "due " + fmtDate(a.local_due), " · ", C.countdown(a.local_due)) : null,
+      a.kind === "task" ? h("select", { class: "sm-select", "aria-label": "State", onchange: async (e) => { await patch(a, { task_state: e.target.value }); route(); } },
+        STATES.map(([v, l]) => h("option", { value: v, selected: a.task_state === v ? true : null }, l))) : null,
+      a.kind === "task" ? C.remindButton({ title: a.title || "To-do", due: a.local_due, annotation_id: a.id }) : null,
+      h("button", { class: "ghost sm", onclick: async () => { await guard(() => api(A(`/annotations/${a.id}`), { method: "DELETE" })); route(); } }, "Delete"))),
+    editable(a, "body", true)))) : empty("Nothing here", "");
+  mount(main, pageHead("Notes & tasks", "Your own notes and to-dos. Stored locally, kept across every refresh, and never sent to Canvas. Click any text to edit it."),
     h("div", { class: "card" }, h("div", { class: "row" }, title, due, h("button", { class: "primary", onclick: async () => {
       if (!title.value.trim()) return;
       const body = { kind: "task", title: title.value };
@@ -776,14 +955,8 @@ VIEWS.notes = async (main, _p, params) => {
       await guard(() => api(A("/annotations"), { method: "POST", body })); route();
     } }, "Add to-do"))),
     h("div", { style: "margin:14px 0 8px" }, chips),
-    h("div", { class: "card" }, r.annotations.length ? h("ul", { class: "list" }, r.annotations.map((a) => h("li", null, h("div", { class: "spread" },
-      h("div", { class: "row" }, a.kind === "task" ? h("input", { type: "checkbox", checked: a.task_state === "done" ? true : null, "aria-label": "Done (local)",
-        onchange: async (e) => { await guard(() => api(A(`/annotations/${a.id}`), { method: "PATCH", body: { task_state: e.target.checked ? "done" : "open" } })); route(); } }) : pill("muted plain", "Note"),
-        h("span", { class: "strong" }, a.title || (a.body || "").slice(0, 80)),
-        a.item_id ? h("a", { href: `#/item/${a.item_id}`, class: "small" }, a.item_title || "linked item") : null),
-      h("div", { class: "row" }, a.local_due ? h("span", { class: "small muted" }, "due " + fmtDate(a.local_due)) : null,
-        h("button", { class: "ghost sm", onclick: async () => { await guard(() => api(A(`/annotations/${a.id}`), { method: "DELETE" })); route(); } }, "Delete"))),
-      a.body && a.title ? h("div", { class: "small", style: "white-space:pre-wrap;margin-top:4px" }, a.body) : null))) : empty("Nothing here", "")));
+    filter === "board" ? C.kanbanView({ title: "To-do board" }) : h("div", { class: "card" }, list),
+    h("div", { style: "margin-top:16px" }, C.filesCard(files.files)));
 };
 
 // ---------- collection ----------
@@ -816,8 +989,22 @@ VIEWS.collect = async (main) => {
       if (!j.jobs.some((x) => ["running", "queued", "cancel_requested"].includes(x.state))) { clearInterval(S.jobPoll); refreshSession(true); }
     }, 2000);
   }
-  mount(main, pageHead("Collection", "You start every collection. Canvas Hub does not sync continuously in the background."), signBanner, modes,
-    h("div", { style: "margin-top:14px" }, jobsCard), scopeEditor(scope, courses));
+  const rs = await api(A("/refresh-settings")).catch(() => null);
+  const auto = rs ? h("div", { class: "card", style: "margin-top:14px" }, h("div", { class: "card-head" }, h("h2", null, "Automatic refresh"),
+    pill(rs.minutes ? "info" : "muted", rs.minutes ? `Every ${rs.minutes} min` : "Off")),
+    h("p", { class: "small muted" }, "While Canvas Hub is running and you are signed in, run a quick check on this schedule. It never opens a sign-in window, and stops when you quit the app (nothing is added to your system's scheduler). New grades, edited due dates and announcements then appear under the 🔔 bell."),
+    h("div", { class: "row" }, h("select", { "aria-label": "Refresh interval", onchange: async (e) => {
+      const r = await guard(() => api(A("/refresh-settings"), { method: "PUT", body: { minutes: Number(e.target.value) } }));
+      if (r) { toast(r.minutes ? `Quick check every ${r.minutes} minutes` : "Automatic refresh off"); route(); } } },
+      [[0, "Off"], [30, "Every 30 minutes"], [60, "Every hour"], [120, "Every 2 hours"], [240, "Every 4 hours"]].map(([v, l]) => h("option", { value: v, selected: rs.minutes === v ? true : null }, l))),
+      h("span", { class: "tiny muted" }, rs.last_completed_at ? `Last completed ${ago(rs.last_completed_at)}` : "Runs after your first collection"),
+      !rs.runs_here ? h("span", { class: "tiny warn-text" }, "This process does not run collection jobs.") : null)) : null;
+  const inboxOff = !scope.categories.includes("inbox") ? h("div", { class: "banner info", style: "margin-top:14px" }, h("div", { class: "b-body" },
+    h("div", { class: "b-title" }, "Your Canvas Inbox is not collected"),
+    h("div", { class: "small" }, "Messages from instructors and groups stay outside Canvas Hub until you include the Inbox. Messages are read without marking them as read, and nothing is ever sent from here unless you confirm a write.")),
+    h("button", { onclick: async () => { const r = await guard(() => api(A("/scope"), { method: "PUT", body: { categories: [...scope.categories, "inbox"] } })); if (r) { toast("Inbox included from the next collection"); route(); } } }, "Include Inbox")) : null;
+  mount(main, pageHead("Collection", "You start the first collection. After that, Canvas Hub can re-check on a schedule while it is running."), signBanner, modes,
+    inboxOff, auto, h("div", { style: "margin-top:14px" }, jobsCard), scopeEditor(scope, courses));
 }
 
 function modeCard(title, text, mode, primary) {
@@ -877,6 +1064,35 @@ function scopeEditor(scope, courses) {
 }
 
 // ---------- settings ----------
+// Optional OCR (app-wide): text from photos and scanned PDFs, with a confidence flag per document.
+function ocrCard(s) {
+  const on = h("input", { type: "checkbox", checked: s.enabled ? true : null, disabled: s.tesseract ? null : true });
+  const lang = h("input", { type: "text", value: s.lang || "eng", "aria-label": "OCR languages", style: "width:140px" });
+  const result = h("div", { class: "small", "aria-live": "polite" });
+  return h("div", { class: "card" }, h("div", { class: "card-head" }, h("h2", null, "Text from scans and photos (OCR)"),
+    pill(s.enabled && s.tesseract ? "ok" : "muted", s.enabled && s.tesseract ? "On" : "Off")),
+    h("p", { class: "small muted" }, `Reads text from photographed forms and scanned PDFs on this computer with tesseract. Each document gets a confidence score; below ${s.low_confidence_below}% it is flagged, because handwriting and formulas are often misread. Nothing is uploaded.`),
+    s.tesseract ? h("p", { class: "small" }, `Found ${s.version || "tesseract"}${s.pdf ? " and pdftoppm (scanned PDFs)" : " — scanned PDFs also need pdftoppm (brew install poppler)"}.`)
+      : h("div", { class: "banner warn" }, h("div", { class: "b-body" }, h("div", { class: "b-title" }, "tesseract is not installed"), h("div", { class: "small" }, s.install_hint))),
+    h("label", { class: "check" }, on, h("strong", null, "Read text from scans and photos")),
+    h("div", { class: "row", style: "margin-top:6px" }, h("label", { class: "small" }, "Languages ", lang), h("span", { class: "tiny muted" }, "e.g. eng, or eng+chi_tra (language packs must be installed)")),
+    h("div", { class: "row", style: "margin-top:10px" }, h("button", { class: "primary", onclick: async () => {
+      const r = await guard(() => api("/api/ocr", { method: "PUT", body: { enabled: !!on.checked, lang: lang.value.trim() || "eng" } }));
+      if (r) { toast(r.enabled ? "OCR is on" : "OCR is off"); route(); } } }, "Save"),
+      s.enabled && s.tesseract && s.pending ? h("button", { onclick: async (e) => {
+        e.target.disabled = true; result.textContent = "Reading…";
+        const r = await guard(() => api("/api/ocr/run", { method: "POST", body: { limit: 10 } }));
+        e.target.disabled = false;
+        if (r) mount(result, h("ul", { class: "list" }, r.processed.map((x) => h("li", null, x.filename || x.resource_id.slice(0, 12), " — ",
+          pill(x.status === "ocr" ? "ok" : "warn", x.status === "ocr" ? "text read" : x.status === "ocr_low_confidence" ? "low confidence" : x.status),
+          x.confidence != null ? ` ${Math.round(x.confidence)}%` : ""))), h("p", { class: "tiny muted" }, `${r.pending} still to read`));
+      } }, `Read ${Math.min(10, s.pending)} of ${s.pending} stored document${s.pending === 1 ? "" : "s"}`) : null,
+      s.enabled && s.tesseract && s.failed ? h("button", { class: "ghost", onclick: async () => {
+        const r = await guard(() => api("/api/ocr/run", { method: "POST", body: { limit: 10, retry_failed: true } }));
+        if (r) { toast(`${r.failed} still could not be read`); route(); } } }, `Retry ${s.failed} that could not be read`) : null),
+    result);
+}
+
 VIEWS.settings = async (main) => {
   const [backups, info] = await Promise.all([api("/api/backups"), api("/api/info")]);
   const inst = currentInstance();
@@ -891,7 +1107,7 @@ VIEWS.settings = async (main) => {
           if (!confirm("Restore this backup? Current data will be moved aside (not deleted).")) return;
           const r = await guard(() => api(`/api/backups/${encodeURIComponent(f.name)}/restore`, { method: "POST" }));
           if (r) { toast("Restored"); await loadIdentities(); route(); } } }, "Restore") : null))))) : null));
-  const file = h("input", { type: "file", accept: ".zip" });
+  const file = h("input", { type: "file", accept: ".zip", "aria-label": "Export archive to import (.zip)" });
   cards.push(h("div", { class: "card" }, h("h2", null, "Import"), h("p", { class: "muted small" }, "Import a portable export created by Canvas Hub. Data is attached to the account named inside the export and never merged into a different account."),
     h("div", { class: "row" }, file, h("button", { onclick: async () => {
       if (!file.files[0]) return;
@@ -910,6 +1126,10 @@ VIEWS.settings = async (main) => {
         if (r) { toast("Course data deleted"); S.accountId = null; await loadIdentities(); location.hash = "#/setup"; }
       } }, "Delete data"))));
   }
+  if (S.accountId) { const ws = await api(A("/writes")).catch(() => null); if (ws) cards.push(C.writesSettingsCard(ws)); }
+  if (S.accountId) { const ch = await api(A("/custom-html")).catch(() => null); if (ch) cards.push(C.customHtmlCard(ch)); }
+  const ocrS = await api("/api/ocr").catch(() => null);
+  if (ocrS) cards.push(ocrCard(ocrS));
   const acfg = await api("/api/assistant/config").catch(() => null);
   if (acfg) {
     const active = acfg.profiles.find((x) => x.id === acfg.active_profile);
@@ -1317,7 +1537,16 @@ VIEWS.planner = async (main, _p, params) => {
     h("button", { class: "sm", onclick: () => go("") }, "This week"),
     h("button", { class: "sm", onclick: () => go(shift(7)) }, "Next ›"),
     h("label", { class: "check small", style: "margin-left:10px" }, h("input", { type: "checkbox", checked: suggest ? true : null, onchange: (e) => go(weekOf, e.target.checked) }), "Suggest study blocks"),
-    h("a", { class: "btn sm", href: A("/planner.ics") + qs({ weeks: 8 }) }, "Export .ics"));
+    h("a", { class: "btn sm", href: A("/planner.ics") + qs({ weeks: 8 }) }, "Export .ics"),
+    h("label", { class: "btn sm", title: "Weekly repeating events become class times" }, "Import timetable .ics", h("input", { type: "file", accept: ".ics,text/calendar", onchange: async (e) => {
+      const f = e.target.files[0]; if (!f) return;
+      const r = await guard(() => api(A("/planner/import-ics"), { method: "POST", raw: true, body: f, contentType: "text/calendar" }));
+      if (r) {
+        const skipped = r.skipped || [];
+        const summary = `Found ${r.found} weekly class time(s), added ${r.added}`;
+        toast(summary + (skipped.length ? `. Skipped ${skipped.length} event(s): ` + skipped.slice(0, 3).map((s) => `${s.title}: ${s.reason}`).join("; ") : ""), skipped.length > 0);
+        route();
+      } } })));
   const accessible = courses.courses.filter((c) => c.access === "accessible");
   const f = { title: h("input", { type: "text", placeholder: "e.g. MATH1023 Lecture" }),
     course: h("select", null, h("option", { value: "" }, "Course (optional)"), accessible.map((c) => h("option", { value: c.course_id }, c.title))),
@@ -1341,7 +1570,17 @@ VIEWS.planner = async (main, _p, params) => {
 
 // ---------- external-site requests ----------
 VIEWS.requests = async (main) => {
-  const [reqs, courses] = await Promise.all([api(A("/requests")), api(A("/courses"))]);
+  const [reqs, courses, agents] = await Promise.all([api(A("/requests")), api(A("/courses")), api("/api/agents").catch(() => ({ agents: [] }))]);
+  const fulfillers = agents.agents.filter((x) => x.can_fulfil);
+  const recent = fulfillers.filter((x) => Date.now() - new Date(x.last_seen) < 24 * 3600e3);
+  const agentCard = h("div", { class: "card" }, h("div", { class: "card-head" }, h("h2", null, "Connected agents"),
+      pill(recent.length ? "ok" : "warn", recent.length ? `${recent.length} can read sites` : "None ready")),
+    agents.agents.length ? h("ul", { class: "list" }, agents.agents.map((x) => h("li", { class: "spread" },
+      h("div", null, h("span", { class: "strong" }, x.name), h("span", { class: "tiny muted" }, ` · last seen ${ago(x.last_seen)}`)),
+      pill(x.can_fulfil ? "ok" : "muted", x.can_fulfil ? "can fulfil requests" : "read-only")))) : null,
+    !recent.length ? h("p", { class: "small" }, "Requests wait until an agent that has its own browser access checks in. Start Canvas Hub's MCP server for it with ",
+      h("code", null, "canvas-hub mcp --allow-fulfil"), ", then ask it to “serve Canvas Hub view requests”. It can wait for new requests with ",
+      h("code", null, "wait_for_view_requests"), ".") : null);
   const accessible = courses.courses.filter((c) => c.access === "accessible");
   const url = h("input", { type: "url", placeholder: "https://course-website.example.edu/…", style: "flex:1;min-width:240px" });
   const title = h("input", { type: "text", placeholder: "What is it? e.g. COMP1023 course website", style: "width:100%" });
@@ -1353,6 +1592,7 @@ VIEWS.requests = async (main) => {
       "Canvas Hub never opens these sites or touches your other browser profiles. An agent you connect over MCP (for example Codex or Claude with your browser) can pick up a request, read the site with its own access, and send back the text. It is stored as ",
       h("strong", null, "agent-provided"), " content, separate from what Canvas reported, and becomes searchable. The agent needs ",
       h("code", null, "canvas-hub mcp --allow-fulfil"), ".")),
+    agentCard,
     h("div", { class: "card" }, h("h2", { style: "margin-bottom:10px" }, "New request"),
       h("div", { class: "stack" }, h("div", { class: "row" }, url, course), title, note,
         h("div", null, h("button", { class: "primary", onclick: async () => {

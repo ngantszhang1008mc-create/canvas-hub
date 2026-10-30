@@ -288,13 +288,31 @@ def test_different_signed_in_account_is_never_mixed(env):
     assert env.hub.db.one("SELECT COUNT(*) n FROM items WHERE account_id=?", (s["account_id"],))["n"] == 0
 
 
-def test_background_checks_do_not_open_browser_and_closed_window_is_not_signed_in(env):
+@pytest.mark.parametrize("expired", [False, True], ids=["persistent-session", "expired-session"])
+def test_background_checks_do_not_open_browser_and_reopened_sessions_are_verified(env, expired):
     iid = env.inst["id"]
     env.login()
+
+    def keep_session():
+        # Choose a persistent cookie explicitly: Chromium versions differ in
+        # whether they retain a session-only cookie in a persistent profile.
+        ctx = env.worker._contexts[iid]
+        cookies = ctx.cookies()
+        for cookie in cookies:
+            if cookie["name"] == "fake_session":
+                cookie["expires"] = time.time() + 3600
+        ctx.add_cookies(cookies)
+
+    env.worker.call(keep_session)
     env.worker.call(env.worker.close_browser, iid)
+    requests_before = env.fc.paths_requested().count("/api/v1/users/self")
     polled = env.worker.call(lambda: env.worker.check_session(iid, launch=False))
     assert polled["status"] != "signed_in" and iid not in env.worker._contexts   # nothing launched
-    # A real check starts a headless context from the saved profile; the fake
-    # Canvas uses a session-only cookie, so the sign-in has ended.
+    assert env.fc.paths_requested().count("/api/v1/users/self") == requests_before
+    if expired:
+        env.fc.expire_sessions()
+    # Reopening checks with Canvas even if the profile retains its cookie.
     checked = env.worker.call(lambda: env.worker.check_session(iid, launch=True))
-    assert checked["status"] == "expired" and env.worker._modes[iid] == "headless"
+    assert checked["status"] == ("expired" if expired else "signed_in")
+    assert env.worker._modes[iid] == "headless"
+    assert env.fc.paths_requested().count("/api/v1/users/self") > requests_before

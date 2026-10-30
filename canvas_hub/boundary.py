@@ -15,6 +15,7 @@ See CODEX_HANDOFF.md for schemas and examples.
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from typing import Any
@@ -23,7 +24,7 @@ from . import __version__
 from .model import CATEGORIES, ITEM_TYPES
 from .services import Hub
 from .services import backup as backup_mod
-from .util import InvalidInput, NotFound
+from .util import Conflict, HubError, InvalidInput, NotFound
 
 _BACKUP_NAME = re.compile(r"^canvas-hub-(backup|export)-[A-Za-z0-9\-]+\.zip$")
 
@@ -90,6 +91,13 @@ class HubAPI:
     def list_courses(self, account_id) -> dict:
         a = self._acct(account_id)
         return {"account_id": a["id"], "courses": self.hub.query.list_courses(a["id"])}
+
+    def link_courses(self, account_id, course_id, data: dict) -> dict:
+        a = self._acct(account_id)
+        if set(data) - {"other_course_id", "relation"}:
+            raise InvalidInput("give other_course_id and relation (same, different or none)")
+        self.hub.query.link_courses(a["id"], course_id, str(data.get("other_course_id") or ""), data.get("relation") or "")
+        return self.list_courses(account_id)
 
     def list_items(self, account_id, *, course_id=None, item_type=None, presence=None, limit=None, cursor=None) -> dict:
         a = self._acct(account_id)
@@ -203,6 +211,194 @@ class HubAPI:
         return self.hub.planner.ics(self._acct(account_id)["id"], int(weeks or 8))
 
     # ---- external-site requests ---------------------------------------------------
+    # ---- confirmed writes to Canvas (off unless the user enables them) --------------------
+    def write_settings(self, account_id) -> dict:
+        return self.hub.writes.get_settings(self._acct(account_id)["id"])
+
+    def set_write_settings(self, account_id, data: dict) -> dict:
+        if set(data) - {"enabled", "kinds"}:
+            raise InvalidInput(f"unknown fields {sorted(set(data) - {'enabled', 'kinds'})}")
+        return self.hub.writes.set_settings(self._acct(account_id)["id"], enabled=data.get("enabled"), kinds=data.get("kinds"))
+
+    def ocr_status(self) -> dict:
+        from . import ocr
+        return {**self.hub.resources.ocr_settings(), **ocr.status(), "pending": self.hub.resources.ocr_pending(),
+                "failed": self.hub.resources.ocr_failed(),
+                "low_confidence_below": ocr.LOW_CONFIDENCE}
+
+    def set_ocr(self, data: dict) -> dict:
+        if set(data) - {"enabled", "lang"} or not isinstance(data.get("enabled"), bool):
+            raise InvalidInput("send {\"enabled\": true|false, \"lang\": \"eng\"}")
+        self.hub.resources.set_ocr_settings(data["enabled"], data.get("lang") or "eng")
+        return self.ocr_status()
+
+    def run_ocr(self, data: dict) -> dict:
+        return self.hub.run_ocr(int(data.get("limit") or 10), retry_failed=bool(data.get("retry_failed")))
+
+    def custom_html_settings(self, account_id) -> dict:
+        return self.hub.settings.get(self._acct(account_id)["id"], "custom_html")
+
+    def set_custom_html_settings(self, account_id, data: dict) -> dict:
+        if set(data) != {"enabled"} or not isinstance(data["enabled"], bool):
+            raise InvalidInput("send {\"enabled\": true|false}")
+        return self.hub.settings.set(self._acct(account_id)["id"], "custom_html", {"enabled": data["enabled"]})
+
+    def list_writes(self, account_id, status=None) -> dict:
+        return {"writes": self.hub.writes.list(self._acct(account_id)["id"], status or None),
+                "settings": self.hub.writes.get_settings(self._acct(account_id)["id"])}
+
+    def get_write(self, account_id, write_id) -> dict:
+        return self.hub.writes.get(self._acct(account_id)["id"], write_id)
+
+    def prepare_write(self, account_id, data: dict, *, prepared_by: str = "user", conversation_id=None) -> dict:
+        allowed = {"kind", "item_id", "text", "file_id", "course_id", "recipients", "subject"}
+        if set(data) - allowed:
+            raise InvalidInput(f"unknown fields {sorted(set(data) - allowed)}")
+        kind = data.get("kind")
+        return self.hub.writes.prepare(self._acct(account_id)["id"], kind, prepared_by=prepared_by,
+                                       conversation_id=conversation_id, **{k: v for k, v in data.items() if k != "kind"})
+
+    def cancel_write(self, account_id, write_id) -> dict:
+        return self.hub.writes.cancel(self._acct(account_id)["id"], write_id)
+
+    def confirm_write(self, account_id, write_id, preview_hash: str) -> dict:
+        """Send a prepared write. Only the app's own UI calls this, after the user
+        has read the preview; there is no assistant or MCP tool for it."""
+        a = self._acct(account_id)
+        if self.worker is None:
+            raise HubError("the signed-in browser is not available in this process", code="collector_unavailable", status=503)
+        inst = self.hub.identity.get_instance(a["instance_id"])
+
+        def same_user(state: dict) -> None:
+            # The browser session belongs to the Canvas instance, not to an account: whoever signed in last is the
+            # one a write would be sent as. It must be the account the write was prepared for.
+            if state.get("status") != "signed_in":
+                raise HubError("Sign in to Canvas first; nothing was sent.", code="needs_login", status=409)
+            if state.get("account_id") != a["id"]:
+                raise Conflict(f"The browser is signed in as a different Canvas user. Sign in as "
+                               f"{a.get('display_name') or a['canvas_user_id']} to send this; nothing was sent.",
+                               code="wrong_account")
+
+        # Checked before the write is marked as sending (so it stays prepared), and again right before the POST.
+        same_user(self.worker.call(lambda: self.worker.check_session(a["instance_id"], launch=True), timeout=120))
+
+        def send(job):
+            from .collector.writer import CanvasWriter
+
+            def run():
+                same_user(self.worker.check_session(a["instance_id"], launch=True))
+                return CanvasWriter(self.worker._context(a["instance_id"]), inst["origin"]).send(job)
+            return self.worker.submit(run)          # a Future: confirm waits, or leaves it `sending` until it ends
+        r = self.hub.writes.confirm(a["id"], write_id, preview_hash, send)
+        if r["status"] == "sent" and self.runner is not None:
+            try:      # read the course again so the submission or reply shows up in Canvas Hub
+                self.runner.start_collection(a["id"], "quick", {"courses": [r["course_id"]]})
+            except HubError:
+                pass
+        return r
+
+    # ---- freshness: automatic refresh and the change bell -------------------------------------
+    def refresh_settings(self, account_id) -> dict:
+        a = self._acct(account_id)
+        s = self.hub.settings.get(a["id"], "auto_refresh")
+        last = self.hub.db.one("""SELECT MAX(finished_at) AS f FROM jobs WHERE account_id=? AND kind='collect'
+                                  AND state IN ('completed','completed_with_gaps')""", (a["id"],))
+        return {**s, "last_completed_at": last["f"] if last else None,
+                "runs_here": bool(self.runner and self.runner.has_lock)}
+
+    def set_refresh_settings(self, account_id, data: dict) -> dict:
+        m = data.get("minutes")
+        if set(data) - {"minutes"} or m not in (0, 30, 60, 120, 240):
+            raise InvalidInput("minutes must be 0 (off), 30, 60, 120 or 240")
+        self.hub.settings.set(self._acct(account_id)["id"], "auto_refresh", {"minutes": m})
+        return self.refresh_settings(account_id)
+
+    def notifications(self, account_id, limit=30) -> dict:
+        return self.hub.notifications.feed(self._acct(account_id)["id"], int(limit or 30))
+
+    def mark_notifications_seen(self, account_id, up_to=None) -> dict:
+        return self.hub.notifications.mark_seen(self._acct(account_id)["id"], int(up_to) if up_to else None)
+
+    # ---- dates found in course text, timetable import ------------------------------------------
+    def date_candidates(self, account_id, *, scan: bool = False, status=None) -> dict:
+        a = self._acct(account_id)
+        if scan:
+            return self.hub.datefinder.scan(a["id"])
+        return self.hub.datefinder.list(a["id"], status or None)
+
+    def confirm_date_candidate(self, account_id, candidate_id, data: dict) -> dict:
+        if set(data) - {"label", "starts_at"}:
+            raise InvalidInput("only label and starts_at can be adjusted")
+        return self.hub.datefinder.confirm(self._acct(account_id)["id"], candidate_id, **data)
+
+    def dismiss_date_candidate(self, account_id, candidate_id) -> dict:
+        return self.hub.datefinder.dismiss(self._acct(account_id)["id"], candidate_id)
+
+    def import_timetable(self, account_id, ics_text: str) -> dict:
+        from .services.datefinder import parse_ics
+        a = self._acct(account_id)
+        skipped: list[dict] = []
+        rows = parse_ics(ics_text, a.get("time_zone"), skipped=skipped)
+        if not rows:
+            if skipped:
+                raise InvalidInput("no class times imported: only events that repeat every week are supported. "
+                                   + " ".join(f"{s['title']}: {s['reason']}" for s in skipped[:3]),
+                                   code="no_weekly_events", detail={"skipped": skipped})
+            raise InvalidInput("no weekly repeating events found in that calendar file", code="no_weekly_events")
+        have = {(c["title"], c["weekday"], c["start_time"]) for c in self.hub.planner.list_classes(a["id"])}
+        added = 0
+        for r in rows[:200]:
+            if (r["title"], r["weekday"], r["start"]) in have:
+                continue
+            self.hub.planner.add_class(a["id"], title=r["title"], weekday=r["weekday"], start=r["start"], end=r["end"],
+                                       location=r["location"], valid_from=r["valid_from"], valid_until=r["valid_until"])
+            have.add((r["title"], r["weekday"], r["start"]))
+            added += 1
+        return {"found": len(rows), "added": added, "skipped": skipped, "class_times": self.hub.planner.list_classes(a["id"])}
+
+    def dashboard(self, account_id, days: int = 7) -> dict:
+        from .agent_tools import ToolContext, course_dashboard
+        aid = self._acct(account_id)["id"]
+        return course_dashboard(ToolContext(api=self, account_id=aid), aid, max(1, min(60, int(days))))
+
+    # ---- local grading rules -------------------------------------------------------------------
+    def get_grading_rules(self, account_id, course_id) -> dict:
+        return self.hub.grading.get(self._acct(account_id)["id"], str(course_id))
+
+    def set_grading_rules(self, account_id, course_id, data: dict) -> dict:
+        return self.hub.grading.set(self._acct(account_id)["id"], str(course_id), data)
+
+    # ---- reminders -----------------------------------------------------------------------------
+    def list_reminders(self, account_id, status="pending") -> dict:
+        return {"reminders": self.hub.reminders.list(self._acct(account_id)["id"], status or None)}
+
+    def create_reminder(self, account_id, data: dict) -> dict:
+        allowed = {"title", "remind_at", "item_id", "annotation_id", "note"}
+        if set(data) - allowed:
+            raise InvalidInput(f"unknown fields {sorted(set(data) - allowed)}")
+        return self.hub.reminders.create(self._acct(account_id)["id"], created_by="user", **data)
+
+    def due_reminders(self, account_id) -> dict:
+        return {"reminders": self.hub.reminders.due(self._acct(account_id)["id"])}
+
+    def dismiss_reminder(self, account_id, rid) -> dict:
+        return self.hub.reminders.dismiss(self._acct(account_id)["id"], rid)
+
+    # ---- saved files ------------------------------------------------------------------------
+    def list_files(self, account_id) -> dict:
+        return {"files": self.hub.files.list(self._acct(account_id)["id"])}
+
+    def save_file(self, account_id, *, filename: str, content, title=None, mime=None, course_id=None,
+                  created_by: str = "user") -> dict:
+        return self.hub.files.save(self._acct(account_id)["id"], filename=filename, content=content, title=title, mime=mime,
+                                   course_id=course_id, created_by=created_by)
+
+    def get_file(self, account_id, file_id, *, with_content: bool = False) -> dict:
+        return self.hub.files.get(self._acct(account_id)["id"], file_id, with_content=with_content)
+
+    def delete_file(self, account_id, file_id) -> dict:
+        return self.hub.files.delete(self._acct(account_id)["id"], file_id)
+
     # ---- interactive components ----------------------------------------------------
     def list_components(self, account_id, pinned=None) -> dict:
         pin = None if pinned in (None, "") else self._bool(pinned)
@@ -228,6 +424,12 @@ class HubAPI:
 
     def delete_component(self, account_id, component_id) -> dict:
         return self.hub.components.delete(self._acct(account_id)["id"], component_id)
+
+    def connected_agents(self) -> dict:
+        row = self.hub.db.one("SELECT value FROM app_settings WHERE key='mcp_agents'")
+        agents = json.loads(row["value"]) if row else {}
+        return {"agents": sorted(({"name": k, **v, "can_fulfil": "fulfil" in v.get("permissions", [])}
+                                  for k, v in agents.items()), key=lambda x: x["last_seen"], reverse=True)}
 
     def list_view_requests(self, account_id, status=None) -> dict:
         return {"requests": self.hub.requests.list(self._acct(account_id)["id"], status)}

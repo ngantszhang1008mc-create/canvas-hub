@@ -14,6 +14,9 @@ browser control and credentials are never exposed.
 
 from __future__ import annotations
 
+import json
+import time
+
 import anyio
 import mcp_types as types
 from mcp.server.lowlevel import Server
@@ -23,6 +26,7 @@ from . import __version__
 from .agent_tools import TOOLS_BY_NAME, ToolContext, run_tool, tools_for
 from .boundary import HubAPI
 from .services import Hub
+from .util import now_iso
 
 INSTRUCTIONS = (
     "Canvas Hub is the user's local copy of their Canvas LMS courses: announcements, assignments and due dates, "
@@ -32,6 +36,15 @@ INSTRUCTIONS = (
     "If you have browser access the app lacks, list_view_requests shows sites the user asked a connected agent to read "
     "(follow the request's note, e.g. which browser profile to use); fulfilling them needs the fulfil permission."
 )
+
+
+def record_agent(hub: Hub, name: str, permissions: list[str]) -> None:
+    row = hub.db.one("SELECT value FROM app_settings WHERE key='mcp_agents'")
+    agents = json.loads(row["value"]) if row else {}
+    agents[str(name)[:80]] = {"last_seen": now_iso(), "permissions": permissions}
+    with hub.db.tx() as c:
+        c.execute("INSERT INTO app_settings(key, value) VALUES ('mcp_agents', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                  (json.dumps(dict(list(agents.items())[-20:])),))
 
 
 def build_server(hub: Hub, permissions: set[str]) -> Server:
@@ -52,7 +65,25 @@ def build_server(hub: Hub, permissions: set[str]) -> Server:
             ) for t in enabled
         ])
 
+    seen = {"at": 0.0}
+
+    def note_agent(rctx):
+        # Remember which agents connect, so the app can show whether requests have anyone to serve them.
+        if time.monotonic() - seen["at"] < 30:
+            return
+        seen["at"] = time.monotonic()
+        name = None
+        try:
+            name = rctx.session.client_params.client_info.name
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            record_agent(hub, name or "MCP client", sorted(permissions))
+        except Exception:  # noqa: BLE001
+            pass
+
     async def call_tool(_ctx, params):
+        note_agent(_ctx)
         if params.name not in TOOLS_BY_NAME:
             return types.CallToolResult(content=[types.TextContent(type="text", text=f"Unknown tool {params.name}")],
                                         is_error=True)
