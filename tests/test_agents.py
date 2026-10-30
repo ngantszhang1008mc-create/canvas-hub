@@ -369,3 +369,89 @@ def test_message_uses_the_setup_named_by_the_chat(seeded):
     finally:
         first.stop()
         second.stop()
+
+
+ANSWER = "Your proposal is due on Friday at 23:59, and the reading for week nine is chapter four."
+
+
+def _drafts_while_running(svc, account_id, cid, timeout=20):
+    import time
+    seen = []
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        d = svc.get_conversation(account_id, cid)
+        if d.get("draft"):
+            assert not [m for m in d["messages"] if m["role"] == "assistant"]   # never both the draft and the message
+            seen.append(d["draft"]["text"])
+        if d["conversation"]["run_state"] not in ("running", "cancelling"):
+            return seen, d
+        time.sleep(0.02)
+    raise AssertionError("the run did not finish")
+
+
+@pytest.mark.parametrize("preset", ["anthropic", "custom"])
+def test_replies_stream_into_a_draft_while_they_arrive(seeded, preset):
+    hub, acct = seeded
+    fake = FakeLLM([], delay=0.03, answer=ANSWER)
+    try:
+        svc = _assistant(hub, fake, preset)
+        r = svc.send(acct["id"], "When is the proposal due?")
+        drafts, final = _drafts_while_running(svc, acct["id"], r["conversation_id"])
+    finally:
+        fake.stop()
+    assert len(set(drafts)) >= 3, drafts                                     # it grew in steps
+    assert all(ANSWER.startswith(d) for d in drafts)
+    assert "draft" not in final and final["messages"][-1]["text"] == ANSWER
+    if preset == "custom":
+        assert fake.requests[-1].get("stream") is True
+
+
+def test_endpoints_that_refuse_streaming_still_answer(seeded):
+    hub, acct = seeded
+    fake = FakeLLM([("list_courses", {})], openai_streaming=False, answer=ANSWER)
+    try:
+        svc = _assistant(hub, fake, "custom")
+        r = svc.send(acct["id"], "Courses?")
+        svc.wait(r["conversation_id"], 30)
+        d = svc.get_conversation(acct["id"], r["conversation_id"])
+    finally:
+        fake.stop()
+    assert d["conversation"]["run_state"] == "idle" and d["messages"][-1]["text"] == ANSWER
+    assert [m["role"] for m in d["messages"]] == ["user", "assistant", "tool", "assistant"]   # tool calls still work
+    assert [bool(q.get("stream")) for q in fake.requests] == [True, False, False]   # tried once, then asked plainly
+
+
+def test_a_reply_cut_off_mid_stream_is_not_kept(seeded):
+    hub, acct = seeded
+    fake = FakeLLM([("list_courses", {})], cut_stream=True)
+    try:
+        svc = _assistant(hub, fake, "custom")
+        r = svc.send(acct["id"], "Courses?")
+        svc.wait(r["conversation_id"], 30)
+        d = svc.get_conversation(acct["id"], r["conversation_id"])
+    finally:
+        fake.stop()
+    assert d["conversation"]["run_state"] == "error" and "cut off" in d["conversation"]["run_error"]
+    assert [m["role"] for m in d["messages"]] == ["user"] and "draft" not in d    # no half answer, no tool run
+
+
+def test_stop_keeps_the_text_written_so_far(seeded):
+    import time
+    hub, acct = seeded
+    fake = FakeLLM([], delay=0.1, answer=ANSWER)
+    try:
+        svc = _assistant(hub, fake, "custom")
+        r = svc.send(acct["id"], "When is the proposal due?")
+        cid = r["conversation_id"]
+        for _ in range(200):
+            if (svc.get_conversation(acct["id"], cid).get("draft") or {}).get("text", "").count(" ") >= 2:
+                break
+            time.sleep(0.02)
+        svc.stop(acct["id"], cid)
+        svc.wait(cid, 30)
+        d = svc.get_conversation(acct["id"], cid)
+    finally:
+        fake.stop()
+    text = d["messages"][-1]["text"]
+    assert d["conversation"]["run_state"] == "idle" and "draft" not in d
+    assert text and ANSWER.startswith(text) and text != ANSWER                # what was written, not more

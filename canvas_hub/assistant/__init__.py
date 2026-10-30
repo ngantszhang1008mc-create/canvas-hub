@@ -26,7 +26,7 @@ from zoneinfo import ZoneInfo
 
 from ..agent_tools import ToolContext, run_tool_display, tools_for
 from ..util import InvalidInput, NotFound, now_iso
-from .providers import ANTHROPIC_DEFAULT_MODEL, RESERVED_PARAMS, ProviderError, make_provider
+from .providers import ANTHROPIC_DEFAULT_MODEL, RESERVED_PARAMS, ProviderError, Stopped, make_provider
 
 log = logging.getLogger("canvas_hub.assistant")
 CONFIG_FILE = "assistant.json"
@@ -119,6 +119,10 @@ class AssistantService:
         self._cfg_lock = threading.RLock()     # serialises read-modify-write of the settings file
         self._threads: dict[int, threading.Thread] = {}
         self._cancel: set[int] = set()
+        # Text of the reply being streamed, per conversation. It is swapped for the saved message under
+        # _live_lock, and get_conversation reads both under it, so a reader never sees both or neither.
+        self._live: dict[int, str] = {}
+        self._live_lock = threading.Lock()
         with self.hub.db.tx() as c:   # runs interrupted by an app restart
             c.execute("UPDATE assistant_conversations SET run_state='error', run_error='Interrupted by app restart' "
                       "WHERE run_state IN ('running','cancelling')")
@@ -357,8 +361,10 @@ class AssistantService:
 
     def get_conversation(self, account_id: int, cid: int, after: int = 0) -> dict:
         conv = self._conv(account_id, cid)
+        with self._live_lock:
+            transcript, draft = self._transcript(cid), self._live.get(cid)
         msgs = []
-        for m in self._transcript(cid):
+        for m in transcript:
             if m["seq"] <= after:
                 continue
             v = {"seq": m["seq"], "role": m["role"]}
@@ -372,7 +378,10 @@ class AssistantService:
                 v["results"] = [{"id": r["id"], "name": r["name"], "is_error": r.get("is_error"),
                                  "preview": r["content"][:1500], "display": r.get("display")} for r in m["results"]]
             msgs.append(v)
-        return {"conversation": conv, "messages": msgs}
+        out = {"conversation": conv, "messages": msgs}
+        if draft:
+            out["draft"] = {"text": draft}
+        return out
 
     def delete_conversation(self, account_id: int, cid: int) -> dict:
         conv = self._conv(account_id, cid)
@@ -486,11 +495,26 @@ class AssistantService:
             for _step in range(MAX_STEPS):
                 if cid in self._cancel:
                     break
-                turn = provider.complete(system, self._transcript(cid), tools)
-                self._append(cid, "assistant", {
-                    "text": turn.text, "stop": turn.stop, "model": turn.model, "usage": turn.usage, "raw": turn.raw,
-                    "tool_calls": [{"id": c.id, "name": c.name, "input": c.input, "input_error": c.input_error}
-                                   for c in turn.tool_calls]})
+                def on_text(text: str) -> None:
+                    if cid in self._cancel:
+                        raise Stopped()
+                    with self._live_lock:
+                        self._live[cid] = text
+                try:
+                    turn = provider.complete(system, self._transcript(cid), tools, on_text=on_text)
+                except Stopped:
+                    with self._live_lock:       # keep what was already written, as the answer so far
+                        partial = self._live.pop(cid, "")
+                        if partial:
+                            self._append(cid, "assistant", {"text": partial, "stop": "end", "tool_calls": [],
+                                                            "raw": {"provider": "canvas_hub"}})
+                    break
+                with self._live_lock:
+                    self._append(cid, "assistant", {
+                        "text": turn.text, "stop": turn.stop, "model": turn.model, "usage": turn.usage, "raw": turn.raw,
+                        "tool_calls": [{"id": c.id, "name": c.name, "input": c.input, "input_error": c.input_error}
+                                       for c in turn.tool_calls]})
+                    self._live.pop(cid, None)
                 if turn.stop == "refusal" or not turn.tool_calls:
                     break
                 results = []
@@ -522,6 +546,8 @@ class AssistantService:
             log.exception("assistant run failed")
             self._set_state(cid, "error", f"{type(e).__name__}: {e}")
         finally:
+            with self._live_lock:
+                self._live.pop(cid, None)
             self._cancel.discard(cid)
             with self._lock:
                 self._threads.pop(cid, None)

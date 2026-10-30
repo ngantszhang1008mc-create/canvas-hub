@@ -8,6 +8,10 @@
 Both take a provider-neutral transcript and return a ``Turn``. Claude's own
 content blocks (including reasoning blocks) are kept verbatim and replayed
 unchanged on later requests; history is append-only.
+
+With ``on_text`` both stream: it is called with the reply's text so far as it
+arrives (the whole text each time, so a retried request simply starts over).
+The callback may raise ``Stopped`` to end the request early.
 """
 
 from __future__ import annotations
@@ -20,6 +24,10 @@ ANTHROPIC_DEFAULT_MODEL = "claude-opus-5-5"
 # Models that accept the server-side refusal fallback ("default" routing) on the Claude API.
 _FALLBACK_MODELS = {"claude-fable-5-1", "claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5"}
 MAX_TOKENS = 16000
+
+
+class Stopped(Exception):
+    """Raised by an ``on_text`` callback to stop a streaming reply (the user pressed Stop)."""
 
 
 class ProviderError(Exception):
@@ -90,7 +98,7 @@ class AnthropicProvider:
                     for r in m["results"]]})
         return out
 
-    def complete(self, system: str, transcript: list[dict], tools: list[dict]) -> Turn:
+    def complete(self, system: str, transcript: list[dict], tools: list[dict], on_text=None) -> Turn:
         sdk = self._sdk
         official = self.base_url is None
         tool_defs = []
@@ -110,12 +118,17 @@ class AnthropicProvider:
         for attempt in range(2):
             try:
                 if use_fallback:
-                    with self.client.beta.messages.stream(betas=["server-side-fallback-2026-07-01"], fallbacks="default",
-                                                          **kwargs) as stream:
-                        msg = stream.get_final_message()
+                    opener = self.client.beta.messages.stream(betas=["server-side-fallback-2026-07-01"], fallbacks="default",
+                                                              **kwargs)
                 else:
-                    with self.client.messages.stream(**kwargs) as stream:
-                        msg = stream.get_final_message()
+                    opener = self.client.messages.stream(**kwargs)
+                with opener as stream:
+                    if on_text:
+                        so_far = ""
+                        for piece in stream.text_stream:
+                            so_far += piece
+                            on_text(so_far)
+                    msg = stream.get_final_message()
                 break
             except sdk.AuthenticationError as e:
                 raise ProviderError("The API key was rejected by Anthropic. Check it in Assistant settings.") from e
@@ -168,6 +181,7 @@ class OpenAICompatibleProvider:
         # picked in the chat for this message takes precedence.
         self.extra_body = dict(cfg.get("extra_params") or {})
         self.extra_body.update(thinking_params(cfg.get("preset"), cfg.get("thinking") or ""))
+        self.no_streaming = False
 
     def _messages(self, system: str, transcript: list[dict]) -> list[dict]:
         out: list[dict] = [{"role": "system", "content": system}]
@@ -194,7 +208,40 @@ class OpenAICompatibleProvider:
                     out.append({"role": "tool", "tool_call_id": r["id"], "content": r["content"]})
         return out
 
-    def complete(self, system: str, transcript: list[dict], tools: list[dict]) -> Turn:
+    def _streamed(self, kwargs: dict, on_text) -> tuple:
+        """Stream a Chat Completions reply; returns (content, reasoning, calls, finish, model, usage)."""
+        text, reasoning, calls = "", None, {}
+        finish = model = usage = None
+        for chunk in self.client.chat.completions.create(**kwargs, stream=True):
+            model = getattr(chunk, "model", None) or model
+            usage = getattr(chunk, "usage", None) or usage
+            if not chunk.choices:
+                continue
+            ch = chunk.choices[0]
+            d = ch.delta
+            if d is not None:
+                if getattr(d, "content", None):
+                    text += d.content
+                    on_text(text)
+                rc = getattr(d, "reasoning_content", None)
+                if rc:
+                    reasoning = (reasoning or "") + rc
+                for tc in getattr(d, "tool_calls", None) or []:       # arrive in fragments, keyed by index
+                    slot = calls.setdefault(tc.index, {"id": None, "name": "", "arguments": ""})
+                    if tc.id:
+                        slot["id"] = tc.id
+                    fn = getattr(tc, "function", None)
+                    if fn is not None:
+                        if fn.name:
+                            slot["name"] = fn.name
+                        slot["arguments"] += fn.arguments or ""
+            if ch.finish_reason:
+                finish = ch.finish_reason
+        if finish is None:      # the connection ended mid-reply: never keep half an answer or run half a tool call
+            raise ProviderError("The provider's reply was cut off before it finished. Try again.", retryable=True)
+        return text, reasoning, [calls[i] for i in sorted(calls)], finish, model, usage
+
+    def complete(self, system: str, transcript: list[dict], tools: list[dict], on_text=None) -> Turn:
         sdk = self._sdk
         kwargs = dict(model=self.model, messages=self._messages(system, transcript))
         if self.extra_body:
@@ -203,7 +250,15 @@ class OpenAICompatibleProvider:
             kwargs["tools"] = [{"type": "function", "function": {"name": t["name"], "description": t["description"],
                                                                  "parameters": t["schema"]}} for t in tools]
         try:
-            resp = self.client.chat.completions.create(**kwargs)
+            streamed = None
+            if on_text and not self.no_streaming:
+                try:
+                    streamed = self._streamed(kwargs, on_text)
+                except sdk.BadRequestError as e:
+                    if "stream" not in str(e.message).lower():
+                        raise
+                    self.no_streaming = True   # this endpoint does not stream: ask again without, and stop trying
+            resp = None if streamed else self.client.chat.completions.create(**kwargs)
         except sdk.AuthenticationError as e:
             raise ProviderError("The API key was rejected by the provider. Check it in Assistant settings.") from e
         except sdk.NotFoundError as e:
@@ -216,32 +271,33 @@ class OpenAICompatibleProvider:
             raise ProviderError(f"Provider API error {e.status_code}: {e.message}", retryable=e.status_code >= 500) from e
         except sdk.APIConnectionError as e:
             raise ProviderError("Could not reach the provider. Check the base URL and your connection.", retryable=True) from e
-        if not resp.choices:
-            raise ProviderError("The provider returned no answer.")
-        ch = resp.choices[0]
-        m = ch.message
+        if streamed:
+            content, reasoning, raw_calls, finish, model, usage = streamed
+        else:
+            if not resp.choices:
+                raise ProviderError("The provider returned no answer.")
+            ch = resp.choices[0]
+            m = ch.message
+            content, reasoning, finish = m.content or "", getattr(m, "reasoning_content", None), ch.finish_reason
+            model, usage = getattr(resp, "model", None), getattr(resp, "usage", None)
+            raw_calls = [{"id": tc.id, "name": tc.function.name, "arguments": tc.function.arguments}
+                         for tc in m.tool_calls or [] if getattr(tc, "function", None) is not None]
         calls = []
-        for tc in m.tool_calls or []:
-            fn = getattr(tc, "function", None)
-            if fn is None:
-                continue
+        for tc in raw_calls:
             try:
-                args = json.loads(fn.arguments or "{}")
+                args = json.loads(tc["arguments"] or "{}")
                 err = None if isinstance(args, dict) else "arguments were not a JSON object"
             except ValueError:
-                args, err = None, f"arguments were not valid JSON: {(fn.arguments or '')[:200]}"
-            calls.append(ToolCall(tc.id, fn.name, args if isinstance(args, dict) else None, err))
-        stop = "tool_use" if calls else {"length": "truncated", "content_filter": "refusal"}.get(ch.finish_reason, "end")
+                args, err = None, f"arguments were not valid JSON: {(tc['arguments'] or '')[:200]}"
+            calls.append(ToolCall(tc["id"], tc["name"], args if isinstance(args, dict) else None, err))
+        stop = "tool_use" if calls else {"length": "truncated", "content_filter": "refusal"}.get(finish, "end")
         if stop == "truncated" and calls:
             for c in calls:
                 c.input_error = "tool input was cut off by the output limit; not executed"
-        usage = getattr(resp, "usage", None)
         raw = {"provider": "openai_compatible"}
-        reasoning = getattr(m, "reasoning_content", None)
         if reasoning is not None:
             raw["reasoning_content"] = reasoning
-        return Turn(text=m.content or "", tool_calls=calls, stop=stop, raw=raw,
-                    model=getattr(resp, "model", None),
+        return Turn(text=content or "", tool_calls=calls, stop=stop, raw=raw, model=model,
                     usage={"input_tokens": getattr(usage, "prompt_tokens", None),
                            "output_tokens": getattr(usage, "completion_tokens", None)} if usage else None)
 
