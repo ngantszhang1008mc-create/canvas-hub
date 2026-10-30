@@ -196,3 +196,37 @@ def test_a_page_that_loads_late_does_not_replace_the_next_one(hub, account):
         expect(pg.locator("h1")).to_have_text("Notes & tasks")
         assert pg.locator("#main").count() == 1
         b.close()
+
+
+def test_a_second_tick_during_a_save_keeps_todos_finished_elsewhere(app_server, hub, account):
+    from playwright.sync_api import expect, sync_playwright
+    base, tok, _ = app_server
+    aid = account["id"]
+    v = hub.components.create(aid, "checklist", {"title": "Week", "sync_todos": True, "sections": [
+        {"id": "s", "rows": [{"id": "r1", "label": "One"}, {"id": "r2", "label": "Two"}, {"id": "r3", "label": "Three"}]}]})
+    hub.components.pin(aid, v["id"], True)
+    links = v["state"]["links"]
+    real, calls = hub.components.set_state, []
+
+    def slow(*a, **k):                  # the first save answers late
+        calls.append(1)
+        if len(calls) == 1:
+            time.sleep(1.5)
+        return real(*a, **k)
+    hub.components.set_state = slow
+    with sync_playwright() as p:
+        b = p.chromium.launch()
+        pg = b.new_page(viewport={"width": 1280, "height": 900})
+        pg.goto(f"{base}/?token={tok}")
+        pg.goto(f"{base}/#/trackers")
+        cl = pg.locator(".cmp-checklist")
+        expect(cl.get_by_text("0/3 done")).to_be_visible()
+        hub.annotations.update(aid, links["r1"], task_state="done")      # finished under Notes & tasks meanwhile
+        cl.get_by_role("checkbox", name="Two").check()
+        pg.wait_for_timeout(600)                                         # the first save is now in flight
+        cl.get_by_role("checkbox", name="Three").check()
+        expect(cl.locator(".save-state")).to_contain_text("Saved", timeout=10000)
+        b.close()
+    hub.components.set_state = real
+    assert hub.annotations.get(aid, links["r1"])["task_state"] == "done"    # not reopened by the queued save
+    assert hub.components.get(aid, v["id"])["state"]["done"] == {"r1": True, "r2": True, "r3": True}
