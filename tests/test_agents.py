@@ -313,3 +313,23 @@ def test_connection_test_does_not_block_the_server(seeded):
     finally:
         srv.should_exit = True
         hang.close()
+
+
+def test_message_uses_the_setup_named_by_the_chat(seeded):
+    from canvas_hub.util import NotFound
+    hub, acct = seeded
+    first, second = FakeLLM([]), FakeLLM([])
+    try:
+        svc = AssistantService(hub, HubAPI(hub))
+        svc.update_config({"preset": "custom", "name": "A", "base_url": first.url + "/v1", "model": "a"})
+        svc.update_config({"profile_id": "new", "preset": "custom", "name": "B", "base_url": second.url + "/v1", "model": "b"})
+        assert svc.public_config()["active_profile"] == "p1"
+        # the chat picked B but activation has not landed yet: the message still goes to B
+        r = svc.send(acct["id"], "hello", profile_id="p2")
+        svc.wait(r["conversation_id"], 30)
+        assert second.requests and not first.requests
+        with pytest.raises(NotFound):          # never falls back to another provider
+            svc.send(acct["id"], "hello", profile_id="p9")
+    finally:
+        first.stop()
+        second.stop()

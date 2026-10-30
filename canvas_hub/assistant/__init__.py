@@ -393,8 +393,10 @@ class AssistantService:
             c.execute("UPDATE assistant_conversations SET run_state=?, run_error=?, updated_at=? WHERE id=?",
                       (state, error, now_iso(), cid))
 
-    def send(self, account_id: int, text: str, conversation_id: int | None = None) -> dict:
-        cfg = self._load()
+    def send(self, account_id: int, text: str, conversation_id: int | None = None, profile_id: str | None = None) -> dict:
+        # The chat names the setup it shows, so a message never goes to a
+        # different provider than the one the user picked.
+        cfg = self._load(profile_id)
         if not self.configured(cfg):
             raise InvalidInput("Set up the assistant first (provider, model and API key).", code="assistant_not_configured")
         text = (text or "").strip()

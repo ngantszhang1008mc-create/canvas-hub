@@ -1059,7 +1059,7 @@ VIEWS.assistant = async (main, parts, params) => {
     const t = (text ?? input.value).trim();
     if (!t) return;
     sendBtn.disabled = true;
-    const r = await guard(() => api(A("/assistant/messages"), { method: "POST", body: { text: t, conversation_id: current } }));
+    const r = await guard(() => api(A("/assistant/messages"), { method: "POST", body: { text: t, conversation_id: current, profile_id: setupSel.value || cfg.active_profile } }));
     if (!r) { sendBtn.disabled = false; return; }
     input.value = "";
     const emptyEl = document.getElementById("chat-empty");
@@ -1086,7 +1086,8 @@ VIEWS.assistant = async (main, parts, params) => {
   const perms = cfg.permissions;
   const footer = h("div", { class: "chat-foot tiny muted" }, usable.length > 1 ? setupSel : h("span", null, `${cfg.name} · ${cfg.model || "default model"}`),
     h("span", null, `Can ${["read your data", perms.notes ? "edit your notes" : null, perms.collect ? "check Canvas" : null, perms.settings ? "change scope" : null].filter(Boolean).join(", ")}. Questions and the data it reads go to this provider.`));
-  scroller.append(log, status, current ? null : h("div", { class: "chat-empty", id: "chat-empty" }, h("div", { class: "e-title" }, "What would you like to know?"), suggestions));
+  scroller.append(log, status);
+  if (!current) scroller.append(h("div", { class: "chat-empty", id: "chat-empty" }, h("div", { class: "e-title" }, "What would you like to know?"), suggestions));
   const chat = h("div", { class: "chat" }, scroller,
     h("div", { class: "composer" }, input, h("div", { class: "row" }, stopBtn, sendBtn)), footer);
   const layout = h("div", { class: "assistant-layout" }, sideList, chat);
@@ -1197,16 +1198,17 @@ function assistantSettingsCard(cfg, prof) {
     busy = true; saveBtn.disabled = testBtn.disabled = true;
     try { await fn(); } finally { busy = false; saveBtn.disabled = testBtn.disabled = false; }
   };
-  saveBtn.addEventListener("click", exclusive(async () => { const r = await save(); if (r) goTo(r.saved_profile); }));
+  saveBtn.addEventListener("click", exclusive(async () => { const r = await save(); if (r && card.isConnected) goTo(r.saved_profile); }));
   testBtn.addEventListener("click", exclusive(async () => {
     const r = await save(); if (!r) return;
     mount(result, h("span", { class: "muted" }, "Testing…"));
     const t = await guard(() => api("/api/assistant/test", { method: "POST", body: { profile_id: r.saved_profile } }));
     if (t) mount(result, t.ok ? pill("ok", `Connected · ${t.model || ""}`) : h("span", { style: "color:var(--bad)" }, t.message));
-    if (isNew) setTimeout(() => goTo(r.saved_profile), t && t.ok ? 1200 : 4000);
+    // Show the new setup's own page, unless the user has moved on meanwhile.
+    if (isNew) setTimeout(() => { if (card.isConnected) goTo(r.saved_profile); }, t && t.ok ? 1200 : 4000);
   }));
   const goTo = (pid) => { const h2 = `#/assistant/settings?p=${encodeURIComponent(pid)}`; if (location.hash === h2) route(); else location.hash = h2; };
-  return h("div", { class: "card" },
+  const card = h("div", { class: "card" },
     h("div", { class: "card-head" }, h("h2", null, isNew ? "New setup" : cur.name),
       !isNew && cur.id === cfg.active_profile ? pill("ok", "In use") : h("span", { class: "sub" }, "your own API key · stored only on this computer")),
     h("div", { class: "banner info" }, h("div", { class: "b-body small" }, cfg.privacy, " Keys are kept in a private file outside your course data, so they are never included in backups or exports.")),
@@ -1230,6 +1232,7 @@ function assistantSettingsCard(cfg, prof) {
         }
       } }, "Delete setup") : null,
       result));
+  return card;
 }
 
 function mcpCard(info) {
