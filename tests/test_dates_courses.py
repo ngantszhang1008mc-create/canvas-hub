@@ -105,3 +105,15 @@ def test_course_states_and_shell_links(hub, account, fixture_pkg):
     assert cs["4243"]["linked_shells"] == ["4242"]
     with pytest.raises(InvalidInput):
         hub.query.link_courses(aid, "4242", "4242", "same")
+
+
+def test_ics_weekdays_follow_the_time_zone_conversion():
+    # 23:00 UTC on Tuesdays and Thursdays is 07:00 on Wednesdays and Fridays in Hong Kong.
+    ics = ("BEGIN:VCALENDAR\nBEGIN:VEVENT\nSUMMARY:Early lab\nDTSTART:20260901T230000Z\nDTEND:20260902T000000Z\n"
+           "RRULE:FREQ=WEEKLY;BYDAY=TU,TH\nEND:VEVENT\nEND:VCALENDAR\n")
+    rows = parse_ics(ics, "Asia/Hong_Kong")
+    assert sorted((r["weekday"], r["start"], r["end"]) for r in rows) == [(2, "07:00", "08:00"), (4, "07:00", "08:00")]
+    # going west: 01:00 Hong Kong time on a Monday is Sunday 17:00 UTC
+    ics = ("BEGIN:VCALENDAR\nBEGIN:VEVENT\nSUMMARY:Late\nDTSTART;TZID=Asia/Hong_Kong:20260907T010000\n"
+           "DTEND;TZID=Asia/Hong_Kong:20260907T020000\nRRULE:FREQ=WEEKLY;BYDAY=MO\nEND:VEVENT\nEND:VCALENDAR\n")
+    assert [(r["weekday"], r["start"]) for r in parse_ics(ics, "UTC")] == [(6, "17:00")]

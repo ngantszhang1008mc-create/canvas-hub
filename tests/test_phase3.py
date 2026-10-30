@@ -169,3 +169,17 @@ def test_drafts_follow_the_course_weighting_and_leave_out_excused_work(hub, acco
     _set_field(hub, aid, "submission", "7001", "excused", True)
     cats = _draft_categories(ctx, aid, "4242")
     assert [it["id"] for c in cats for it in c["items"]] == ["a7002"]                 # excused work is not "to do"
+
+
+def test_hours_after_the_deadline_do_not_count_and_large_projections_are_refused():
+    spec = projections.normalize_hours({"target": 20, "minimum": 10, "points": 20, "deadline": "2026-12-01T23:59:00+08:00"})
+    st = projections.clean_hours_state({"entries": [{"date": "2026-11-30", "hours": 5}, {"date": "2026-12-04", "hours": 15}]})
+    s = projections.hours_summary(spec, st, datetime(2026, 12, 5, tzinfo=timezone.utc))
+    assert s["total"] == 5 and s["after_deadline"] == 15 and s["status"] == "lost" and s["points"] == 0
+    with pytest.raises(InvalidInput, match="at most 500 items"):
+        projections.normalize_projector({"categories": [{"name": "Q", "items": [{"label": f"q{i}", "max": 1} for i in range(501)]}]})
+    with pytest.raises(InvalidInput, match="at most 60 categories"):
+        projections.normalize_projector({"categories": [{"name": f"c{i}", "items": [{"label": "x", "max": 1}]} for i in range(61)]})
+    big = projections.normalize_projector({"categories": [{"name": "All", "items": [
+        *({"label": f"q{i}", "max": 1, "score": 1} for i in range(200)), {"label": "Final", "max": 200, "score": 0}]}]})
+    assert projections.project(big, {})["percent"] == 50                     # nothing dropped

@@ -26,6 +26,8 @@ from .scoring import _num
 from .util import InvalidInput, parse_iso
 
 _ID = re.compile(r"^[\w.:-]{1,64}$")
+MAX_CATEGORIES = 60
+MAX_ITEMS = 500             # per category; larger definitions are refused, never cut short
 DEFAULT_SCALE = [{"letter": "A", "min": 90}, {"letter": "B", "min": 80}, {"letter": "C", "min": 70},
                  {"letter": "D", "min": 60}, {"letter": "F", "min": 0}]
 
@@ -34,13 +36,17 @@ DEFAULT_SCALE = [{"letter": "A", "min": 90}, {"letter": "B", "min": 80}, {"lette
 def normalize_projector(spec: dict) -> dict:
     if not isinstance(spec, dict) or not isinstance(spec.get("categories"), list) or not spec["categories"]:
         raise InvalidInput("categories must be a non-empty list")
+    if len(spec["categories"]) > MAX_CATEGORIES:
+        raise InvalidInput(f"at most {MAX_CATEGORIES} categories")
     cats, seen = [], set()
-    for ci, c in enumerate(spec["categories"][:40]):
+    for ci, c in enumerate(spec["categories"]):
         if not isinstance(c, dict):
             raise InvalidInput(f"category {ci + 1} must be an object")
         cid = str(c.get("id") or f"c{ci + 1}")
         items = []
-        for ii, it in enumerate((c.get("items") or [])[:200]):
+        if len(c.get("items") or []) > MAX_ITEMS:
+            raise InvalidInput(f"category {c.get('name') or cid}: at most {MAX_ITEMS} items")
+        for ii, it in enumerate(c.get("items") or []):
             iid = str(it.get("id") or f"{cid}.{ii + 1}")
             if not _ID.match(iid) or iid in seen:
                 raise InvalidInput(f"item id {iid!r} must be unique")
@@ -157,8 +163,12 @@ def clean_hours_state(state: dict) -> dict:
 
 def hours_summary(spec: dict, state: dict, now: datetime | None = None) -> dict:
     now = now or datetime.now(timezone.utc)
-    total = round(sum(e["hours"] for e in state.get("entries") or []), 2)
     dl = parse_iso(spec["deadline"]) if spec.get("deadline") else None
+    # Only hours done by the deadline (its own calendar date) count; later entries cannot revive a lost line.
+    last_day = spec["deadline"][:10] if dl else None
+    entries = state.get("entries") or []
+    total = round(sum(e["hours"] for e in entries if not last_day or e["date"] <= last_day), 2)
+    late = round(sum(e["hours"] for e in entries if last_day and e["date"] > last_day), 2)
     days_left = (dl - now).total_seconds() / 86400 if dl else None
     if total >= spec["minimum"]:
         frac = min(1.0, total / spec["target"]) if spec["target"] else 1.0
@@ -172,4 +182,5 @@ def hours_summary(spec: dict, state: dict, now: datetime | None = None) -> dict:
     return {"total": total, "minimum": spec["minimum"], "target": spec["target"], "status": status, "points": pts,
             "hours_to_minimum": max(0.0, round(spec["minimum"] - total, 2)), "hours_to_target": round(left, 2),
             "days_left": None if days_left is None else round(days_left, 1), "needed_per_week": per_week,
+            "after_deadline": late,
             "refreshed_at": state.get("refreshed_at")}

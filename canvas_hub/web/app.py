@@ -450,7 +450,9 @@ def create_app(api: HubAPI, *, token: str, port: int) -> FastAPI:
     @app.post("/api/accounts/{aid}/files")
     async def files_save(aid: int, request: Request):
         ctype = request.headers.get("content-type", "")
-        if ctype.startswith("application/json"):
+        # A raw upload names itself with X-Filename (whatever its type, a .json file included);
+        # without it, a JSON body is the {filename, content} save request.
+        if ctype.startswith("application/json") and "x-filename" not in request.headers:
             b = await body(request)
             return api.save_file(aid, filename=b.get("filename") or "", content=str(b.get("content") or ""),
                                  title=b.get("title"), course_id=b.get("course_id"), created_by="user")
