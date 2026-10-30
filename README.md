@@ -118,7 +118,7 @@ In another terminal, run `uv run canvas-hub --home /tmp/canvas-hub-demo serve`, 
    codex login status
    ```
 
-2. Under **Assistant → Settings → Add setup**, choose **Codex (your Codex CLI login)**. Leave **Model** empty to use your Codex default, or enter a model your Codex account supports. Choose **Save & test**, then **Use this setup** or select it beside the chat message box. Reasoning effort is chosen per message.
+2. Under **Assistant → Settings → Add setup**, choose **Codex (your Codex CLI login)**. **Model** lists the models your Codex CLI offers; keep **Codex default** or pick one. Choose **Save & test**, then **Use this setup** or select it beside the chat message box. Next to the message box you can also switch to another Codex model for a single message, and choose the reasoning effort, which offers only the levels that model supports.
 
 Codex runs through its local app-server. Questions and the course data it reads are sent to the configured Codex backend. Each assistant run uses an ephemeral Codex thread; Canvas Hub retains the chat in its own history. The adapter disables environment access, inherited MCP servers, shell tools, web search, and other agent features, and routes Canvas Hub tool calls through the existing account and permission checks. Writes to Canvas still require the user's confirmation in the app. **Stop** terminates the active Codex process, including while it is reasoning.
 

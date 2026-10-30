@@ -25,6 +25,9 @@ from .providers import ProviderError, ToolCall, Turn
 START_TIMEOUT = 30
 TURN_TIMEOUT = 600
 MAX_LINE = 8 * 1024 * 1024
+# Reasoning efforts the chat offers. Codex also has "ultra", which hands work to sub-agents; this client turns
+# multi-agent features off, so it is left out.
+EFFORTS = ("low", "medium", "high", "xhigh", "max")
 
 
 class AppServer:
@@ -156,6 +159,38 @@ class AppServer:
             self.workspace.cleanup()
 
 
+def _initialize(server, heartbeat=None):
+    server.request("initialize", {"clientInfo": {"name": "canvas_hub", "title": "Canvas Hub", "version": "0.1.0"},
+                                  "capabilities": {"experimentalApi": True}}, heartbeat)
+    server.send({"method": "initialized", "params": {}})
+
+
+def list_models():
+    """The models this Codex CLI offers, from its own catalogue (no sign-in needed). Raises ProviderError."""
+    server = AppServer()
+    try:
+        _initialize(server)
+        models, cursor = [], None
+        for _page in range(10):
+            page = server.request("model/list", {"limit": 100, **({"cursor": cursor} if cursor else {})})
+            for m in page.get("data") or []:
+                slug = isinstance(m, dict) and (m.get("model") or m.get("id"))
+                if not isinstance(slug, str) or not slug or m.get("hidden"):
+                    continue
+                efforts = [e.get("reasoningEffort") for e in m.get("supportedReasoningEfforts") or [] if isinstance(e, dict)]
+                default_effort = m.get("defaultReasoningEffort")
+                models.append({"id": slug, "name": str(m.get("displayName") or slug)[:80],
+                               "description": str(m.get("description") or "")[:200], "default": bool(m.get("isDefault")),
+                               "efforts": [e for e in EFFORTS if e in efforts],
+                               "default_effort": default_effort if default_effort in EFFORTS else None})
+            cursor = page.get("nextCursor")
+            if not cursor:
+                break
+        return models
+    finally:
+        server.close()
+
+
 class CodexProvider:
     name = "codex"
 
@@ -183,9 +218,7 @@ class CodexProvider:
 
     def _start(self, system, transcript, tools, heartbeat):
         self.server = AppServer()
-        self.server.request("initialize", {"clientInfo": {"name": "canvas_hub", "title": "Canvas Hub", "version": "0.1.0"},
-                                           "capabilities": {"experimentalApi": True}}, heartbeat)
-        self.server.send({"method": "initialized", "params": {}})
+        _initialize(self.server, heartbeat)
         account = self.server.request("account/read", {"refreshToken": False}, heartbeat)
         if account.get("requiresOpenaiAuth") and not account.get("account"):
             raise ProviderError("Codex is not signed in. Run `codex login` on this computer, then test the setup again.")
