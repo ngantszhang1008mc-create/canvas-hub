@@ -255,6 +255,10 @@ class QueryService:
             entry["local_tasks"] = [dict(x) for x in self.db.query(
                 "SELECT id, title, task_state, local_due FROM annotations WHERE account_id=? AND item_id=? AND kind='task'",
                 (account_id, r["id"]))]
+            # Only an undated linked to-do ("Mark done locally") stands for the
+            # deadline itself; dated ones (study blocks, "start on Saturday")
+            # are steps towards it.
+            entry["done_locally"] = any(t["task_state"] == "done" and not t["local_due"] for t in entry["local_tasks"])
             dated.append(entry)
         # A classic quiz is also an assignment; list it once (as the assignment,
         # which carries the submission state).

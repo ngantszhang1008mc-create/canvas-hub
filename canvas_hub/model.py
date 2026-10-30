@@ -73,6 +73,7 @@ class FieldSpec:
 _HTML = FieldSpec("html", searchable=True)
 _DATE = FieldSpec("date")
 _VOL = FieldSpec("json", volatile=True)
+_DATE_TEXT = FieldSpec("text")
 
 FIELD_SPECS: dict[str, dict[str, FieldSpec]] = {
     "*": {
@@ -105,6 +106,8 @@ FIELD_SPECS: dict[str, dict[str, FieldSpec]] = {
     "conversation": {"messages": FieldSpec("json", searchable=True), "last_message_at": _DATE,
                      "workflow_state": _VOL},
     "calendar_event": {"location_name": FieldSpec("text", searchable=True)},
+    # Content read by a connected agent for a view request (agent-provided, untrusted).
+    "external_link": {"content": FieldSpec("text", searchable=True), "read_at": _DATE_TEXT},
 }
 
 

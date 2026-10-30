@@ -185,3 +185,45 @@ def test_anthropic_request_shape_on_claude_api(monkeypatch):
     assert captured["model"] == "claude-opus-5-5" and captured["fallbacks"] == "default"
     assert captured["betas"] == ["server-side-fallback-2026-07-01"]
     assert captured["tools"][0]["eager_input_streaming"] is True
+
+
+def test_deepseek_thinking_max_and_reasoning_passback(seeded):
+    hub, acct = seeded
+    fake = FakeLLM([("get_deadlines", {"days_ahead": 30}), ("search", {"query": "proposal"})])
+    try:
+        svc = AssistantService(hub, HubAPI(hub))
+        pub = svc.update_config({"preset": "deepseek", "base_url": fake.url + "/v1", "api_key": "sk-ds-123456789",
+                                 "thinking": "max"})
+        assert pub["model"] == "deepseek-flash" and pub["thinking"] == "max"
+        r = svc.send(acct["id"], "What is due?")
+        svc.wait(r["conversation_id"], 30)
+        conv = svc.get_conversation(acct["id"], r["conversation_id"])
+        assert conv["conversation"]["run_state"] == "idle", conv["conversation"]
+        first, last = fake.requests[0], fake.requests[-1]
+        assert first["thinking"] == {"type": "enabled"} and first["reasoning_effort"] == "max"
+        assert first["model"] == "deepseek-flash"
+        sent = [m for m in last["messages"] if m["role"] == "assistant"]
+        assert [m["reasoning_content"] for m in sent] == ["thinking step 0", "thinking step 1"]
+        # a follow-up turn still replays earlier reasoning (required once tools were used)
+        svc.send(acct["id"], "And next week?", r["conversation_id"])
+        svc.wait(r["conversation_id"], 30)
+        assert svc.get_conversation(acct["id"], r["conversation_id"])["conversation"]["run_state"] == "idle"
+        # extra request settings merge in; app-owned fields are protected
+        svc.update_config({"thinking": "", "extra_params": {"reasoning_effort": "high", "top_k": 5}})
+        svc.send(acct["id"], "hi", r["conversation_id"])
+        svc.wait(r["conversation_id"], 30)
+        assert fake.requests[-1]["reasoning_effort"] == "high" and "thinking" not in fake.requests[-1]
+        with pytest.raises(InvalidInput):
+            svc.update_config({"extra_params": {"model": "other"}})
+        with pytest.raises(InvalidInput):
+            svc.update_config({"thinking": "ultra"})
+    finally:
+        fake.stop()
+
+
+def test_thinking_off_and_other_providers():
+    from canvas_hub.assistant.providers import thinking_params
+    assert thinking_params("deepseek", "off") == {"thinking": {"type": "disabled"}}
+    assert thinking_params("deepseek", "") == {}
+    assert thinking_params("openai", "high") == {"reasoning_effort": "high"}
+    assert thinking_params("openai", "off") == {}

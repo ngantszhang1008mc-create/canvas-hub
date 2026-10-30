@@ -438,6 +438,10 @@ The MCP server and the assistant expose the same tools, with strict JSON schemas
 | `notes` | `create_note`, `update_note`, `delete_note` (local annotations only; never a Canvas submission) |
 | `collect` | `start_collection`, `wait_for_job`, `cancel_job`. Jobs run in the app process with the normal scope and read-only rules; view-to-complete items can only be allowed by the user in the UI. |
 | `settings` | `update_scope` (cannot enable view completion) |
+| `read` (planner and requests) | `get_timetable`, `list_class_times`, `list_view_requests` |
+| `notes` (planner and requests) | `add_class_time`, `remove_class_time`, `request_external_view` |
+| `fulfil` | `claim_view_request`, `submit_view_result`, `decline_view_request`: for MCP agents with their own browser access |
+| `ui` (in-app chat only) | `show_deadlines`, `show_timetable`, `show_items`, `show_table`, `show_chart`, `show_grades`, `show_choices` |
 
 No tool takes SQL, a path, a shell command, browser control or credentials. Results are JSON text capped at 24 000 characters, with paging hints.
 
@@ -464,10 +468,27 @@ canvas-hub mcp --allow-settings     # + scope changes
   - Requests stream, with `eager_input_streaming` on each tool. Inputs are validated before execution; truncated or invalid inputs are returned to the model as errors and never executed.
   - For `claude-fable-5-1`, `claude-opus-5-5`, `claude-opus-5` and `claude-sonnet-5-5`, requests opt into the server-side refusal fallback (`fallbacks: "default"`, beta `server-side-fallback-2026-07-01`). Remove that in `assistant/providers.py` if it isn't wanted.
   - Claude's content blocks are stored and replayed verbatim; history is append-only.
+- **Thinking on OpenAI-compatible providers:** a Thinking setting maps to `thinking: {type}` plus `reasoning_effort` for DeepSeek (preset model `deepseek-flash`), and to `reasoning_effort` elsewhere. An "Extra request settings" JSON object is merged into the request body; `model`, `messages`, `tools`, `tool_choice` and `stream` cannot be overridden. Any `reasoning_content` a provider returns is stored and sent back on every later request, which DeepSeek's thinking mode requires once tools are used.
 - **Agent loop:** at most 16 steps. Conversations are stored in `assistant_conversations` and `assistant_messages` (migration `0002_assistant.sql`). The UI polls the conversation for progress, and the user can stop a run.
 - **Settings and key:** stored in `<home>/runtime/assistant.json` (mode 0600), outside `data/`, so the key is never included in backups or exports. It is never returned by the API; only a masked hint is. Each permission (`notes`, `collect`, `settings`) is a user toggle; `read` is always on.
 - **Privacy:** the user is told that questions, and the data the assistant reads, go to the chosen provider. Nothing is sent until they configure a provider and ask something.
 - **Tests:** scripted fake Anthropic (SSE) and OpenAI-compatible endpoints in `tests/fake_llm.py` exercise the full loop through the real SDKs. No request to a real provider was made in this environment, because no key was available.
+
+### Interactive answers, planner and external-site requests
+
+- **Interactive answers:** `show_*` tools return a `display` payload for one of a fixed set of components (deadline cards with *+ To-do* / *Open in Canvas*, a week timetable whose suggested study blocks can be added in one click, item cards, tables, bar charts, quick-reply buttons).
+  - The UI renders them with DOM APIs; the model never supplies HTML.
+  - The payload is stored with the tool result in `assistant_messages`; the model receives only a compact summary (`shown_to_user: true`).
+  - The `ui` permission is always on in the app and is never offered over MCP.
+- **Planner:** `canvas_hub/services/planner.py` (migration `0003_planner_requests.sql`, table `class_times`).
+  - It combines local weekly class times, Canvas calendar events, deadlines with submission state, and dated to-dos.
+  - It can suggest 90-minute study blocks for unfinished deadlines: one per day, starting up to a week before the deadline, avoiding busy times. Suggestions are not stored until accepted as a to-do.
+  - `GET /api/accounts/{id}/planner.ics` exports classes (weekly), deadlines and open to-dos.
+- **External-site requests:** `canvas_hub/services/requests.py` (table `view_requests`). The flow is open → claimed → done / declined / cancelled.
+  - Requests come from the user, or from the assistant with the `notes` permission. The request note carries instructions such as which browser profile to use.
+  - An MCP agent started with `--allow-fulfil` claims a request; claims expire after 2 hours. It then submits up to 200 000 characters of text.
+  - The result is imported through the normal observation importer as an `external_link` item with `content`, `provided_by` and `read_at` fields. It is searchable, versioned on re-reads, and labelled in the UI as agent-provided, not Canvas-reported.
+  - Canvas Hub itself never opens these sites or reads any other browser profile.
 
 ### Still left for Codex
 
@@ -475,7 +496,8 @@ canvas-hub mcp --allow-settings     # + scope changes
 2. **The direct Codex connection**, if requested. This means embedding a Codex agent via the [Codex SDK](https://learn.chatgpt.com/docs/codex-sdk) or [app-server](https://learn.chatgpt.com/docs/app-server), with its own authentication. Attach point: the reserved provider id `codex` in `canvas_hub/assistant/providers.py` (`make_provider`), shown as reserved in the settings dropdown.
    - It could reuse `agent_tools.run_tool` and the assistant's conversation store and UI.
    - Canvas Hub stores no OpenAI or Codex credentials for this and must not require them.
-3. **Adapting the existing Canvas Reader skill.** It can call the MCP tools, or produce observation packages and submit them with `import_observations` (validated, idempotent and identity-checked).
+3. **Fulfilling external-site requests** (for example the COMP1023 website through Chrome profile `ngan`): run the MCP server with `--allow-fulfil`, poll `list_view_requests`, and use `claim_view_request` / `submit_view_result`.
+4. **Adapting the existing Canvas Reader skill.** It can call the MCP tools, or produce observation packages and submit them with `import_observations` (validated, idempotent and identity-checked).
 
 Notes for that work:
 
@@ -488,7 +510,7 @@ Notes for that work:
 
 ### Automated tests (ran in this environment, Linux, Python 3.13)
 
-`uv run pytest -q` gives **57 passed** (about 45 s). `tests/test_agents.py` covers the MCP server over stdio, tool permissions and validation, account binding, the assistant loop with both provider types against scripted endpoints, permission gating, key storage and masking, and the Claude API request shape.
+`uv run pytest -q` gives **59 passed** (about 45 s). `tests/test_agents.py` covers the MCP server over stdio, tool permissions and validation, account binding, the assistant loop with both provider types against scripted endpoints, permission gating, key storage and masking, and the Claude API request shape.
 
 **`tests/test_parsing.py`** covers:
 - URL normalization and rejection, and link classification.

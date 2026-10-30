@@ -94,3 +94,15 @@ Don't paste your key into chat; enter it only in the app.
 | 8.3 | Ask "Check Canvas for new announcements in MATH1023" (while signed in) | It starts a quick check limited to that course, waits for it, then answers. The job also appears under **Collection**. |
 | 8.4 | Ask "Add a to-do to start the next assignment on Saturday" | The to-do appears under **Notes & tasks**; nothing changes in Canvas |
 | 8.5 | Run `uv run canvas-hub mcp` and register it in Codex or Claude Code (command shown under **Data & settings → Connect other agents**) | The agent can list your courses and deadlines. Write tools appear only with `--allow-notes` / `--allow-writes`. |
+| 8.6 | DeepSeek: provider **DeepSeek**, model `deepseek-flash`, Thinking **max**, then **Save & test**; then ask 8.2 again | *Connected*, and the multi-step answer completes. If the test is rejected, try **high** to see whether the hosted API accepts `max`. |
+
+## 9. Planner and external-site requests
+
+| # | Step | Expected |
+| --- | --- | --- |
+| 9.1 | **Planner**: add your class times (or ask the assistant to read them from a syllabus) | The week grid shows classes, deadlines and to-dos in HKT |
+| 9.2 | Tick **Suggest study blocks**, click **+ Add** on one | It becomes a to-do; nothing changes in Canvas |
+| 9.3 | **Export .ics** and open it in Calendar | Classes repeat weekly; deadlines appear 30 minutes before their due time |
+| 9.4 | Ask the assistant "Plan my study time this week" | It answers with an interactive timetable and buttons, not just text |
+| 9.5 | **Agent requests**: leave one for the COMP1023 website with the note "Use Chrome profile ngan" | Status *Waiting for an agent* |
+| 9.6 | In Codex or Claude Code (MCP started with `--allow-fulfil`), ask it to fulfil open Canvas Hub requests | Status becomes *Done*; the content is searchable and labelled as agent-provided |
