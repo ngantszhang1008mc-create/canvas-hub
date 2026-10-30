@@ -550,6 +550,7 @@ footer{margin-top:24px;font-size:12px;color:#8b8170}</style></head><body><h1>${h
     let v = view, timer = null, saving = Promise.resolve(), isFull = false, edits = 0;
     let seen = view.state;                 // the last state the server confirmed: sent as `base` so it can merge
     let acked = 0;                         // edits the server has confirmed; fewer than `edits` = local changes pending
+    let userEdits = 0;                     // changes the user made (undo replies are not counted here)
     const el = h("div", { class: "saved-cmp" });
     const status = h("span", { class: "tiny muted save-state", "aria-live": "polite" });
     const redraw = () => { mount(el, render(v, api_)); };
@@ -596,15 +597,15 @@ footer{margin-top:24px;font-size:12px;color:#8b8170}</style></head><body><h1>${h
     };
     const flush = () => { clearTimeout(timer); const run = pending; pending = null; if (run) run(); };
     const api_ = {
-      setState: (fn) => { edits += 1; v = { ...v, state: fn(structuredClone(v.state)) }; redraw(); persist(); },
+      setState: (fn) => { edits += 1; userEdits += 1; v = { ...v, state: fn(structuredClone(v.state)) }; redraw(); persist(); },
       undo: () => {
         flush();
-        const at = edits, atState = v.state;          // edits made after pressing Undo are kept on top of its answer
+        const at = userEdits, atState = v.state;      // edits made after pressing Undo are kept on top of its answer
         return queue(async () => {
           const r = await guard(() => api(A(`/components/${v.id}`), { method: "PATCH", body: { undo: true } }));
           if (!r) return;
           seen = r.state;
-          if (edits === at) { edits += 1; acked = edits; v = r; }
+          if (userEdits === at) { edits += 1; acked = edits; v = r; }
           else v = { ...r, state: rebase(atState, v.state, r.state) };   // the pending save sends the newer edits
           redraw(); status.textContent = "Undone";
         });
@@ -873,7 +874,7 @@ ${pv.body || ""}`, json: w })));
         if (sc != null && (it.max > 0 || sc > 0)) pts.push([it.max > 0 ? Math.min(sc, it.max * 2) : sc, it.max]);
       }
       const ratio = (p) => (p[1] ? p[0] / p[1] : Infinity);
-      if (c.drop_lowest && pts.length > c.drop_lowest) pts = pts.sort((a, b) => ratio(a) - ratio(b)).slice(c.drop_lowest);
+      if (c.drop_lowest && pts.length > c.drop_lowest) pts = pts.sort((a, b) => (ratio(a) === ratio(b) ? 0 : ratio(a) < ratio(b) ? -1 : 1)).slice(c.drop_lowest);
       const got = pts.reduce((s, p) => s + p[0], 0), mx = pts.reduce((s, p) => s + p[1], 0);
       return [mx ? 100 * got / mx : null, got, mx];
     };

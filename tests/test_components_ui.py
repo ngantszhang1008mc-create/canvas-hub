@@ -305,3 +305,37 @@ def test_an_edit_made_while_undo_is_in_flight_is_kept(app_server, hub, account):
         b.close()
     hub.components.undo = real
     assert hub.components.get(aid, v["id"])["state"]["done"] == {"r2": True}   # r1 undone, r2 kept
+
+
+def test_two_quick_undos_leave_the_page_matching_the_server(app_server, hub, account):
+    from playwright.sync_api import expect, sync_playwright
+    base, tok, _ = app_server
+    aid = account["id"]
+    v = hub.components.create(aid, "checklist", {"title": "Week", "sections": [
+        {"id": "s", "rows": [{"id": "r1", "label": "One"}, {"id": "r2", "label": "Two"}]}]})
+    hub.components.pin(aid, v["id"], True)
+    v = hub.components.set_state(aid, v["id"], {"done": {"r1": True}})       # tick, then untick
+    hub.components.set_state(aid, v["id"], {"done": {}})
+    real = hub.components.undo
+
+    def slow_undo(*a, **k):
+        time.sleep(0.8)
+        return real(*a, **k)
+    hub.components.undo = slow_undo
+    with sync_playwright() as p:
+        b = p.chromium.launch()
+        pg = b.new_page(viewport={"width": 1280, "height": 900})
+        pg.goto(f"{base}/?token={tok}")
+        pg.goto(f"{base}/#/trackers")
+        cl = pg.locator(".cmp-checklist")
+        expect(cl.get_by_text("0/2 done")).to_be_visible()
+        undo = cl.get_by_role("button", name="↶ Undo")
+        undo.click()
+        undo.click()                                                     # before the first answer arrives
+        expect(cl.locator(".save-state")).to_have_text("Undone", timeout=10000)
+        pg.wait_for_timeout(1500)                                        # both answers are in
+        shown = cl.get_by_role("checkbox", name="One").is_checked()
+        b.close()
+    hub.components.undo = real
+    saved = hub.components.get(aid, v["id"])["state"]["done"]
+    assert shown == bool(saved.get("r1")), (shown, saved)                # the page shows what is saved
