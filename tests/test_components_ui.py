@@ -230,3 +230,25 @@ def test_a_second_tick_during_a_save_keeps_todos_finished_elsewhere(app_server, 
     hub.components.set_state = real
     assert hub.annotations.get(aid, links["r1"])["task_state"] == "done"    # not reopened by the queued save
     assert hub.components.get(aid, v["id"])["state"]["done"] == {"r1": True, "r2": True, "r3": True}
+
+
+def test_a_chat_shows_changes_made_on_trackers_when_reopened(app_server, hub, account):
+    from playwright.sync_api import expect, sync_playwright
+    base, tok, _ = app_server
+    with sync_playwright() as p:
+        b = p.chromium.launch()
+        pg = b.new_page(viewport={"width": 1280, "height": 900})
+        pg.goto(f"{base}/?token={tok}")
+        pg.goto(f"{base}/#/assistant")
+        pg.locator(".composer textarea").fill("Track HMAW1905B")
+        pg.get_by_role("button", name="Send").click()
+        expect(pg.locator(".cmp-score .sl-big .num")).to_have_text("95", timeout=20000)
+        expect(pg.locator(".cmp-artifact")).to_be_visible(timeout=20000)
+        chat = pg.url
+        pg.goto(f"{base}/#/trackers")
+        score = pg.locator(".cmp-score")
+        score.get_by_label("Include Nest Posts").uncheck()
+        expect(score.locator(".save-state")).to_contain_text("Saved", timeout=10000)
+        pg.goto(chat)                                   # the chat's copy of the model is cached from before
+        expect(pg.locator(".cmp-score .sl-big .num")).to_have_text("85", timeout=10000)
+        b.close()
