@@ -93,3 +93,11 @@ def test_all_courses_parser_handles_unlinked_and_sections():
     assert by["Hidden lab"]["course_id"] is None and by["Hidden lab"]["unlinked_key"].startswith("unlinked-")
     assert by["OLD1"]["section"] == "past"
     assert parse_all_courses({"tables": []})["problems"]
+
+
+def test_absolutize_points_links_at_canvas():
+    from canvas_hub.htmltools import absolutize
+    out = absolutize('<a href="/courses/1/pages/x">x</a><a href="https://e.org/">e</a><a href="//cdn.x/y">p</a>',
+                     "https://canvas.example.edu")
+    assert 'href="https://canvas.example.edu/courses/1/pages/x"' in out
+    assert 'href="https://e.org/"' in out and 'href="//cdn.x/y"' in out

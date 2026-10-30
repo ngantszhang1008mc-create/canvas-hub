@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .. import dates
 from ..db import Database
+from ..htmltools import absolutize
 from ..model import CATEGORIES, ITEM_TYPES, spec_for
 from ..util import InvalidInput, NotFound, clamp_limit, decode_cursor, encode_cursor, parse_iso, to_utc_iso
 
@@ -119,6 +120,11 @@ class QueryService:
             f["kind"] = spec.kind
             if spec.kind == "date" and f["value"] is not None:
                 f["display"] = dates.format_local(f["value"], tzname)
+        origin = self.db.one("SELECT i.origin FROM accounts a JOIN instances i ON i.id=a.instance_id WHERE a.id=?",
+                             (account_id,))["origin"]
+        for f in fields:
+            if f["kind"] == "html" and isinstance(f["value"], str):
+                f["value"] = absolutize(f["value"], origin)
         item["fields"] = fields
         item["links_out"] = [dict(r) for r in self.db.query(
             """SELECT l.relation, l.label, l.position, l.attrs_json, l.last_observed_at, i.id AS item_id, i.item_type, i.title,

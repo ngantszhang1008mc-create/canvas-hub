@@ -139,3 +139,14 @@ def normalized_for_compare(html: str | None) -> str:
     text = to_text(html)
     hrefs = sorted({_VOLATILE_URL_PARAMS.sub("", unescape(h)) for h, _ in links(html)})
     return " ".join(text.split()) + "\n" + "\n".join(hrefs)
+
+
+_REL_ATTR = re.compile(r'(\s(?:href|src)=")(/[^"/][^"]*|/)"')
+
+
+def absolutize(html: str | None, origin: str) -> str | None:
+    """Point root-relative links in stored Canvas HTML at the Canvas origin,
+    so following them opens Canvas rather than the local app."""
+    if not html or not origin:
+        return html
+    return _REL_ATTR.sub(lambda m: f'{m.group(1)}{origin}{m.group(2)}"', html)

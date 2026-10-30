@@ -441,7 +441,7 @@ Additional notes for that work:
 
 ### Automated tests (ran in this environment, Linux, Python 3.13)
 
-`uv run pytest -q` gives **48 passed** (about 35 s).
+`uv run pytest -q` gives **49 passed** (about 35 s).
 
 **`tests/test_parsing.py`** covers:
 - URL normalization and rejection, and link classification.
@@ -513,4 +513,5 @@ The step-by-step checklist is in `docs/REAL_CANVAS_ACCEPTANCE.md`.
 - **Read state:** viewing a discussion's reply view may mark it read on some Canvas versions; the brief accepts this. Inbox reads use `auto_mark_as_read=false`.
 - **Discrepancy detection:** heuristic. It flags an announcement sentence that names an assignment and states a different month/day.
 - **OCR:** no OCR is performed. Scanned PDFs are marked `needs_ocr`, and images are marked `image_only`.
+- **Inline images:** images embedded in Canvas pages are not displayed in the app. The strict CSP blocks remote loads, and the images need a Canvas sign-in. Their alt text is shown, and links open in Canvas.
 - **Scheduling:** no background or recurring collection, and no external schedules were created. Collection is user-initiated.

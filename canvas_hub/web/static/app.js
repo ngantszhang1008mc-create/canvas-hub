@@ -20,7 +20,10 @@ function h(tag, attrs, ...kids) {
       if (v === undefined || v === null || v === false) continue;
       if (k === "class") el.className = v;
       else if (k === "style") el.style.cssText = v; // CSSOM: allowed under the strict CSP
-      else if (k === "html") el.innerHTML = v; // only for server-sanitized HTML
+      else if (k === "html") { // only for server-sanitized HTML
+        el.innerHTML = v;
+        el.querySelectorAll("a[href]").forEach((a) => { a.target = "_blank"; a.rel = "noopener noreferrer"; });
+      }
       else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
       else if (k === "dataset") Object.assign(el.dataset, v);
       else el.setAttribute(k, v === true ? "" : v);
