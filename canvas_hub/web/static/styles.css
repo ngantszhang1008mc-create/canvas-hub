@@ -798,15 +798,12 @@ label.btn input[type=file] { display: none; }
 @keyframes caret-blink { 50% { opacity: 0; } }
 @media (prefers-reduced-motion: reduce) { .msg.assistant.live .typed .md *::after { animation: none; } }
 
-/* ---- assistant focus mode: just the chat, its tabs and the composer ---- */
+/* ---- assistant focus mode: just the chat list, the chat, its tabs and the composer ---- */
 .tabs .grow { flex: 1; }
-.tabs .focus-toggle, .tabs .focus-only { align-self: center; margin-bottom: 4px; }
-.focus-only { display: none; }
-body.chat-focus .focus-only { display: inline-flex; }
-body.chat-focus .sidebar, body.chat-focus .topbar, body.chat-focus .main > .page-head, body.chat-focus .conv-list { display: none; }
+.tabs .focus-toggle { align-self: center; margin-bottom: 4px; }
+body.chat-focus .sidebar, body.chat-focus .topbar, body.chat-focus .main > .page-head { display: none; }
 body.chat-focus .main { max-width: none; padding: 10px 24px 12px; }
 body.chat-focus .main > .tabs { margin-bottom: 10px; }
-body.chat-focus .assistant-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); }
 body.chat-focus .chat-log, body.chat-focus .chat-status, body.chat-focus .chat-empty,
 body.chat-focus .composer > *, body.chat-focus .chat-foot { width: 100%; max-width: 920px; margin-left: auto; margin-right: auto; }
 body.chat-focus .chat-foot { box-sizing: border-box; max-width: 960px; }     /* its own 20px padding lines it up with the composer */

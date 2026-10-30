@@ -57,16 +57,24 @@ def test_focus_mode_shows_just_the_chat(hub, account):
         expect(chat).to_be_visible()
         before = chat.bounding_box()
         pg.get_by_role("button", name="⤢ Focus").click()
-        for hidden in ("#sidebar", "#topbar", ".main > .page-head", ".conv-list"):
+        for hidden in ("#sidebar", "#topbar", ".main > .page-head"):
             expect(pg.locator(hidden)).to_be_hidden()
-        for shown in (".composer textarea", ".chat-pick", ".tabs"):
+        for shown in (".composer textarea", ".chat-pick", ".tabs", ".conv-list"):
             expect(pg.locator(shown).first).to_be_visible()
-        expect(pg.get_by_role("link", name="+ New chat")).to_be_visible()
+        new_chat = pg.locator(".conv-list").get_by_role("link", name="+ New chat")      # on top of the chat list
+        expect(new_chat).to_be_visible()
         after = chat.bounding_box()
         assert after["height"] > before["height"] + 80 and after["width"] > before["width"] + 200, (before, after)
         pg.locator(".composer textarea").fill("Quick question")      # still works as a chat
         pg.get_by_role("button", name="Send").click()
         expect(pg.locator(".msg.assistant").last).to_have_text(ANSWER, timeout=15000)
+        conv = pg.locator(".conv-list .conv")
+        expect(conv).to_have_count(1)                                   # the chat list switches conversations
+        new_chat.click()
+        expect(pg.locator(".msg")).to_have_count(0)
+        expect(pg.locator("#sidebar")).to_be_hidden()                   # still in focus mode
+        conv.click()
+        expect(pg.locator(".msg.assistant").last).to_have_text(ANSWER)
         pg.reload()                                                     # remembered in this browser
         expect(pg.locator("#sidebar")).to_be_hidden()
         pg.keyboard.press("Escape")                                     # Esc leaves it
