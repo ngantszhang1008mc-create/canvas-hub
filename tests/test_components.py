@@ -209,3 +209,15 @@ def test_undo_puts_linked_todos_back(hub, account):
     svc.set_state(aid, v["id"], {"done": {"r2": True}, "links": v["state"]["links"]})
     tasks = [a for a in hub.annotations.list(aid) if a["kind"] == "task"]
     assert len(tasks) == 2                                              # no orphans, no duplicates
+
+
+def test_saves_without_links_reuse_linked_todos(hub, account):
+    # A page that sends a save while the first sync is in flight has no links yet; the server keeps its own.
+    aid = account["id"]
+    svc = hub.components
+    v = svc.create(aid, "checklist", {"title": "T", "sync_todos": True, "sections": [
+        {"id": "s", "rows": [{"id": "r1", "label": "One"}, {"id": "r2", "label": "Two"}]}]})
+    first = svc.set_state(aid, v["id"], {"done": {"r1": True}})
+    v = svc.set_state(aid, v["id"], {"done": {"r1": True, "r2": True}, "links": {}})
+    assert v["state"]["links"] == first["state"]["links"]
+    assert len([a for a in hub.annotations.list(aid) if a["kind"] == "task"]) == 2

@@ -194,6 +194,9 @@ class ComponentService:
         spec = json.loads(row["spec_json"])
         st = self._clean_state(row["kind"], spec, state)
         if row["kind"] == "checklist" and spec.get("sync_todos"):
+            # Links are server-owned: a client that sends stale or missing links must not create duplicate to-dos.
+            saved = json.loads(row["state_json"]).get("links") or {}
+            st["links"] = {**st["links"], **saved}
             st = self._push_todos(account_id, spec, st)
         return self._save(account_id, row, spec, st, by)
 

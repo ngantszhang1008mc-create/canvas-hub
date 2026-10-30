@@ -478,7 +478,8 @@ export function makeComponents(env) {
         const sent = edits;
         try {
           const r = await api(A(`/components/${v.id}`), { method: "PATCH", body: { state: v.state, expected_version: v.version } });
-          v = edits === sent ? r : { ...r, state: v.state };      // keep edits made while this save was in flight
+          // keep edits made while this save was in flight, but adopt server-owned to-do links
+          v = edits === sent ? r : { ...r, state: r.state.links ? { ...v.state, links: { ...v.state.links, ...r.state.links } } : v.state };
           if (edits === sent) redraw();
           status.textContent = edits === sent ? `Saved ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : "Saving…";
         } catch (e) {
