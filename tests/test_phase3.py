@@ -139,3 +139,33 @@ def test_board_moves_and_reminders_in_the_browser(app_server, hub, account):
     assert not errors
     assert [r["title"] for r in hub.reminders.list(aid)] == ["Read chapter 4"]
     assert [a["task_state"] for a in hub.annotations.list(aid) if a["title"] == "Read chapter 4"] == ["in_progress"]
+
+
+def _set_field(hub, aid, item_type, canvas_id, field, value):
+    iid = hub.db.one("SELECT id FROM items WHERE account_id=? AND item_type=? AND canvas_id=?", (aid, item_type, canvas_id))["id"]
+    with hub.db.tx() as c:
+        c.execute("""INSERT INTO item_fields(item_id, field, value_json, compare_hash, first_observed_at, last_observed_at,
+                     last_changed_at) VALUES (?,?,?,?,?,?,?) ON CONFLICT(item_id, field) DO UPDATE SET value_json=excluded.value_json""",
+                  (iid, field, json.dumps(value), "x", "2026-10-30T00:00:00Z", "2026-10-30T00:00:00Z", "2026-10-30T00:00:00Z"))
+
+
+def test_drafts_follow_the_course_weighting_and_leave_out_excused_work(hub, account, fixture_pkg):
+    from canvas_hub.agent_tools import _draft_categories
+    hub.importer.import_package(fixture_pkg)
+    aid = account["id"]
+    ctx = ToolContext(api=HubAPI(hub), account_id=aid)
+    _set_field(hub, aid, "assignment", "7001", "assignment_group", "Homework")
+    _set_field(hub, aid, "assignment", "7001", "assignment_group_weight", 10)
+    _set_field(hub, aid, "assignment", "7002", "points_possible", 10)
+    _set_field(hub, aid, "assignment", "7002", "assignment_group", "Exams")
+    _set_field(hub, aid, "assignment", "7002", "assignment_group_weight", 90)
+    _set_field(hub, aid, "course", "4242", "apply_assignment_group_weights", False)    # points-based course
+    lines = json.loads(run_tool_display(ctx, "course_score_lines", {"course_id": "4242"}, {"read"})[0])
+    assert lines["group_weights"] == {} and lines["grading"] == "points"
+    assert all(c["weight"] is None for c in _draft_categories(ctx, aid, "4242"))
+    _set_field(hub, aid, "course", "4242", "apply_assignment_group_weights", True)
+    lines = json.loads(run_tool_display(ctx, "course_score_lines", {"course_id": "4242"}, {"read"})[0])
+    assert lines["group_weights"] == {"Homework": 10, "Exams": 90} and lines["grading"] == "weighted groups"
+    _set_field(hub, aid, "submission", "7001", "excused", True)
+    cats = _draft_categories(ctx, aid, "4242")
+    assert [it["id"] for c in cats for it in c["items"]] == ["a7002"]                 # excused work is not "to do"

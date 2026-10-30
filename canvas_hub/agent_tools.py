@@ -669,6 +669,8 @@ def _draft_categories(ctx, aid: int, course_id: str) -> list[dict]:
     rules = ctx.api.hub.grading.get(aid, course_id)
     cats: dict[str, dict] = {}
     for b in lines["buckets"]:
+        if b["status"] == "excused":            # excused work counts for nothing, not as work still to do
+            continue
         g = b.get("group") or "Assignments"
         c = cats.setdefault(g, {"id": re.sub(r"[^\w.:-]", "_", g)[:60] or "g", "name": g,
                                 "weight": lines["group_weights"].get(g), "items": [],
@@ -805,6 +807,9 @@ def h_course_score_lines(ctx, a):
     now = datetime.now(timezone.utc)
     lines, groups = [], {}
     rules = hub.grading.get(aid, str(a["course_id"]))
+    course = hub.db.one("SELECT id FROM items WHERE account_id=? AND item_type='course' AND source_key=?",
+                        (aid, str(a["course_id"])))
+    weighting = hub.query._fields(course["id"]).get("apply_assignment_group_weights") if course else None
     for r in hub.db.query("""SELECT id, canvas_id, title FROM items WHERE account_id=? AND item_type='assignment'
                              AND course_canvas_id=? AND current_revision>0 ORDER BY id""", (aid, str(a["course_id"]))):
         f = hub.query._fields(r["id"])
@@ -832,7 +837,7 @@ def h_course_score_lines(ctx, a):
             line["status"] = "pending"
             if sub.get("submitted_at"):
                 line["submitted"] = True
-        if f.get("assignment_group_weight"):
+        if f.get("assignment_group_weight") and weighting:     # group weights only count in a weighted course
             groups[f.get("assignment_group")] = f.get("assignment_group_weight")
         line = hub.grading.apply_to_line(line, r["canvas_id"], rules)
         if line is not None:
@@ -840,7 +845,10 @@ def h_course_score_lines(ctx, a):
     for name, g in rules["groups"].items():           # local weights win over Canvas's (often 0)
         if g.get("weight") is not None:
             groups[name] = g["weight"]
+    local = any(g.get("weight") is not None for g in rules["groups"].values())
     out = {"course_id": str(a["course_id"]), "buckets": lines, "group_weights": groups,
+           "grading": ("weighted groups (local rules)" if local else "weighted groups" if weighting
+                       else "points" if weighting is False else "not collected"),
            "note": "Drafted from Canvas points and submission states, with the local grading rules applied. Rules Canvas "
                    "does not have (all-or-nothing, minimum hours, formulas, real group weights, pass mark) belong in "
                    "set_grading_rules once you know them. Graded = earned; missing or past due without a submission = lost."}

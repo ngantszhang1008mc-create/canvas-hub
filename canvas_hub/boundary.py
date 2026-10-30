@@ -24,7 +24,7 @@ from . import __version__
 from .model import CATEGORIES, ITEM_TYPES
 from .services import Hub
 from .services import backup as backup_mod
-from .util import HubError, InvalidInput, NotFound
+from .util import Conflict, HubError, InvalidInput, NotFound
 
 _BACKUP_NAME = re.compile(r"^canvas-hub-(backup|export)-[A-Za-z0-9\-]+\.zip$")
 
@@ -268,10 +268,26 @@ class HubAPI:
             raise HubError("the signed-in browser is not available in this process", code="collector_unavailable", status=503)
         inst = self.hub.identity.get_instance(a["instance_id"])
 
+        def same_user(state: dict) -> None:
+            # The browser session belongs to the Canvas instance, not to an account: whoever signed in last is the
+            # one a write would be sent as. It must be the account the write was prepared for.
+            if state.get("status") != "signed_in":
+                raise HubError("Sign in to Canvas first; nothing was sent.", code="needs_login", status=409)
+            if state.get("account_id") != a["id"]:
+                raise Conflict(f"The browser is signed in as a different Canvas user. Sign in as "
+                               f"{a.get('display_name') or a['canvas_user_id']} to send this; nothing was sent.",
+                               code="wrong_account")
+
+        # Checked before the write is marked as sending (so it stays prepared), and again right before the POST.
+        same_user(self.worker.call(lambda: self.worker.check_session(a["instance_id"], launch=True), timeout=120))
+
         def send(job):
             from .collector.writer import CanvasWriter
-            return self.worker.call(lambda: CanvasWriter(self.worker._context(a["instance_id"]), inst["origin"]).send(job),
-                                    timeout=300)
+
+            def run():
+                same_user(self.worker.check_session(a["instance_id"], launch=True))
+                return CanvasWriter(self.worker._context(a["instance_id"]), inst["origin"]).send(job)
+            return self.worker.call(run, timeout=300)
         r = self.hub.writes.confirm(a["id"], write_id, preview_hash, send)
         if r["status"] == "sent" and self.runner is not None:
             try:      # read the course again so the submission or reply shows up in Canvas Hub
