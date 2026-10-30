@@ -174,3 +174,37 @@ def test_confirmed_writes_reach_canvas_through_the_browser(tmp_path):
         time.sleep(0.1)
     finally:
         env.close() if hasattr(env, "close") else None
+
+
+class _Worker:
+    """Stands in for the browser: reports who is signed in, and fails the test if anything is sent."""
+    def __init__(self, *states):
+        self.states = list(states)
+        self.sent = False
+
+    def call(self, fn, timeout=None):
+        return fn()
+
+    def check_session(self, instance_id, launch=True):
+        return self.states.pop(0)
+
+    def _context(self, instance_id):
+        self.sent = True
+        raise AssertionError("nothing may be sent as the wrong user")
+
+
+def test_writes_are_only_sent_as_the_account_they_were_prepared_for(hub, account, fixture_pkg):
+    from canvas_hub.util import Conflict
+    hub.importer.import_package(fixture_pkg)
+    aid = account["id"]
+    other = {"status": "signed_in", "account_id": aid + 99}
+    api = HubAPI(hub, worker=_Worker(other))
+    api.set_write_settings(aid, {"enabled": True})
+    p = api.prepare_write(aid, {"kind": "message", "course_id": "4242", "recipients": ["9001"], "subject": "Q", "text": "Hi"})
+    with pytest.raises(Conflict, match="different Canvas user"):
+        api.confirm_write(aid, p["id"], p["preview"]["hash"])
+    assert hub.writes.get(aid, p["id"])["status"] == "prepared" and not api.worker.sent   # still there to send later
+    # someone signs in as another user between the check and the send
+    api.worker = _Worker({"status": "signed_in", "account_id": aid}, other)
+    r = api.confirm_write(aid, p["id"], p["preview"]["hash"])
+    assert r["status"] == "failed" and "different Canvas user" in r["error"] and not api.worker.sent

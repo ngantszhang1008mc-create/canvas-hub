@@ -101,13 +101,29 @@ def test_query_layer_is_read_only_and_account_scoped(hub, account, fixture_pkg):
                                         ON f.item_id=i.id WHERE f.field='due_at' AND i.item_type='assignment' ORDER BY 1""")
     assert r["rows"][0] == ["Project proposal", "2026-11-06T15:59:00Z"]
     assert run_query(hub.paths.db, other["id"], "SELECT COUNT(*) FROM items")["rows"] == [[0]]    # other account sees nothing
-    for bad in ("SELECT * FROM main.items", "SELECT * FROM assistant_messages", "DELETE FROM items",
+    for bad in ("SELECT * FROM main.accounts", "SELECT * FROM assistant_messages", "DELETE FROM items",
                 "INSERT INTO notes(title) VALUES ('x')", "SELECT * FROM sqlite_master", "ATTACH DATABASE ':memory:' AS x",
                 "PRAGMA table_info(items)", "SELECT load_extension('x')"):
         with pytest.raises(InvalidInput):
             run_query(hub.paths.db, aid, bad)
-    with pytest.raises(InvalidInput):
+    with pytest.raises(InvalidInput):          # stopped by the time limit
         run_query(hub.paths.db, aid, "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c) SELECT COUNT(*) FROM c")
+    assert run_query(hub.paths.db, aid, "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c LIMIT 7) "
+                                         "SELECT SUM(x) FROM c")["rows"] == [[28]]
+    assert run_query(hub.paths.db, aid, "SELECT COUNT(*) FROM main.items")["rows"] == run_query(
+        hub.paths.db, aid, "SELECT COUNT(*) FROM items")["rows"]               # `main` is only this account's copy
+    # a CTE or alias named like an allowed table still cannot reach the main database
+    for bad in ("WITH items AS (SELECT * FROM main.accounts) SELECT * FROM items",
+                "WITH notes AS (SELECT * FROM assistant_messages) SELECT * FROM notes",
+                f"WITH x AS (SELECT * FROM main.items WHERE account_id={other['id']}) SELECT * FROM x",
+                "SELECT * FROM (SELECT * FROM main.accounts) AS items"):
+        with pytest.raises(InvalidInput):
+            run_query(hub.paths.db, aid, bad)
+    assert run_query(hub.paths.db, aid, "WITH a AS (SELECT * FROM items WHERE item_type='assignment') "
+                                         "SELECT COUNT(*) FROM a")["rows"] == [[2]]             # CTEs over the tables work
+    r = run_query(hub.paths.db, aid, "SELECT i.title, c.title FROM items i JOIN courses c ON c.course_id=i.course_id "
+                                     "WHERE i.item_type='assignment' ORDER BY 1 LIMIT 1")
+    assert r["columns"] == ["title", "title"] and r["rows"][0][0] != r["rows"][0][1]          # repeated names kept apart
     assert hub.db.one("SELECT COUNT(*) n FROM items WHERE account_id=?", (aid,))["n"] > 0          # untouched
     assert evaluate("min(20, hours / 20 * 20) if hours >= 10 else 0", {"hours": 15}) == 15
     assert evaluate("sum(xs) - 80", {"xs": [15, 10, 10, 10, 15, 20]}) == 0

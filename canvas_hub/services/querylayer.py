@@ -1,11 +1,13 @@
 """Read-only computation over the stored data: SQL over account views, a safe
 calculator, and cross-course clash detection.
 
-``run_query`` opens its own read-only SQLite connection, defines temporary
-views limited to one account, and installs an authorizer that allows
-nothing but SELECT over those views (and plain functions). Other accounts'
-rows, the assistant's conversations and any write are out of reach; results
-are capped in rows and time.
+``run_query`` copies one account's rows into a private in-memory database
+(attaching the real one read-only, then detaching it) and only then runs the
+query there, under an authorizer that allows nothing but SELECT over those
+tables and plain functions. The real database is not reachable from the
+query at all, so no name it defines (a CTE, an alias) can stand in for an
+allowed table. Other accounts' rows, the assistant's conversations and any
+write are out of reach; results are capped in rows and time.
 """
 
 from __future__ import annotations
@@ -38,7 +40,7 @@ VIEWS = {
     "coverage": "SELECT course_canvas_id AS course_id, category, status, collected_count, reason FROM main.coverage "
                 "WHERE account_id={a}",
 }
-VIEW_HELP = ("Views (one account only): items(id, item_type, course_id, canvas_id, title, source_url, presence, "
+VIEW_HELP = ("Tables (one account only): items(id, item_type, course_id, canvas_id, title, source_url, presence, "
              "first_observed_at, last_observed_at); fields(item_id, field, value_json, last_observed_at) - use "
              "json_extract(value_json, '$') or '$.iso' for dates; courses(course_id, title, source_url); changes(id, item_id, "
              "kind, field, old_json, new_json, observed_at, baseline); notes(id, kind, title, body, task_state, local_due, "
@@ -51,22 +53,22 @@ def run_query(db_path, account_id: int, sql: str) -> dict:
         raise InvalidInput("sql is required")
     if len(sql) > 8000:
         raise InvalidInput("the query is too long")
-    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, check_same_thread=False)
+    conn = sqlite3.connect(":memory:", uri=True, check_same_thread=False)
     try:
-        conn.row_factory = sqlite3.Row
         a = int(account_id)
+        # One account's rows, copied before any user SQL runs; the real database is detached again.
+        conn.execute("ATTACH DATABASE ? AS src", (f"file:{db_path}?mode=ro",))
         for name, body in VIEWS.items():
-            conn.execute(f"CREATE TEMP VIEW {name} AS {body.format(a=a)}")
-        allowed = set(VIEWS)
-
+            conn.execute(f"CREATE TABLE {name} AS {body.replace('main.', 'src.').format(a=a)}")
+        conn.commit()
+        conn.execute("DETACH DATABASE src")
         def authorizer(action, arg1, arg2, dbname, source):
             if action == sqlite3.SQLITE_SELECT:
                 return sqlite3.SQLITE_OK
             if action == sqlite3.SQLITE_READ:
-                # Reading a base table is fine only from inside one of our views.
-                if (arg1 in allowed and dbname == "temp") or source in allowed:
-                    return sqlite3.SQLITE_OK
-                return sqlite3.SQLITE_DENY
+                # This database holds nothing but the copies (ATTACH is refused below), so any table or CTE
+                # read is one of them or built from them; only SQLite's own schema tables stay closed.
+                return sqlite3.SQLITE_DENY if (arg1 or "").startswith("sqlite_") else sqlite3.SQLITE_OK
             if action == sqlite3.SQLITE_FUNCTION:
                 return sqlite3.SQLITE_DENY if (arg2 or "").lower() in ("load_extension", "readfile", "writefile") else sqlite3.SQLITE_OK
             if action == sqlite3.SQLITE_RECURSIVE:
@@ -84,10 +86,10 @@ def run_query(db_path, account_id: int, sql: str) -> dict:
             if "interrupted" in msg:
                 msg = f"the query took longer than {MAX_SECONDS:g} s"
             elif "not authorized" in msg or "prohibited" in msg:
-                msg = "only SELECT over the views is allowed (" + VIEW_HELP + ")"
+                msg = "only SELECT over these tables is allowed (" + VIEW_HELP + ")"
             raise InvalidInput(f"query failed: {msg}", code="query_failed") from e
         cols = [d[0] for d in cur.description or []]
-        out = [[r[c] for c in cols] for r in rows[:MAX_ROWS]]
+        out = [list(r) for r in rows[:MAX_ROWS]]          # by position: column names can repeat
         return {"columns": cols, "rows": out, "row_count": len(out), "truncated": len(rows) > MAX_ROWS}
     finally:
         conn.close()
