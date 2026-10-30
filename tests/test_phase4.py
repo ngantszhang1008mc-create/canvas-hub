@@ -233,6 +233,7 @@ def test_every_control_has_an_accessible_name(hub, account, fixture_pkg):
 # ---- optional OCR ------------------------------------------------------------------------------------
 STUB_TESSERACT = """#!/bin/sh
 if [ "$1" = "--version" ]; then echo "tesseract 5.3.4 (stub)"; exit 0; fi
+if grep -q UNREADABLE "$1"; then echo "Error: cannot read image" >&2; exit 1; fi
 CONF="${STUB_CONF:-91}"
 printf 'level\\tpage_num\\tblock_num\\tpar_num\\tline_num\\tword_num\\tleft\\ttop\\twidth\\theight\\tconf\\ttext\\n'
 printf '1\\t1\\t0\\t0\\t0\\t0\\t0\\t0\\t100\\t100\\t-1\\t\\n'
@@ -323,3 +324,21 @@ def test_real_tesseract_reads_a_rendered_line(tmp_path, monkeypatch):
     img.save(p)
     r = ocr.ocr_file(p, ".png", "eng")
     assert "Midterm" in r.text and r.confidence and r.confidence > 50
+
+
+def test_documents_ocr_cannot_read_do_not_block_the_rest(hub, ocr_stubs):
+    hub.resources.set_ocr_settings(True)
+    bad = [hub.resources.store_bytes(f"UNREADABLE scan {i}".encode(), "image/png") for i in range(11)]
+    good = hub.resources.store_bytes(b"a readable photo", "image/png")
+    for sha in [*bad, good]:
+        hub.resources.extract(sha, None)       # stored while OCR could not run yet: pending
+    with hub.db.tx() as c:
+        c.execute("UPDATE resources SET extraction_tool=NULL, extraction_status='image_only'")
+    first = hub.run_ocr(limit=10)
+    assert [x["status"] for x in first["processed"]] == ["image_only"] * 10 and first["failed"] == 10
+    second = hub.run_ocr(limit=10)                                    # the queue moves on past the failures
+    assert {x["resource_id"]: x["status"] for x in second["processed"]}[good] == "ocr"
+    assert second["pending"] == 0 and second["failed"] == 11
+    retry = hub.run_ocr(limit=50, retry_failed=True)                  # failures are retried only on request
+    assert {x["resource_id"] for x in retry["processed"]} == set(bad) and retry["failed"] == 11
+    assert "OCR failed" in retry["processed"][0]["detail"]

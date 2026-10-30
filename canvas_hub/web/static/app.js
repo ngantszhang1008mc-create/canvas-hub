@@ -1086,7 +1086,10 @@ function ocrCard(s) {
         if (r) mount(result, h("ul", { class: "list" }, r.processed.map((x) => h("li", null, x.filename || x.resource_id.slice(0, 12), " — ",
           pill(x.status === "ocr" ? "ok" : "warn", x.status === "ocr" ? "text read" : x.status === "ocr_low_confidence" ? "low confidence" : x.status),
           x.confidence != null ? ` ${Math.round(x.confidence)}%` : ""))), h("p", { class: "tiny muted" }, `${r.pending} still to read`));
-      } }, `Read ${Math.min(10, s.pending)} of ${s.pending} stored document${s.pending === 1 ? "" : "s"}`) : null),
+      } }, `Read ${Math.min(10, s.pending)} of ${s.pending} stored document${s.pending === 1 ? "" : "s"}`) : null,
+      s.enabled && s.tesseract && s.failed ? h("button", { class: "ghost", onclick: async () => {
+        const r = await guard(() => api("/api/ocr/run", { method: "POST", body: { limit: 10, retry_failed: true } }));
+        if (r) { toast(`${r.failed} still could not be read`); route(); } } }, `Retry ${s.failed} that could not be read`) : null),
     result);
 }
 

@@ -31,6 +31,7 @@ _MEDIA_TYPES = {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm", ".mp3", ".m4a",
 _ARCHIVE_TYPES = {".zip", ".rar", ".7z", ".tar", ".gz"}
 
 _extract_lock = threading.Lock()
+OCR_FAILED_TOOL = "tesseract: failed"      # tried and failed; retried only on request, so it cannot block the queue
 OCR_PENDING = ("extraction_status IN ('image_only','needs_ocr') AND (extraction_tool IS NULL OR "
                "extraction_tool NOT LIKE 'tesseract%')")
 
@@ -65,9 +66,13 @@ class ResourceService:
         """Stored documents that OCR could read but has not yet."""
         return self.db.one(f"SELECT COUNT(*) n FROM resources WHERE {OCR_PENDING}")["n"]
 
-    def ocr_pending_ids(self, limit: int) -> list[str]:
-        return [r["id"] for r in self.db.query(f"SELECT id FROM resources WHERE {OCR_PENDING} ORDER BY created_at LIMIT ?",
-                                               (limit,))]
+    def ocr_failed(self) -> int:
+        return self.db.one("SELECT COUNT(*) n FROM resources WHERE extraction_tool=?", (OCR_FAILED_TOOL,))["n"]
+
+    def ocr_pending_ids(self, limit: int, *, retry_failed: bool = False) -> list[str]:
+        where, params = (("extraction_tool=?", (OCR_FAILED_TOOL,)) if retry_failed else (OCR_PENDING, ()))
+        return [r["id"] for r in self.db.query(f"SELECT id FROM resources WHERE {where} ORDER BY created_at LIMIT ?",
+                                               (*params, limit))]
 
     def _try_ocr(self, path: Path, ext: str, fallback: tuple) -> tuple:
         """(status, detail, text, tool, confidence): OCR when it is switched on and installed; otherwise, or when it
@@ -79,7 +84,7 @@ class ResourceService:
         try:
             r = ocr.ocr_file(path, ext, s["lang"])
         except (RuntimeError, OSError, subprocess.SubprocessError, ValueError) as e:
-            return (fallback[0], f"{fallback[1]}; OCR failed: {str(e)[:200]}", *fallback[2:], None)
+            return (fallback[0], f"{fallback[1]}; OCR failed: {str(e)[:200]}", fallback[2], OCR_FAILED_TOOL, None)
         if not r.text.strip() or len(r.text.strip()) <= len(fallback[2] or ""):
             return (fallback[0], f"{fallback[1]}; OCR found no more text", fallback[2], r.tool, None)
         low = r.confidence is None or r.confidence < ocr.LOW_CONFIDENCE

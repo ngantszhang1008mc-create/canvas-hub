@@ -64,12 +64,12 @@ class Hub:
     def rebuild_search(self, account_id: int | None = None) -> int:
         return self.search.rebuild(account_id, extracted_text_for=self.resources.extracted_text_for)
 
-    def run_ocr(self, limit: int = 10) -> dict:
+    def run_ocr(self, limit: int = 10, *, retry_failed: bool = False) -> dict:
         """OCR stored photos and scanned PDFs (when switched on) and make the new text searchable."""
         if not self.resources.ocr_settings()["enabled"]:
             raise InvalidInput("OCR is off; switch it on first", code="ocr_off")
         done = []
-        for sha in self.resources.ocr_pending_ids(max(1, min(int(limit), 50))):
+        for sha in self.resources.ocr_pending_ids(max(1, min(int(limit), 50)), retry_failed=retry_failed):
             rows = self.db.query("""SELECT ir.item_id, ir.filename, i.account_id, i.title FROM item_resources ir
                                     JOIN items i ON i.id=ir.item_id WHERE ir.resource_id=?""", (sha,))
             r = self.resources.extract(sha, rows[0]["filename"] if rows else None, force=True)
@@ -80,7 +80,7 @@ class Hub:
                         self.search.index_resource(c, x["account_id"], x["item_id"], sha, x["filename"] or x["title"] or "", text)
             done.append({"resource_id": sha, "filename": rows[0]["filename"] if rows else None,
                          "status": r["extraction_status"], "confidence": r["ocr_confidence"], "detail": r["extraction_detail"]})
-        return {"processed": done, "pending": self.resources.ocr_pending()}
+        return {"processed": done, "pending": self.resources.ocr_pending(), "failed": self.resources.ocr_failed()}
 
     def delete_account_data(self, account_id: int, *, confirm: str) -> dict:
         """Delete all stored course data and notes for one account. Requires

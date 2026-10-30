@@ -223,6 +223,7 @@ class HubAPI:
     def ocr_status(self) -> dict:
         from . import ocr
         return {**self.hub.resources.ocr_settings(), **ocr.status(), "pending": self.hub.resources.ocr_pending(),
+                "failed": self.hub.resources.ocr_failed(),
                 "low_confidence_below": ocr.LOW_CONFIDENCE}
 
     def set_ocr(self, data: dict) -> dict:
@@ -232,7 +233,7 @@ class HubAPI:
         return self.ocr_status()
 
     def run_ocr(self, data: dict) -> dict:
-        return self.hub.run_ocr(int(data.get("limit") or 10))
+        return self.hub.run_ocr(int(data.get("limit") or 10), retry_failed=bool(data.get("retry_failed")))
 
     def custom_html_settings(self, account_id) -> dict:
         return self.hub.settings.get(self._acct(account_id)["id"], "custom_html")
