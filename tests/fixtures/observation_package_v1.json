@@ -1,0 +1,86 @@
+{
+  "format": "canvas-hub.observations",
+  "format_version": 1,
+  "package_id": "fixture-demo-0001",
+  "generated_at": "2026-10-30T02:00:00Z",
+  "collector": {"name": "example-trusted-collector", "version": "1.0.0", "method": "manual_fixture"},
+  "identity": {
+    "origin": "https://canvas.example.edu",
+    "canvas_user_id": "100001",
+    "display_name": "Sample Student",
+    "time_zone": "Asia/Hong_Kong",
+    "time_zone_source": "fixture"
+  },
+  "run": {"mode": "baseline", "scope": {"courses": "current"}, "started_at": "2026-10-30T01:58:00Z", "finished_at": "2026-10-30T02:00:00Z"},
+  "items": [
+    {
+      "type": "course", "course_id": "4242", "canvas_id": "4242", "url": "https://canvas.example.edu/courses/4242",
+      "title": "SAMPLE1010 Example Course", "observed_at": "2026-10-30T01:58:10Z", "method": "dom:all_courses", "depth": "index",
+      "fields": {
+        "name": "SAMPLE1010 Example Course", "title": "SAMPLE1010 Example Course", "course_code": "SAMPLE1010",
+        "term": "2026-27 Fall", "listing_section": "current", "published": true, "access": "accessible",
+        "navigation": [{"id": "home", "label": "Home"}, {"id": "assignments", "label": "Assignments"}]
+      }
+    },
+    {
+      "type": "syllabus", "course_id": "4242", "source_key": "syllabus:4242",
+      "url": "https://canvas.example.edu/courses/4242/assignments/syllabus", "title": "Syllabus: SAMPLE1010",
+      "observed_at": "2026-10-30T01:58:20Z", "method": "canvas_api_session", "depth": "body",
+      "fields": {
+        "title": "Syllabus: SAMPLE1010",
+        "body": "<p>Weekly quizzes 20%, project 40%, final 40%.</p><p>See <a href=\"/courses/4242/pages/project-brief\">the project brief</a>.</p>"
+      },
+      "links": [{"relation": "body_link", "label": "the project brief", "to": {"type": "page", "course_id": "4242", "canvas_id": "5001", "title": "Project brief"}}]
+    },
+    {
+      "type": "page", "course_id": "4242", "canvas_id": "5001", "url": "https://canvas.example.edu/courses/4242/pages/project-brief",
+      "title": "Project brief", "observed_at": "2026-10-30T01:58:30Z", "method": "canvas_api_session", "depth": "body",
+      "source_updated_at": "2026-09-15T08:00:00Z",
+      "fields": {
+        "title": "Project brief", "slug": "project-brief", "published": true,
+        "source_updated_at": {"raw": "2026-09-15T08:00:00Z", "iso": "2026-09-15T08:00:00Z", "source": "canvas_api_iso8601", "precision": "instant", "tz_evidence": "offset_in_source"},
+        "body": "<p>Build a small data visualisation. Teams of two.</p>"
+      }
+    },
+    {
+      "type": "assignment", "course_id": "4242", "canvas_id": "7001", "url": "https://canvas.example.edu/courses/4242/assignments/7001",
+      "title": "Project proposal", "observed_at": "2026-10-30T01:59:00Z", "method": "canvas_api_session", "depth": "detail",
+      "fields": {
+        "title": "Project proposal", "points_possible": 10, "submission_types": ["online_upload"],
+        "due_at": {"raw": "2026-11-06T15:59:00Z", "iso": "2026-11-06T15:59:00Z", "source": "canvas_api_iso8601", "precision": "instant", "tz_evidence": "offset_in_source"},
+        "unlock_at": null,
+        "description": "<p>One page describing your dataset and question.</p>"
+      }
+    },
+    {
+      "type": "assignment", "course_id": "4242", "canvas_id": "7002", "url": "https://canvas.example.edu/courses/4242/assignments/7002",
+      "title": "Reading response", "observed_at": "2026-10-30T01:59:05Z", "method": "dom:assignment_detail", "depth": "detail",
+      "fields": {
+        "title": "Reading response",
+        "due_at": {"raw": "Nov 13 at 11:59pm", "iso": null, "source": "display_text", "precision": "unresolved", "tz_evidence": null, "note": "year not shown; not inferred", "month_day": "11-13"}
+      }
+    },
+    {
+      "type": "submission", "course_id": "4242", "canvas_id": "7001", "title": "Submission: Project proposal",
+      "url": "https://canvas.example.edu/courses/4242/assignments/7001/submissions/self",
+      "observed_at": "2026-10-30T01:59:10Z", "method": "canvas_api_session", "depth": "detail",
+      "fields": {
+        "workflow_state": "unsubmitted", "submitted_at": null, "late": false, "missing": false, "excused": false,
+        "score": null, "grade": null, "grade_visible": false
+      },
+      "links": [{"relation": "submission_for", "to": {"type": "assignment", "course_id": "4242", "canvas_id": "7001"}}]
+    }
+  ],
+  "coverage": [
+    {"course_id": null, "category": "courses", "status": "complete", "index_depth": "complete", "body_depth": "not_applicable",
+     "attachment_depth": "not_applicable", "collected_count": 1, "observed_at": "2026-10-30T01:58:10Z",
+     "detail": {"source": "Courses -> All Courses"}},
+    {"course_id": "4242", "category": "assignments", "status": "complete", "index_depth": "complete", "body_depth": "complete",
+     "attachment_depth": "not_applicable", "collected_count": 2, "observed_at": "2026-10-30T01:59:10Z",
+     "absence_inference": {"item_types": ["assignment"]}},
+    {"course_id": "4242", "category": "files", "status": "not_exposed", "index_depth": "not_applicable", "body_depth": "not_applicable",
+     "attachment_depth": "not_applicable", "observed_at": "2026-10-30T01:58:10Z",
+     "reason": "Course navigation does not show Files"}
+  ],
+  "presence_checks": []
+}

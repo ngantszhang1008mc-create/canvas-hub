@@ -1,0 +1,35 @@
+[project]
+name = "canvas-hub"
+version = "0.1.0"
+description = "Personal local Canvas information hub: browser-based collection, durable history, search."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115,<1",
+  "uvicorn>=0.30,<1",
+  "pydantic>=2.7,<3",
+  "playwright==1.63.0",
+  "nh3>=0.2.17",
+  "markitdown[pdf,docx,pptx,xlsx,xls]>=0.1.2,<0.2",
+  "anthropic>=1",
+  "openai>=1",
+  "mcp>=1",
+]
+
+[project.scripts]
+canvas-hub = "canvas_hub.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8", "httpx>=0.27"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["canvas_hub"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["browser: runs real Chromium against the synthetic Canvas server (slower)"]
+filterwarnings = ["ignore::DeprecationWarning:fastapi.testclient", "ignore:Using `httpx`"]
