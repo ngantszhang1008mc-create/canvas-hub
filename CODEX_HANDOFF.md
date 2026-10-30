@@ -464,6 +464,7 @@ canvas-hub mcp --allow-settings     # + scope changes
   - Requests stream, with `eager_input_streaming` on each tool. Inputs are validated before execution; truncated or invalid inputs are returned to the model as errors and never executed.
   - For `claude-fable-5-1`, `claude-opus-5-5`, `claude-opus-5` and `claude-sonnet-5-5`, requests opt into the server-side refusal fallback (`fallbacks: "default"`, beta `server-side-fallback-2026-07-01`). Remove that in `assistant/providers.py` if it isn't wanted.
   - Claude's content blocks are stored and replayed verbatim; history is append-only.
+- **Thinking on OpenAI-compatible providers:** a Thinking setting maps to `thinking: {type}` plus `reasoning_effort` for DeepSeek (preset model `deepseek-flash`), and to `reasoning_effort` elsewhere. An "Extra request settings" JSON object is merged into the request body; `model`, `messages`, `tools`, `tool_choice` and `stream` cannot be overridden. Any `reasoning_content` a provider returns is stored and sent back on every later request, which DeepSeek's thinking mode requires once tools are used.
 - **Agent loop:** at most 16 steps. Conversations are stored in `assistant_conversations` and `assistant_messages` (migration `0002_assistant.sql`). The UI polls the conversation for progress, and the user can stop a run.
 - **Settings and key:** stored in `<home>/runtime/assistant.json` (mode 0600), outside `data/`, so the key is never included in backups or exports. It is never returned by the API; only a masked hint is. Each permission (`notes`, `collect`, `settings`) is a user toggle; `read` is always on.
 - **Privacy:** the user is told that questions, and the data the assistant reads, go to the chosen provider. Nothing is sent until they configure a provider and ask something.
@@ -488,7 +489,7 @@ Notes for that work:
 
 ### Automated tests (ran in this environment, Linux, Python 3.13)
 
-`uv run pytest -q` gives **57 passed** (about 45 s). `tests/test_agents.py` covers the MCP server over stdio, tool permissions and validation, account binding, the assistant loop with both provider types against scripted endpoints, permission gating, key storage and masking, and the Claude API request shape.
+`uv run pytest -q` gives **59 passed** (about 45 s). `tests/test_agents.py` covers the MCP server over stdio, tool permissions and validation, account binding, the assistant loop with both provider types against scripted endpoints, permission gating, key storage and masking, and the Claude API request shape.
 
 **`tests/test_parsing.py`** covers:
 - URL normalization and rejection, and link classification.

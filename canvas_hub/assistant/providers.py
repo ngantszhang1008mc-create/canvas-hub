@@ -164,6 +164,8 @@ class OpenAICompatibleProvider:
         key = cfg.get("api_key") or os.environ.get("OPENAI_API_KEY") or "not-needed"
         self.client = openai.OpenAI(api_key=key, base_url=(cfg.get("base_url") or "").strip() or None,
                                     timeout=600.0, max_retries=2)
+        self.extra_body = thinking_params(cfg.get("preset"), cfg.get("thinking") or "")
+        self.extra_body.update(cfg.get("extra_params") or {})
 
     def _messages(self, system: str, transcript: list[dict]) -> list[dict]:
         out: list[dict] = [{"role": "system", "content": system}]
@@ -173,6 +175,11 @@ class OpenAICompatibleProvider:
             elif m["role"] == "assistant":
                 text, calls = _neutral_assistant(m)
                 d: dict = {"role": "assistant", "content": text or None}
+                reasoning = (m.get("raw") or {}).get("reasoning_content")
+                if reasoning is not None:
+                    # Thinking models (e.g. DeepSeek) require their reasoning to be sent
+                    # back on later requests once tools are involved.
+                    d["reasoning_content"] = reasoning
                 if calls:
                     d["tool_calls"] = [{"id": c["id"], "type": "function",
                                         "function": {"name": c["name"], "arguments": json.dumps(c.get("input") or {})}}
@@ -188,6 +195,8 @@ class OpenAICompatibleProvider:
     def complete(self, system: str, transcript: list[dict], tools: list[dict]) -> Turn:
         sdk = self._sdk
         kwargs = dict(model=self.model, messages=self._messages(system, transcript))
+        if self.extra_body:
+            kwargs["extra_body"] = dict(self.extra_body)
         if tools:
             kwargs["tools"] = [{"type": "function", "function": {"name": t["name"], "description": t["description"],
                                                                  "parameters": t["schema"]}} for t in tools]
@@ -225,10 +234,36 @@ class OpenAICompatibleProvider:
             for c in calls:
                 c.input_error = "tool input was cut off by the output limit; not executed"
         usage = getattr(resp, "usage", None)
-        return Turn(text=m.content or "", tool_calls=calls, stop=stop, raw={"provider": "openai_compatible"},
+        raw = {"provider": "openai_compatible"}
+        reasoning = getattr(m, "reasoning_content", None)
+        if reasoning is not None:
+            raw["reasoning_content"] = reasoning
+        return Turn(text=m.content or "", tool_calls=calls, stop=stop, raw=raw,
                     model=getattr(resp, "model", None),
                     usage={"input_tokens": getattr(usage, "prompt_tokens", None),
                            "output_tokens": getattr(usage, "completion_tokens", None)} if usage else None)
+
+
+THINKING_LEVELS = ("", "off", "low", "medium", "high", "xhigh", "max")
+# Request fields the extra settings may not override (the app owns them).
+RESERVED_PARAMS = {"model", "messages", "tools", "tool_choice", "stream", "functions", "function_call"}
+
+
+def thinking_params(preset: str | None, level: str) -> dict:
+    """Request fields for a thinking level on OpenAI-compatible providers.
+
+    DeepSeek: ``thinking: {type: enabled|disabled}`` plus ``reasoning_effort``.
+    Others: the standard ``reasoning_effort`` field. Anything provider-specific
+    beyond that goes in the user's extra request settings."""
+    if not level:
+        return {}
+    if preset == "deepseek":
+        if level == "off":
+            return {"thinking": {"type": "disabled"}}
+        return {"thinking": {"type": "enabled"}, "reasoning_effort": level}
+    if level == "off":
+        return {}
+    return {"reasoning_effort": level}
 
 
 def make_provider(cfg: dict):

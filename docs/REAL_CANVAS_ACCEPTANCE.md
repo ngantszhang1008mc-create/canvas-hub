@@ -94,3 +94,4 @@ Don't paste your key into chat; enter it only in the app.
 | 8.3 | Ask "Check Canvas for new announcements in MATH1023" (while signed in) | It starts a quick check limited to that course, waits for it, then answers. The job also appears under **Collection**. |
 | 8.4 | Ask "Add a to-do to start the next assignment on Saturday" | The to-do appears under **Notes & tasks**; nothing changes in Canvas |
 | 8.5 | Run `uv run canvas-hub mcp` and register it in Codex or Claude Code (command shown under **Data & settings → Connect other agents**) | The agent can list your courses and deadlines. Write tools appear only with `--allow-notes` / `--allow-writes`. |
+| 8.6 | DeepSeek: provider **DeepSeek**, model `deepseek-flash`, Thinking **max**, then **Save & test**; then ask 8.2 again | *Connected*, and the multi-step answer completes. If the test is rejected, try **high** to see whether the hosted API accepts `max`. |

@@ -96,6 +96,17 @@ class FakeLLM:
     def _openai(self, h, body):
         msgs = body["messages"]
         tool_msgs = [m for m in msgs if m["role"] == "tool"]
+        thinking = (body.get("thinking") or {}).get("type") == "enabled"
+        if thinking and any(m["role"] == "assistant" and m.get("tool_calls") and "reasoning_content" not in m for m in msgs):
+            # Mirrors DeepSeek's thinking-mode rule for tool calls.
+            err = json.dumps({"error": {"message": "The `reasoning_content` in the thinking mode must be passed back to the API.",
+                                        "type": "invalid_request_error"}}).encode()
+            h.send_response(400)
+            h.send_header("Content-Type", "application/json")
+            h.send_header("Content-Length", str(len(err)))
+            h.end_headers()
+            h.wfile.write(err)
+            return
         step = self._next(len(tool_msgs)) if body.get("tools") else None
         if step:
             name, args = step
@@ -106,6 +117,8 @@ class FakeLLM:
             last = tool_msgs[-1]["content"] if tool_msgs else "OK"
             message = {"role": "assistant", "content": "Answer based on: " + last[:300]}
             finish = "stop"
+        if thinking:
+            message["reasoning_content"] = f"thinking step {len(tool_msgs)}"
         resp = {"id": "chatcmpl-fake", "object": "chat.completion", "created": 0, "model": body["model"],
                 "choices": [{"index": 0, "message": message, "finish_reason": finish}],
                 "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}}

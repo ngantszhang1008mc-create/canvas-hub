@@ -1054,19 +1054,39 @@ function assistantSettingsCard(cfg) {
   const pSettings = h("input", { type: "checkbox", checked: cfg.permissions.settings ? true : null });
   const baseField = h("label", { class: "field" }, h("span", null, "Base URL"), base);
   const effortField = h("label", { class: "field" }, h("span", null, "Effort (Claude)"), effort);
+  const thinking = h("select");
+  const thinkingField = h("label", { class: "field" }, h("span", null, "Thinking"), thinking);
+  const extra = h("textarea", { rows: 2, class: "mono", placeholder: '{"reasoning_effort": "max"}' });
+  extra.value = cfg.extra_params && Object.keys(cfg.extra_params).length ? JSON.stringify(cfg.extra_params) : "";
+  const extraField = h("label", { class: "field", style: "grid-column:1/-1" },
+    h("span", null, "Extra request settings (JSON, optional — sent as-is to the provider)"), extra);
+  const fillThinking = (presetId) => {
+    const opts = presetId === "deepseek"
+      ? [["", "provider default"], ["off", "off"], ["low", "low"], ["high", "high"], ["max", "max"]]
+      : [["", "provider default"], ["low", "low"], ["medium", "medium"], ["high", "high"]];
+    const cur = thinking.value || cfg.thinking || "";
+    mount(thinking, opts.map(([v, l]) => h("option", { value: v, selected: v === cur ? true : null }, l)));
+  };
   const hint = h("div", { class: "tiny muted" });
   const sync = () => {
     const p = cfg.presets.find((x) => x.id === presetSel.value);
     const isAnthropic = p && p.provider === "anthropic";
     effortField.hidden = !isAnthropic;
+    thinkingField.hidden = !p || isAnthropic;
+    extraField.hidden = !p || isAnthropic;
+    fillThinking(p ? p.id : "");
     baseField.querySelector("span").textContent = isAnthropic ? "Base URL (leave empty for the Claude API)" : "Base URL";
     if (p && presetSel.value !== cfg.preset) { base.value = p.base_url; if (p.model) model.value = p.model; else if (cfg.provider !== p.provider) model.value = ""; }
-    mount(hint, p ? (isAnthropic ? "Without a pasted key, ANTHROPIC_API_KEY or an `ant auth login` profile is used." : p.id === "ollama" ? "Runs on your own computer; no key and nothing leaves it." : `Key format: ${p.key_hint || "provider API key"}. For OpenAI-compatible providers OPENAI_API_KEY is used if no key is saved.`) : "");
+    mount(hint, p ? (isAnthropic ? "Without a pasted key, ANTHROPIC_API_KEY or an `ant auth login` profile is used." : p.id === "ollama" ? "Runs on your own computer; no key and nothing leaves it." : p.id === "deepseek" ? "Thinking sends thinking:{type} and reasoning_effort, as in DeepSeek's docs; Save & test shows whether your chosen level is accepted." : `Key format: ${p.key_hint || "provider API key"}. For OpenAI-compatible providers OPENAI_API_KEY is used if no key is saved.`) : "");
   };
   presetSel.addEventListener("change", sync); sync();
   const result = h("div", { class: "small" });
   const save = async () => {
-    const body = { base_url: base.value, model: model.value, effort: effort.value,
+    let extraParams = {};
+    if (extra.value.trim()) {
+      try { extraParams = JSON.parse(extra.value); } catch { toast("Extra request settings must be valid JSON", true); return null; }
+    }
+    const body = { base_url: base.value, model: model.value, effort: effort.value, thinking: thinking.value, extra_params: extraParams,
       permissions: { notes: pNotes.checked, collect: pCollect.checked, settings: pSettings.checked } };
     if (presetSel.value) body.preset = presetSel.value;
     if (key.value) body.api_key = key.value;
@@ -1078,7 +1098,7 @@ function assistantSettingsCard(cfg) {
     h("div", { class: "card-head" }, h("h2", null, "Assistant settings"), h("span", { class: "sub" }, "your own API key · stored only on this computer")),
     h("div", { class: "banner info" }, h("div", { class: "b-body small" }, cfg.privacy, " The key is kept in a private file outside your course data, so it is never included in backups or exports.")),
     h("div", { class: "grid cols-2" }, h("label", { class: "field" }, h("span", null, "Provider"), presetSel), h("label", { class: "field" }, h("span", null, "Model"), model),
-      baseField, h("label", { class: "field" }, h("span", null, "API key"), key), effortField),
+      baseField, h("label", { class: "field" }, h("span", null, "API key"), key), effortField, thinkingField, extraField),
     hint,
     h("div", { style: "margin-top:14px" }, h("div", { class: "small strong", style: "margin-bottom:6px" }, "The assistant may"),
       h("div", { class: "perm-list" },

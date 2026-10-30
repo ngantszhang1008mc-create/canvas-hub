@@ -25,7 +25,7 @@ from zoneinfo import ZoneInfo
 
 from ..agent_tools import ToolContext, run_tool, tools_for
 from ..util import InvalidInput, NotFound, now_iso
-from .providers import ANTHROPIC_DEFAULT_MODEL, ProviderError, make_provider
+from .providers import ANTHROPIC_DEFAULT_MODEL, RESERVED_PARAMS, THINKING_LEVELS, ProviderError, make_provider
 
 log = logging.getLogger("canvas_hub.assistant")
 CONFIG_FILE = "assistant.json"
@@ -41,7 +41,7 @@ PRESETS = [
     {"id": "openrouter", "label": "OpenRouter", "provider": "openai_compatible", "base_url": "https://openrouter.ai/api/v1",
      "model": "", "key_hint": "sk-or-…"},
     {"id": "deepseek", "label": "DeepSeek", "provider": "openai_compatible", "base_url": "https://api.deepseek.com/v1",
-     "model": "", "key_hint": "sk-…"},
+     "model": "deepseek-flash", "key_hint": "sk-…"},
     {"id": "ollama", "label": "Local model (Ollama)", "provider": "openai_compatible", "base_url": "http://localhost:11434/v1",
      "model": "", "key_hint": "no key needed"},
     {"id": "custom", "label": "Other OpenAI-compatible endpoint", "provider": "openai_compatible", "base_url": "",
@@ -51,6 +51,7 @@ PRESETS = [
 ]
 DEFAULT_CONFIG = {
     "preset": None, "provider": None, "base_url": "", "model": "", "api_key": "", "effort": "",
+    "thinking": "", "extra_params": {},
     "permissions": {"notes": True, "collect": True, "settings": False},
 }
 
@@ -117,7 +118,8 @@ class AssistantService:
         return {
             "configured": self.configured(cfg),
             "preset": cfg["preset"], "provider": cfg["provider"], "base_url": cfg["base_url"], "model": cfg["model"],
-            "effort": cfg["effort"], "permissions": cfg["permissions"],
+            "effort": cfg["effort"], "thinking": cfg["thinking"], "extra_params": cfg["extra_params"],
+            "permissions": cfg["permissions"],
             "api_key_saved": bool(cfg["api_key"]), "api_key_hint": _mask(cfg["api_key"]), "api_key_from_env": env_key,
             "presets": PRESETS,
             "privacy": "Your questions, and the course data the assistant reads to answer them, are sent to the provider "
@@ -134,7 +136,8 @@ class AssistantService:
 
     def update_config(self, data: dict) -> dict:
         cfg = self._load()
-        allowed = {"preset", "provider", "base_url", "model", "api_key", "effort", "permissions", "clear_key"}
+        allowed = {"preset", "provider", "base_url", "model", "api_key", "effort", "thinking", "extra_params",
+                   "permissions", "clear_key"}
         bad = set(data) - allowed
         if bad:
             raise InvalidInput(f"unknown settings {sorted(bad)}")
@@ -159,6 +162,20 @@ class AssistantService:
             if data["effort"] not in ("", None, "low", "medium", "high", "xhigh", "max"):
                 raise InvalidInput("effort must be low, medium, high, xhigh or max")
             cfg["effort"] = data["effort"] or ""
+        if "thinking" in data:
+            if (data["thinking"] or "") not in THINKING_LEVELS:
+                raise InvalidInput(f"thinking must be one of {[x for x in THINKING_LEVELS if x]}")
+            cfg["thinking"] = data["thinking"] or ""
+        if "extra_params" in data:
+            ep = data["extra_params"] or {}
+            if not isinstance(ep, dict):
+                raise InvalidInput("extra request settings must be a JSON object, e.g. {\"reasoning_effort\": \"max\"}")
+            if len(json.dumps(ep)) > 4000:
+                raise InvalidInput("extra request settings are too long")
+            clash = sorted(set(ep) & RESERVED_PARAMS)
+            if clash:
+                raise InvalidInput(f"these fields are set by Canvas Hub and cannot be overridden: {clash}")
+            cfg["extra_params"] = ep
         if data.get("clear_key"):
             cfg["api_key"] = ""
         if data.get("api_key"):
