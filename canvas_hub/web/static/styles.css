@@ -140,6 +140,8 @@ code, .mono { font-family: var(--mono); font-size: 12.5px; }
 .topbar .grow { flex: 1; }
 .topbar .strong { font-family: var(--serif); font-weight: 600; font-size: 15px; }
 .main { padding: 34px 40px 80px; max-width: 1140px; width: 100%; }
+/* On wide screens pages grow a little and sit in the middle, instead of leaving half the window empty on the right. */
+@media (min-width: 1700px) { .main { max-width: 1480px; margin-inline: auto; } }
 .main:focus { outline: none; }
 .page-head {
   display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; flex-wrap: wrap;
@@ -335,7 +337,7 @@ mark { background: color-mix(in srgb, #e9b949 45%, transparent); color: inherit;
 .kv .t { color: var(--text-3); font-size: 11.5px; white-space: nowrap; text-align: right; font-variant-numeric: tabular-nums; }
 @media (max-width: 640px) { .kv { grid-template-columns: 1fr; } .kv .k { border-bottom: 0; padding-bottom: 0; } .kv .t { text-align: left; } }
 
-.tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--rule); margin-bottom: 18px; overflow-x: auto; }
+.tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--rule); margin-bottom: 18px; overflow-x: auto; overflow-y: hidden; }
 .tabs button { border: 0; border-radius: 0; background: none; padding: 8px 10px; color: var(--text-2); border-bottom: 2px solid transparent; margin-bottom: -1px; white-space: nowrap; }
 .tabs button:hover { background: transparent; color: var(--ink); }
 .tabs button.active { color: var(--ink); border-bottom-color: var(--mark); font-weight: 650; }
@@ -810,7 +812,10 @@ body.chat-focus .sidebar, body.chat-focus .topbar, body.chat-focus .main > .page
 body.chat-focus .main { max-width: none; padding: 10px 24px 12px; }
 body.chat-focus .main > .tabs { margin-bottom: 10px; }
 body.chat-focus .chat-scroll { overscroll-behavior: contain; }     /* the page itself has nowhere to scroll */
-body.chat-focus .chat-log, body.chat-focus .chat-status, body.chat-focus .chat-empty,
-body.chat-focus .composer > *, body.chat-focus .chat-foot { width: 100%; max-width: 920px; margin-left: auto; margin-right: auto; }
-body.chat-focus .chat-foot { box-sizing: border-box; max-width: 960px; }     /* its own 20px padding lines it up with the composer */
+/* The chat page uses the whole width of the window; messages and the composer keep a readable width, centred. */
+.main.fill { max-width: none; }
+.main.fill .chat-log, .main.fill .chat-status, .main.fill .chat-empty,
+.main.fill .composer > *, .main.fill .chat-foot { width: 100%; max-width: 920px; margin-left: auto; margin-right: auto; }
+.main.fill .chat-foot { box-sizing: border-box; max-width: 960px; }     /* its own 20px padding lines it up with the composer */
+@media (min-width: 1600px) { .assistant-layout { grid-template-columns: 260px minmax(0, 1fr); } }
 @media (max-width: 860px) { body.chat-focus .main { padding: 8px 10px; } }

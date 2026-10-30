@@ -229,3 +229,26 @@ def test_a_long_chat_with_a_table_never_stretches_the_page(hub, account, fixture
         expect(pg.locator("#sidebar")).to_be_in_viewport()
         b.close()
     assert not errors, errors
+
+
+def test_wide_screens_use_the_width(hub, account):
+    # On a wide screen the chat fills the window (its text and composer stay a readable width, centred), and
+    # other pages sit in the middle rather than leaving the right half empty.
+    from playwright.sync_api import expect, sync_playwright
+    with serve(hub, [], answer=ANSWER) as (base, tok, _), sync_playwright() as p:
+        b = p.chromium.launch()
+        pg = b.new_page(viewport={"width": 2560, "height": 1300})
+        pg.goto(f"{base}/?token={tok}")
+        pg.goto(f"{base}/#/assistant")
+        expect(pg.locator(".composer textarea")).to_be_visible()
+        col = pg.locator(".main-col").bounding_box()
+        chat, box = pg.locator(".chat").bounding_box(), pg.locator(".composer textarea").bounding_box()
+        assert chat["x"] + chat["width"] > col["x"] + col["width"] - 60          # reaches the right edge
+        assert box["width"] <= 930                                              # the composer stays readable
+        assert abs((box["x"] - chat["x"]) - (chat["x"] + chat["width"] - box["x"] - box["width"])) < 4   # centred
+        pg.goto(f"{base}/#/overview")
+        expect(pg.locator(".main > .page-head")).to_be_visible()
+        main = pg.locator("#main").bounding_box()
+        left, right = main["x"] - col["x"], col["x"] + col["width"] - main["x"] - main["width"]
+        assert main["width"] > 1300 and abs(left - right) < 4
+        b.close()
