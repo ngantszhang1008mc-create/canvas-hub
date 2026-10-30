@@ -199,7 +199,7 @@ class QueryService:
             ln["collected"] = bool(ln["collected"])
         item["resources"] = [dict(r) for r in self.db.query(
             """SELECT ir.resource_id, ir.filename, ir.revision, ir.observed_at, r.size, r.content_type,
-               r.extraction_status, r.extraction_detail, r.extracted_chars
+               r.extraction_status, r.extraction_detail, r.extracted_chars, r.ocr_confidence
                FROM item_resources ir JOIN resources r ON r.id=ir.resource_id WHERE ir.item_id=? ORDER BY ir.observed_at DESC""",
             (item["id"],))]
         item["discrepancies"] = [

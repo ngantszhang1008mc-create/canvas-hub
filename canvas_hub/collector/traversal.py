@@ -1325,7 +1325,7 @@ class CollectionRun:
                          "extraction_status": ext["extraction_status"]},
                  resources=[{"sha256": sha, "filename": name}], observed_at=now_iso(), depth="detail")
         pkg.commit()
-        if ext["extraction_status"] not in ("ok",):
+        if ext["extraction_status"] not in ("ok", "ocr", "ocr_low_confidence"):
             self.hub.jobs.update_stats(self.job_id, documents_without_text=1)
 
     # ---- account level --------------------------------------------------------------------------------

@@ -14,7 +14,7 @@ from starlette.concurrency import run_in_threadpool
 
 from ..boundary import HubAPI
 from ..util import HubError, InvalidInput
-from .security import COOKIE, CSP, allowed_hosts, token_ok
+from .security import COOKIE, CSP, SANDBOX_CSP, allowed_hosts, token_ok
 
 log = logging.getLogger("canvas_hub.web")
 mimetypes.add_type("font/woff2", ".woff2")
@@ -56,10 +56,11 @@ def create_app(api: HubAPI, *, token: str, port: int) -> FastAPI:
                 if request.headers.get("x-canvas-hub") != "1":
                     return JSONResponse({"error": "missing_header", "message": "X-Canvas-Hub header required"}, 403)
         resp = await call_next(request)
-        resp.headers["Content-Security-Policy"] = CSP
+        sandbox = path == "/sandbox"
+        resp.headers["Content-Security-Policy"] = SANDBOX_CSP if sandbox else CSP
         resp.headers["X-Content-Type-Options"] = "nosniff"
         resp.headers["Referrer-Policy"] = "no-referrer"
-        resp.headers["X-Frame-Options"] = "DENY"
+        resp.headers["X-Frame-Options"] = "SAMEORIGIN" if sandbox else "DENY"
         resp.headers["Cache-Control"] = "no-store"
         return resp
 
@@ -99,6 +100,11 @@ def create_app(api: HubAPI, *, token: str, port: int) -> FastAPI:
                             "<code>canvas-hub serve</code> (it contains a one-time local access token).</p>",
                             media_type="text/html", status_code=401)
         return FileResponse(STATIC / "index.html", media_type="text/html")
+
+    @app.get("/sandbox")
+    async def sandbox():
+        # A fixed shell: it waits for the HTML and data from the app page (see components.js htmlView).
+        return FileResponse(STATIC / "sandbox.html", media_type="text/html")
 
     @app.get("/static/{name}")
     async def static(name: str):
@@ -476,6 +482,39 @@ def create_app(api: HubAPI, *, token: str, port: int) -> FastAPI:
     @app.put("/api/accounts/{aid}/courses/{cid}/link")
     async def course_link(aid: int, cid: str, request: Request):
         return api.link_courses(aid, cid, await body(request))
+
+    @app.get("/api/ocr")
+    def ocr_get():
+        return api.ocr_status()
+
+    @app.put("/api/ocr")
+    async def ocr_put(request: Request):
+        return api.set_ocr(await body(request))
+
+    @app.post("/api/ocr/run")
+    async def ocr_run(request: Request):
+        data = await body(request)
+        return await run_in_threadpool(api.run_ocr, data)
+
+    @app.get("/api/accounts/{aid}/dashboard")
+    def dashboard(aid: int, days: int = 7):
+        return api.dashboard(aid, days)
+
+    @app.get("/api/accounts/{aid}/custom-html")
+    def custom_html_get(aid: int):
+        return api.custom_html_settings(aid)
+
+    @app.put("/api/accounts/{aid}/custom-html")
+    async def custom_html_put(aid: int, request: Request):
+        return api.set_custom_html_settings(aid, await body(request))
+
+    @app.get("/api/accounts/{aid}/courses/{cid}/grading")
+    def grading_get(aid: int, cid: str):
+        return api.get_grading_rules(aid, cid)
+
+    @app.put("/api/accounts/{aid}/courses/{cid}/grading")
+    async def grading_put(aid: int, cid: str, request: Request):
+        return api.set_grading_rules(aid, cid, await body(request))
 
     @app.get("/api/agents")
     def agents_seen():

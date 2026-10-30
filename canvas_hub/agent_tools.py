@@ -28,7 +28,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
-from . import dates
+from . import dates, projections
 from .htmltools import to_text
 from .model import CATEGORIES, ITEM_TYPES
 from .services.querylayer import VIEW_HELP
@@ -191,7 +191,10 @@ def _item_view(ctx, aid, item_id, body_chars=8000):
         "presence_detail": it["presence_detail"], "first_seen": it["first_observed_at"], "last_read": it["last_observed_at"],
         "freshness": it["freshness"], "fields": fields,
         "documents": [{"resource_id": r["resource_id"], "filename": r["filename"], "extraction": r["extraction_status"],
-                       "chars": r["extracted_chars"]} for r in it["resources"]],
+                       "chars": r["extracted_chars"],
+                       **({"ocr_confidence": r["ocr_confidence"],
+                           "caution": "text read by OCR; check numbers and formulas against the original"}
+                          if r.get("ocr_confidence") is not None else {})} for r in it["resources"]],
         "links": [{"relation": ln["relation"], "item_id": ln["item_id"], "type": ln["item_type"], "title": ln["title"],
                    "read": ln["collected"]} for ln in it["links_out"][:40]],
         "referenced_from": [{"relation": ln["relation"], "item_id": ln["item_id"], "title": ln["title"]}
@@ -652,6 +655,9 @@ def h_show_grade_projector(ctx, a):
     if not spec.get("categories") and a.get("course_id"):
         spec["categories"] = _draft_categories(ctx, aid, str(a["course_id"]))
         spec.setdefault("title", f"What-if grade · course {a['course_id']}")
+        rules_scale = ctx.api.hub.grading.get(aid, str(a["course_id"])).get("scale")
+        if rules_scale and not spec.get("scale"):
+            spec["scale"] = rules_scale
     v = ctx.api.hub.components.create(aid, "grade_projector", spec, conversation_id=ctx.conversation_id)
     if a.get("pin"):
         v = ctx.api.hub.components.pin(aid, v["id"], True)
@@ -660,13 +666,15 @@ def h_show_grade_projector(ctx, a):
 
 def _draft_categories(ctx, aid: int, course_id: str) -> list[dict]:
     lines = h_course_score_lines(ctx, {"course_id": course_id})
+    rules = ctx.api.hub.grading.get(aid, course_id)
     cats: dict[str, dict] = {}
     for b in lines["buckets"]:
         if b["status"] == "excused":            # excused work counts for nothing, not as work still to do
             continue
         g = b.get("group") or "Assignments"
         c = cats.setdefault(g, {"id": re.sub(r"[^\w.:-]", "_", g)[:60] or "g", "name": g,
-                                "weight": lines["group_weights"].get(g), "items": []})
+                                "weight": lines["group_weights"].get(g), "items": [],
+                                "drop_lowest": rules["groups"].get(g, {}).get("drop_lowest", 0)})
         c["items"].append({"id": b["id"], "label": b["label"], "max": b["max"], "item_id": b.get("item_id"),
                            "score": b.get("earned") if b["status"] in ("earned", "lost") else None})
     if not cats:
@@ -798,6 +806,7 @@ def h_course_score_lines(ctx, a):
     hub = ctx.api.hub
     now = datetime.now(timezone.utc)
     lines, groups = [], {}
+    rules = hub.grading.get(aid, str(a["course_id"]))
     course = hub.db.one("SELECT id FROM items WHERE account_id=? AND item_type='course' AND source_key=?",
                         (aid, str(a["course_id"])))
     weighting = hub.query._fields(course["id"]).get("apply_assignment_group_weights") if course else None
@@ -820,20 +829,95 @@ def h_course_score_lines(ctx, a):
             line["status"] = "excused"
         elif sub.get("score") is not None and sub.get("workflow_state") == "graded":
             line.update(status="earned", earned=float(sub["score"]))
+        elif sub.get("workflow_state") == "graded":
+            # Graded but the score is hidden (e.g. on-paper work not yet released): unknown, not lost.
+            line.update(status="pending", note="graded, but the score is not visible yet")
         elif sub.get("missing") or (due and due < now and not sub.get("submitted_at")):
             line.update(status="lost", earned=0.0)
         elif f.get("locked_for_user") and (not due or due < now):
             line["status"] = "locked"
         else:
             line["status"] = "pending"
+            if sub.get("submitted_at"):
+                line["submitted"] = True
         if f.get("assignment_group_weight") and weighting:     # group weights only count in a weighted course
             groups[f.get("assignment_group")] = f.get("assignment_group_weight")
-        lines.append(line)
-    return {"course_id": str(a["course_id"]), "buckets": lines, "group_weights": groups,
-            "grading": "weighted groups" if weighting else "points" if weighting is False else "not collected",
-            "note": "Drafted from Canvas points and submission states. Gating rules (all-or-nothing, minimum hours) and "
-                    "pass thresholds are not in Canvas data: ask the user or read the syllabus, then pass the buckets to "
-                    "show_score_model. Graded = earned; missing or past due without a submission = lost."}
+        line = hub.grading.apply_to_line(line, r["canvas_id"], rules)
+        if line is not None:
+            lines.append(line)
+    for name, g in rules["groups"].items():           # local weights win over Canvas's (often 0)
+        if g.get("weight") is not None:
+            groups[name] = g["weight"]
+    local = any(g.get("weight") is not None for g in rules["groups"].values())
+    out = {"course_id": str(a["course_id"]), "buckets": lines, "group_weights": groups,
+           "grading": ("weighted groups (local rules)" if local else "weighted groups" if weighting
+                       else "points" if weighting is False else "not collected"),
+           "note": "Drafted from Canvas points and submission states, with the local grading rules applied. Rules Canvas "
+                   "does not have (all-or-nothing, minimum hours, formulas, real group weights, pass mark) belong in "
+                   "set_grading_rules once you know them. Graded = earned; missing or past due without a submission = lost."}
+    if rules["groups"] or rules["items"] or rules.get("threshold") is not None:
+        out["grading_rules"] = {k: rules[k] for k in ("threshold", "scale", "source", "updated_at") if rules.get(k) is not None}
+    return out
+
+
+def course_dashboard(ctx, aid: int, days: int = 7) -> dict:
+    """Every accessible course on one scale: grade so far (with local weights), work done, lost, next due."""
+    hub = ctx.api.hub
+    now = datetime.now(timezone.utc)
+    rows = []
+    for c in ctx.api.list_courses(aid)["courses"]:
+        if c.get("access") not in (None, "accessible"):
+            continue
+        lines = h_course_score_lines(ctx, {"course_id": c["course_id"]})["buckets"]
+        counted = [b for b in lines if b["status"] != "excused"]
+        if not counted:
+            continue
+        rules = hub.grading.get(aid, c["course_id"])
+        pct = letter = None
+        weighted = False
+        try:
+            spec = projections.normalize_projector({"categories": _draft_categories(ctx, aid, c["course_id"]),
+                                                    "scale": rules.get("scale")})
+            proj = projections.project(spec, {})
+            pct, letter, weighted = proj["percent"], (proj["letter"] if rules.get("scale") else None), spec["weighted"]
+        except InvalidInput:
+            pass
+        upcoming = sorted((b for b in counted if b["status"] == "pending" and b.get("due") and not b.get("submitted")
+                           and now <= datetime.fromisoformat(b["due"]) <= now + timedelta(days=days)),
+                          key=lambda b: b["due"])
+        nxt = min((b for b in counted if b["status"] == "pending" and b.get("due") and not b.get("submitted")
+                   and datetime.fromisoformat(b["due"]) >= now), key=lambda b: b["due"], default=None)
+        rows.append({"course_id": c["course_id"], "title": c["title"], "code": c.get("course_code"),
+                     "assignments": len(counted),
+                     "done": sum(1 for b in counted if b["status"] == "earned" or b.get("submitted")),
+                     "lost": sum(1 for b in counted if b["status"] == "lost"),
+                     "graded_points": round(sum(b.get("earned") or 0 for b in counted if b["status"] in ("earned", "lost")), 2),
+                     "graded_possible": round(sum(b["max"] for b in counted if b["status"] in ("earned", "lost")), 2),
+                     "grade_percent": pct, "letter": letter, "weighted": weighted, "due_soon": len(upcoming),
+                     "next_due": {"title": nxt["label"], "due": nxt["due"], "item_id": nxt.get("item_id")} if nxt else None})
+    return {"courses": rows, "days": days, "generated_at": now.isoformat()}
+
+
+def h_show_dashboard(ctx, a):
+    aid = _account(ctx, a)
+    d = course_dashboard(ctx, aid, a.get("days") or 7)
+    return _display("dashboard", {"title": a.get("title") or "All courses", **d},
+                    f"Showed {len(d['courses'])} course(s): " + "; ".join(
+                        f"{c['code'] or c['title']}: {c['grade_percent'] if c['grade_percent'] is not None else '–'}% so far"
+                        f"{' (weighted)' if c['weighted'] else ''}, {c['done']}/{c['assignments']} done, {c['lost']} lost, "
+                        f"{c['due_soon']} due in {d['days']} d" for c in d["courses"]))
+
+
+def h_get_grading_rules(ctx, a):
+    aid = _account(ctx, a)
+    return {"course_id": str(a["course_id"]), **ctx.api.hub.grading.get(aid, str(a["course_id"]))}
+
+
+def h_set_grading_rules(ctx, a):
+    aid = _account(ctx, a)
+    rules = {k: a[k] for k in ("groups", "items", "threshold", "scale", "source") if a.get(k) is not None}
+    return {"course_id": str(a["course_id"]), "saved": ctx.api.hub.grading.set(aid, str(a["course_id"]), rules),
+            "note": "Stored on this computer only; replaces the course's previous local rules."}
 
 
 def _num_or_text(v):
@@ -893,6 +977,23 @@ def h_show_gauge(ctx, a):
                               "unit": (a.get("unit") or "")[:12], "style": a.get("style") or "bar"},
                     f"Showed a progress gauge: {total:g} of {mx:g}" + (f", threshold {thr:g} ({'reached' if total >= thr else f'{thr - total:g} to go'})"
                                                                      if thr is not None else "") + ".")
+
+
+MAX_HTML = 200_000
+
+
+def h_show_html(ctx, a):
+    aid = _account(ctx, a)
+    if not ctx.api.hub.settings.get(aid, "custom_html").get("enabled"):
+        raise InvalidInput("custom HTML blocks are off; the user can turn them on under Data & settings → Custom HTML "
+                           "blocks. Use show_table, show_chart or show_artifact instead.", code="custom_html_off")
+    html = a["html"]
+    data = a.get("data")
+    if len(html) > MAX_HTML or len(json.dumps(data, default=str)) > MAX_HTML:
+        raise InvalidInput(f"html and data must each be under {MAX_HTML:,} characters")
+    return _display("html", {"title": (a.get("title") or "Custom block")[:200], "html": html, "data": data},
+                    "Showed a custom HTML block. It runs only when the user presses Run, in an isolated frame with no "
+                    "network access; the script reads the data as window.hubData.")
 
 
 def h_show_artifact(ctx, a):
@@ -1234,6 +1335,18 @@ TOOLS += [
     AgentTool("course_score_lines", "Draft score-model buckets for a course from its assignments: points, due dates, "
               "assignment groups and status from the submission state.", "read", {"course_id": {"type": "string"}},
               ["course_id"], h_course_score_lines),
+    AgentTool("get_grading_rules", "The user's local grading rules for a course (group weights, per-assignment unit, "
+              "gating and formula, pass mark, letter scale). Canvas usually reports 0 for group weights.", "read",
+              {"course_id": {"type": "string"}}, ["course_id"], h_get_grading_rules),
+    AgentTool("set_grading_rules", "Save local grading rules for a course (replaces the previous ones; read them first "
+              "and send the whole set). Use what the syllabus or the user says, and give the source. groups: "
+              "{group name: {weight (percent), drop_lowest}}. items: {assignment Canvas id: {unit, full_at, gating, "
+              "min_value, formula, exclude, note}}. Stored locally, never sent to Canvas; course_score_lines and grade "
+              "projections use them.", "notes",
+              {"course_id": {"type": "string"}, "groups": {"type": "object"}, "items": {"type": "object"},
+               "threshold": {"type": "number"}, "scale": {"type": "array", "items": {"type": "object"}},
+               "source": {"type": "string", "description": "where the rules come from, e.g. 'syllabus p.2'"}},
+              ["course_id"], h_set_grading_rules),
     # ---- interactive components (in-app chat)
     AgentTool("show_deadlines", "Show deadlines to the user as interactive cards (open, add to-do, open in Canvas).", "ui",
               {"days_ahead": {"type": "integer", "minimum": 1, "maximum": 120}, "course_id": {"type": "string"}}, [],
@@ -1277,6 +1390,18 @@ TOOLS += [
                "language": {"type": "string", "description": "markdown, json, csv, python, text, ..."},
                "filename": {"type": "string", "description": "suggested download name, e.g. study-plan.md"}},
               ["content"], h_show_artifact),
+    AgentTool("show_dashboard", "Show every course side by side on one scale: grade so far (weighted with the local "
+              "grading rules when set, else points), assignments done / lost, what is due soon and the next deadline.",
+              "ui", {"title": {"type": "string"}, "days": {"type": "integer", "minimum": 1, "maximum": 60}}, [],
+              h_show_dashboard),
+    AgentTool("show_html", "Power-user escape hatch, only when the built-in components cannot show it: a custom "
+              "HTML/CSS/JS block that runs in an isolated, sandboxed frame after the user presses Run. It has no network "
+              "access (no fetch, no external scripts, styles or images; inline only) and cannot reach Canvas Hub. Pass "
+              "the values it needs as `data`; scripts read them as window.hubData (read-only). Off unless the user "
+              "enabled custom HTML blocks.", "ui",
+              {"title": {"type": "string"}, "html": {"type": "string", "description": "a full document or a fragment"},
+               "data": {"type": "object", "description": "read-only data for the script (window.hubData)"}},
+              ["html"], h_show_html),
     AgentTool("show_json", "Show nested data (e.g. a model's buckets and lines) as a collapsible tree.", "ui",
               {"title": {"type": "string"}, "data": {"type": "object"}}, ["data"], h_show_json),
     AgentTool("show_diff", "Show edits side by side in red/green: the recorded changes of a Canvas item (item_id), or two "
@@ -1297,7 +1422,12 @@ TOOLS += [
                    "gating": {"type": "string", "enum": ["none", "all_or_nothing", "min_threshold"]},
                    "min_value": {"type": "number"}, "unit": {"type": "string", "enum": ["points", "hours"]},
                    "full_at": {"type": "number"}, "group": {"type": "string"}, "due": {"type": "string"},
-                   "item_id": {"type": "integer"}, "note": {"type": "string"}}, "required": ["label", "max"]}},
+                   "item_id": {"type": "integer"}, "note": {"type": "string"},
+                   "formula": {"type": "string", "description": "optional score rule as expression text when Canvas shows "
+                               "it only as an image, e.g. if(hours >= 10, 20 * min(1, hours / 20), 0). Names: value, "
+                               "hours, max, full_at, min_value; functions min, max, round, floor, ceil, abs, sqrt, "
+                               "clamp, if(cond, a, b)"}},
+                   "required": ["label", "max"]}},
                "scenarios": {"type": "array", "items": {"type": "object", "properties": {
                    "id": {"type": "string"}, "label": {"type": "string"},
                    "include": {"type": "object", "description": "bucket id -> true/false"},

@@ -89,6 +89,40 @@ def test_reminders_fire_once(hub, account, fixture_pkg):
         hub.reminders.create(aid, title="x", remind_at="tomorrow")
 
 
+def test_concurrent_tabs_cannot_fire_the_same_reminder_twice(hub, account):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier, Event
+
+    aid = account["id"]
+    reminder = hub.reminders.create(aid, title="Start proposal",
+                                    remind_at=(datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat())
+    ready, start = Barrier(3), Event()
+    beginning = [Event(), Event()]
+
+    def poll(i):
+        conn = hub.db.conn
+        conn.set_trace_callback(lambda sql: beginning[i].set() if sql == "BEGIN IMMEDIATE" else None)
+        ready.wait(timeout=5)
+        assert start.wait(timeout=5)
+        try:
+            return hub.reminders.due(aid)
+        finally:
+            conn.set_trace_callback(None)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = [pool.submit(poll, i) for i in range(2)]
+        ready.wait(timeout=5)
+        # Both tabs reach their write transaction while another writer holds
+        # the lock. Reading pending rows before that transaction would let both
+        # tabs claim the same reminder after the lock is released.
+        with hub.db.tx():
+            start.set()
+            assert all(event.wait(timeout=5) for event in beginning)
+        fired = [r for result in results for r in result.result(timeout=10)]
+    assert [r["id"] for r in fired] == [reminder["id"]]
+    assert hub.reminders.get(aid, reminder["id"])["status"] == "fired"
+
+
 def test_task_states_and_board_tools(hub, account, fixture_pkg):
     hub.importer.import_package(fixture_pkg)
     aid = account["id"]

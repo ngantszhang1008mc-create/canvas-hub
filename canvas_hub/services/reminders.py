@@ -45,11 +45,11 @@ class ReminderService:
     def due(self, account_id: int) -> list[dict]:
         """Pending reminders whose time has come; they are marked fired (shown once)."""
         now = to_utc_iso(datetime.now(timezone.utc))
-        rows = [dict(r) for r in self.db.query(
-            "SELECT * FROM reminders WHERE account_id=? AND status='pending' AND remind_at<=? ORDER BY remind_at", (account_id, now))]
-        if rows:
-            with self.db.tx() as c:
-                c.executemany("UPDATE reminders SET status='fired', fired_at=? WHERE id=?", [(now_iso(), r["id"]) for r in rows])
+        with self.db.tx() as c:
+            rows = [dict(r) for r in c.execute(
+                "SELECT * FROM reminders WHERE account_id=? AND status='pending' AND remind_at<=? ORDER BY remind_at",
+                (account_id, now)).fetchall()]
+            c.executemany("UPDATE reminders SET status='fired', fired_at=? WHERE id=?", [(now_iso(), r["id"]) for r in rows])
         return rows
 
     def dismiss(self, account_id: int, rid: int) -> dict:
