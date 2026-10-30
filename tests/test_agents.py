@@ -227,3 +227,37 @@ def test_thinking_off_and_other_providers():
     assert thinking_params("deepseek", "") == {}
     assert thinking_params("openai", "high") == {"reasoning_effort": "high"}
     assert thinking_params("openai", "off") == {}
+
+
+def test_assistant_setups(seeded):
+    hub, _ = seeded
+    from canvas_hub.util import NotFound
+    p = hub.paths.runtime / "assistant.json"
+    # a single setup saved by the previous version becomes the first saved setup
+    p.write_text(json.dumps({"preset": "deepseek", "provider": "openai_compatible", "base_url": "https://api.deepseek.com/v1",
+                             "model": "deepseek-flash", "api_key": "sk-ds-old-1111", "thinking": "max",
+                             "permissions": {"collect": False}}))
+    svc = AssistantService(hub, HubAPI(hub))
+    pub = svc.public_config()
+    assert [(x["id"], x["name"]) for x in pub["profiles"]] == [("p1", "DeepSeek")]
+    assert pub["active_profile"] == "p1" and pub["configured"] and pub["thinking"] == "max"
+    assert pub["permissions"]["collect"] is False and pub["profiles"][0]["api_key_hint"].endswith("1111")
+    # add a second setup; the first stays in use until switched
+    pub = svc.update_config({"profile_id": "new", "name": "Claude", "preset": "anthropic", "api_key": "sk-ant-new-2222"})
+    assert pub["saved_profile"] == "p2" and pub["active_profile"] == "p1" and len(pub["profiles"]) == 2
+    assert "sk-ds-old-1111" not in json.dumps(pub) and "sk-ant-new-2222" not in json.dumps(pub)
+    assert svc._load()["provider"] == "openai_compatible"
+    pub = svc.activate_profile("p2")
+    assert pub["active_profile"] == "p2" and pub["provider"] == "anthropic" and svc._load()["api_key"] == "sk-ant-new-2222"
+    # editing one setup leaves the other untouched; permissions are shared
+    svc.update_config({"profile_id": "p1", "thinking": "high", "permissions": {"collect": True}})
+    assert svc._load("p1")["thinking"] == "high" and svc._load("p2")["thinking"] == ""
+    assert svc._load("p2")["permissions"]["collect"] is True
+    # deleting the setup in use falls back to the remaining one
+    pub = svc.delete_profile("p2")
+    assert pub["active_profile"] == "p1" and [x["id"] for x in pub["profiles"]] == ["p1"]
+    with pytest.raises(NotFound):
+        svc.test("p2")
+    with pytest.raises(NotFound):
+        svc.update_config({"profile_id": "p2", "model": "x"})
+    assert stat.S_IMODE(os.stat(p).st_mode) == 0o600

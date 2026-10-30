@@ -380,8 +380,16 @@ def create_app(api: HubAPI, *, token: str, port: int) -> FastAPI:
         return _assistant().update_config(await body(request))
 
     @app.post("/api/assistant/test")
-    def assistant_test():
-        return _assistant().test()
+    async def assistant_test(request: Request):
+        return _assistant().test((await body(request)).get("profile_id"))
+
+    @app.post("/api/assistant/profiles/{pid}/activate")
+    def assistant_activate(pid: str):
+        return _assistant().activate_profile(pid)
+
+    @app.delete("/api/assistant/profiles/{pid}")
+    def assistant_delete_profile(pid: str):
+        return _assistant().delete_profile(pid)
 
     @app.get("/api/accounts/{aid}/assistant/conversations")
     def assistant_conversations(aid: int):
