@@ -1403,14 +1403,33 @@ VIEWS.assistant = async (main, parts, params) => {
   const layout = h("div", { class: "assistant-layout" }, sideList, chat);
   main.classList.add("fill");
   mount(main, head, tabs, layout);
-  // The chat gets the rest of the window; only its message list scrolls.
+  // The chat reaches from where it starts on screen to the bottom of the window, so the message box stays put.
+  // Scrolling the page moves the heading out of view and the chat grows into the space, up to the tabs, which
+  // stick below whatever stays at the top of the window. The space it can still grow into is kept below it
+  // as a margin, so the page is exactly that much taller and growing never changes how far it scrolls.
   const fit = () => {
-    if (!layout.isConnected) { window.removeEventListener("resize", fit); return; }
-    const top = layout.getBoundingClientRect().top + window.scrollY;
-    layout.style.height = `${Math.max(380, window.innerHeight - top - 16)}px`;
+    if (!layout.isConnected) {
+      window.removeEventListener("resize", fit); window.removeEventListener("scroll", fit);
+      return;
+    }
+    const pinned = [$("#sidebar"), $("#topbar")].filter((el) => el && getComputedStyle(el).position === "sticky"
+      && el.getBoundingClientRect().bottom < window.innerHeight / 2);
+    const stickTop = Math.max(0, ...pinned.map((el) => el.getBoundingClientRect().bottom));
+    tabs.style.top = `${stickTop}px`;
+    const docTop = layout.getBoundingClientRect().top + window.scrollY;
+    const settled = document.body.classList.contains("chat-focus") ? docTop      // nothing above it scrolls away
+      : stickTop + tabs.offsetHeight + parseFloat(getComputedStyle(tabs).marginBottom);
+    const full = Math.max(380, window.innerHeight - settled - 16);
+    const top = Math.max(layout.getBoundingClientRect().top, settled);
+    const shown = Math.min(full, Math.max(240, window.innerHeight - top - 16));
+    const atEnd = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 4;
+    layout.style.height = `${shown}px`;
+    layout.style.marginBottom = `${full - shown}px`;
+    if (atEnd) scroller.scrollTop = scroller.scrollHeight;      // keep the latest message in view as it shrinks
   };
   fit();
   window.addEventListener("resize", fit);
+  window.addEventListener("scroll", fit, { passive: true });
   if (current) { await refresh(); assistantPoll = setInterval(refresh, 400); }
   input.focus({ preventScroll: true });
 };
