@@ -167,3 +167,45 @@ def test_components_web_api(hub, account):
     assert c.patch(base, json={"pinned": True}, headers=hdr).json()["pinned"] is True
     assert [x["id"] for x in c.get(f"/api/accounts/{account['id']}/components?pinned=true", headers=hdr).json()["components"]] == [v["id"]]
     assert c.delete(base, headers=hdr).status_code == 200 and c.get(base, headers=hdr).status_code == 404
+
+
+def test_concurrent_saves_conflict_instead_of_overwriting(hub, account):
+    import threading
+    aid = account["id"]
+    v = hub.components.create(aid, "score_model", HMAW)
+    results = []
+
+    def save(bucket):
+        try:
+            hub.components.set_state(aid, v["id"], {"include": {bucket: False}}, expected_version=1)
+            results.append("ok")
+        except Conflict:
+            results.append("conflict")
+    ts = [threading.Thread(target=save, args=(b,)) for b in ("nest", "fyes")]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    assert sorted(results) == ["conflict", "ok"]
+    assert hub.components.get(aid, v["id"])["version"] == 2
+    # even a caller holding a stale row cannot write
+    stale = hub.components._row(aid, v["id"]) | {"version": 1}
+    with pytest.raises(Conflict):
+        hub.components._save(aid, stale, json.loads(stale["spec_json"]), {}, "user")
+
+
+def test_undo_puts_linked_todos_back(hub, account):
+    aid = account["id"]
+    svc = hub.components
+    v = svc.create(aid, "checklist", {"title": "T", "sync_todos": True, "sections": [
+        {"id": "s", "rows": [{"id": "r1", "label": "One"}, {"id": "r2", "label": "Two"}]}]})
+    v = svc.set_state(aid, v["id"], {"done": {"r1": True}})          # first sync creates both to-dos
+    links = v["state"]["links"]
+    v = svc.set_state(aid, v["id"], {"done": {"r1": True, "r2": True}, "links": links})
+    v = svc.undo(aid, v["id"])
+    assert v["state"]["done"] == {"r1": True} and hub.annotations.get(aid, links["r2"])["task_state"] == "open"
+    v = svc.undo(aid, v["id"])                                          # back before the first sync
+    assert v["state"]["done"] == {} and hub.annotations.get(aid, links["r1"])["task_state"] == "open"
+    svc.set_state(aid, v["id"], {"done": {"r2": True}, "links": v["state"]["links"]})
+    tasks = [a for a in hub.annotations.list(aid) if a["kind"] == "task"]
+    assert len(tasks) == 2                                              # no orphans, no duplicates

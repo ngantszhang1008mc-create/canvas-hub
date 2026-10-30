@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 
 from .. import scoring
 from ..db import Database
@@ -90,6 +91,7 @@ class ComponentService:
     def __init__(self, db: Database, annotations: AnnotationService):
         self.db = db
         self.annotations = annotations
+        self._lock = threading.RLock()     # one change at a time (with linked to-dos it is read-modify-write)
 
     # ---- validation -------------------------------------------------------------
     @staticmethod
@@ -166,18 +168,26 @@ class ComponentService:
     def _save(self, account_id: int, row: dict, spec: dict, state: dict, by: str) -> dict:
         now = now_iso()
         with self.db.tx() as c:
+            # Conditional on the version that was read: a concurrent writer makes this a conflict, never an overwrite.
+            n = c.execute("""UPDATE components SET spec_json=?, state_json=?, title=?, version=version+1, updated_at=?
+                             WHERE id=? AND version=?""",
+                          (json.dumps(spec), json.dumps(state), spec["title"], now, row["id"], row["version"])).rowcount
+            if n != 1:
+                raise Conflict("this component changed elsewhere; reload it", code="version_conflict")
             c.execute("""INSERT OR REPLACE INTO component_versions(component_id, version, spec_json, state_json,
                          changed_by, created_at) VALUES (?,?,?,?,?,?)""",
                       (row["id"], row["version"], row["spec_json"], row["state_json"], by, now))
             c.execute("""DELETE FROM component_versions WHERE component_id=? AND version NOT IN
                          (SELECT version FROM component_versions WHERE component_id=? ORDER BY version DESC LIMIT ?)""",
                       (row["id"], row["id"], KEEP_VERSIONS))
-            c.execute("""UPDATE components SET spec_json=?, state_json=?, title=?, version=version+1, updated_at=?
-                         WHERE id=?""", (json.dumps(spec), json.dumps(state), spec["title"], now, row["id"]))
         return self.get(account_id, row["id"])
 
     def set_state(self, account_id: int, cid: int, state: dict, *, expected_version: int | None = None,
                   by: str = "user") -> dict:
+        with self._lock:
+            return self._set_state(account_id, cid, state, expected_version=expected_version, by=by)
+
+    def _set_state(self, account_id: int, cid: int, state: dict, *, expected_version: int | None, by: str) -> dict:
         row = self._row(account_id, cid)
         if expected_version is not None and int(expected_version) != row["version"]:
             raise Conflict("this component changed elsewhere; reload it", code="version_conflict")
@@ -188,23 +198,35 @@ class ComponentService:
         return self._save(account_id, row, spec, st, by)
 
     def update_spec(self, account_id: int, cid: int, spec: dict, *, by: str = "assistant") -> dict:
-        row = self._row(account_id, cid)
-        clean = self.normalize(row["kind"], spec)
-        st = self._clean_state(row["kind"], clean, json.loads(row["state_json"]))
-        return self._save(account_id, row, clean, st, by)
+        with self._lock:
+            row = self._row(account_id, cid)
+            clean = self.normalize(row["kind"], spec)
+            st = self._clean_state(row["kind"], clean, json.loads(row["state_json"]))
+            return self._save(account_id, row, clean, st, by)
 
     def undo(self, account_id: int, cid: int) -> dict:
-        row = self._row(account_id, cid)
-        prev = self.db.one("""SELECT * FROM component_versions WHERE component_id=? ORDER BY version DESC LIMIT 1""",
-                           (row["id"],))
-        if not prev:
-            raise InvalidInput("nothing to undo", code="nothing_to_undo")
-        with self.db.tx() as c:
-            c.execute("DELETE FROM component_versions WHERE component_id=? AND version=?", (row["id"], prev["version"]))
+        with self._lock:
+            row = self._row(account_id, cid)
+            prev = self.db.one("""SELECT * FROM component_versions WHERE component_id=? ORDER BY version DESC LIMIT 1""",
+                               (row["id"],))
+            if not prev:
+                raise InvalidInput("nothing to undo", code="nothing_to_undo")
             spec = json.loads(prev["spec_json"])
-            c.execute("""UPDATE components SET spec_json=?, state_json=?, title=?, version=version+1, updated_at=?
-                         WHERE id=?""", (prev["spec_json"], prev["state_json"], spec["title"], now_iso(), row["id"]))
-        return self.get(account_id, row["id"])
+            state_json = prev["state_json"]
+            if row["kind"] == "checklist" and spec.get("sync_todos"):
+                # Keep the to-dos created since (no orphans or duplicates) and put their states back too.
+                st = json.loads(state_json)
+                st["links"] = {**(st.get("links") or {}), **(json.loads(row["state_json"]).get("links") or {})}
+                st = self._push_todos(account_id, spec, self._clean_state("checklist", spec, st))
+                state_json = json.dumps(st)
+            with self.db.tx() as c:
+                n = c.execute("""UPDATE components SET spec_json=?, state_json=?, title=?, version=version+1, updated_at=?
+                                 WHERE id=? AND version=?""",
+                              (prev["spec_json"], state_json, spec["title"], now_iso(), row["id"], row["version"])).rowcount
+                if n != 1:
+                    raise Conflict("this component changed elsewhere; reload it", code="version_conflict")
+                c.execute("DELETE FROM component_versions WHERE component_id=? AND version=?", (row["id"], prev["version"]))
+            return self.get(account_id, row["id"])
 
     def pin(self, account_id: int, cid: int, pinned: bool) -> dict:
         row = self._row(account_id, cid)

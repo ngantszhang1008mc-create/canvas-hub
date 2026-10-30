@@ -109,3 +109,35 @@ def test_score_model_and_artifact_in_the_browser(app_server, hub, account):
         expect(pg.locator(".cmp-score .sl-big .num")).to_have_text("80")
         assert not errors, errors
         b.close()
+
+
+def test_edits_made_while_a_save_is_in_flight_are_kept(app_server, hub, account):
+    from playwright.sync_api import expect, sync_playwright
+    base, tok, _ = app_server
+    v = hub.components.create(account["id"], "score_model", HMAW)
+    hub.components.pin(account["id"], v["id"], True)
+    real, calls = hub.components.set_state, []
+
+    def slow(*a, **k):                  # the first save answers late
+        calls.append(1)
+        if len(calls) == 1:
+            time.sleep(1.5)
+        return real(*a, **k)
+    hub.components.set_state = slow
+    with sync_playwright() as p:
+        b = p.chromium.launch()
+        pg = b.new_page(viewport={"width": 1280, "height": 900})
+        pg.goto(f"{base}/?token={tok}")
+        pg.goto(f"{base}/#/trackers")
+        score = pg.locator(".cmp-score")
+        expect(score.locator(".sl-big .num")).to_have_text("95")
+        score.get_by_label("Include Nest Posts").uncheck()
+        pg.wait_for_timeout(600)                      # debounce fired; the first save is now in flight
+        score.get_by_label("Include FYES").uncheck()
+        expect(score.locator(".sl-big .num")).to_have_text("80")
+        expect(score.locator(".save-state")).to_contain_text("Saved", timeout=10000)
+        expect(score.locator(".sl-big .num")).to_have_text("80")
+        b.close()
+    hub.components.set_state = real
+    st = hub.components.get(account["id"], v["id"])["state"]
+    assert st["include"] == {"nest": False, "fyes": False}

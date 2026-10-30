@@ -461,28 +461,44 @@ export function makeComponents(env) {
   }
 
   // Shared plumbing for saved components: debounced save with version check, undo, pin.
+  // Saves run one at a time. Each carries the edit number it was taken at; when a
+  // reply arrives after newer local edits, those edits are kept (only the server's
+  // version is taken) and the next queued save sends them.
   function savedComponent(view, render) {
-    let v = view, timer = null, saving = Promise.resolve(), isFull = false;
+    let v = view, timer = null, saving = Promise.resolve(), isFull = false, edits = 0;
     const el = h("div", { class: "saved-cmp" });
     const status = h("span", { class: "tiny muted save-state", "aria-live": "polite" });
     const redraw = () => { mount(el, render(v, api_)); };
+    const queue = (fn) => (saving = saving.then(fn, fn));
+    let pending = null;
     const persist = () => {
       clearTimeout(timer);
       status.textContent = "Saving…";
-      timer = setTimeout(() => { saving = saving.then(async () => {
+      pending = () => queue(async () => {
+        const sent = edits;
         try {
-          v = await api(A(`/components/${v.id}`), { method: "PATCH", body: { state: v.state, expected_version: v.version } });
-          status.textContent = `Saved ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+          const r = await api(A(`/components/${v.id}`), { method: "PATCH", body: { state: v.state, expected_version: v.version } });
+          v = edits === sent ? r : { ...r, state: v.state };      // keep edits made while this save was in flight
+          if (edits === sent) redraw();
+          status.textContent = edits === sent ? `Saved ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : "Saving…";
         } catch (e) {
           if (e.status === 409) { v = await api(A(`/components/${v.id}`)); redraw(); status.textContent = "Reloaded (changed elsewhere)"; }
           else { status.textContent = "Not saved"; toast(e.message || "Could not save", true); }
         }
-      }); }, 350);
+      });
+      timer = setTimeout(() => { const run = pending; pending = null; if (run) run(); }, 350);
     };
+    const flush = () => { clearTimeout(timer); const run = pending; pending = null; if (run) run(); };
     const api_ = {
-      setState: (fn) => { v = { ...v, state: fn(structuredClone(v.state)) }; redraw(); persist(); },
-      undo: async () => { const r = await guard(() => api(A(`/components/${v.id}`), { method: "PATCH", body: { undo: true } })); if (r) { v = r; redraw(); status.textContent = "Undone"; } },
-      pin: async () => { const r = await guard(() => api(A(`/components/${v.id}`), { method: "PATCH", body: { pinned: !v.pinned } })); if (r) { v = r; redraw(); toast(r.pinned ? "Pinned to Trackers" : "Unpinned"); } },
+      setState: (fn) => { edits += 1; v = { ...v, state: fn(structuredClone(v.state)) }; redraw(); persist(); },
+      undo: () => { flush(); return queue(async () => {
+        const r = await guard(() => api(A(`/components/${v.id}`), { method: "PATCH", body: { undo: true } }));
+        if (r) { edits += 1; v = r; redraw(); status.textContent = "Undone"; }
+      }); },
+      pin: () => queue(async () => {
+        const r = await guard(() => api(A(`/components/${v.id}`), { method: "PATCH", body: { pinned: !v.pinned } }));
+        if (r) { v = { ...r, state: v.state }; redraw(); toast(r.pinned ? "Pinned to Trackers" : "Unpinned"); }
+      }),
       status,
       get full() { return isFull; },
       onFull: (on) => { isFull = on; },
@@ -490,7 +506,7 @@ export function makeComponents(env) {
     };
     redraw();
     // The chat holds the definition from when it was created; load the latest state.
-    api(A(`/components/${v.id}`)).then((fresh) => { v = fresh; redraw(); }).catch(() => {});
+    api(A(`/components/${v.id}`)).then((fresh) => { if (!edits) { v = fresh; redraw(); } }).catch(() => {});
     return el;
   }
   const savedTools = (v, ctl) => [ctl.status,
