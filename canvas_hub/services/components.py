@@ -229,7 +229,7 @@ class ComponentService:
             before = self._effective_state_json(account_id, row)
             st = self._clean_state(row["kind"], clean, json.loads(before))   # ticks as they are now, e.g. when sync turns off
             if row["kind"] == "checklist" and clean.get("sync_todos"):
-                st = self._push_todos(account_id, clean, st)
+                st = self._push_todos(account_id, clean, st, previous=json.loads(row["spec_json"]))
             return self._save(account_id, row, clean, st, by, before)
 
     def undo(self, account_id: int, cid: int) -> dict:
@@ -245,7 +245,7 @@ class ComponentService:
                 # Keep the to-dos created since (no orphans or duplicates) and put their states back too.
                 st = json.loads(state_json)
                 st["links"] = {**(st.get("links") or {}), **(json.loads(row["state_json"]).get("links") or {})}
-                st = self._push_todos(account_id, spec, self._clean_state("checklist", spec, st))
+                st = self._push_todos(account_id, spec, self._clean_state("checklist", spec, st), previous=json.loads(row["spec_json"]))
                 state_json = json.dumps(st)
             with self.db.tx() as c:
                 n = c.execute("""UPDATE components SET spec_json=?, state_json=?, title=?, version=version+1, updated_at=?
@@ -269,9 +269,17 @@ class ComponentService:
         return {"deleted": row["id"]}
 
     # ---- to-do sync -------------------------------------------------------------------
-    def _push_todos(self, account_id: int, spec: dict, st: dict) -> dict:
-        """Create or update the local to-do behind each row so both stay in step."""
+    @staticmethod
+    def _todo_due(r: dict) -> str | None:
+        due = r.get("due")
+        return None if due and len(due) == 10 else due    # date-only dues stay on the row; to-dos need an exact time
+
+    def _push_todos(self, account_id: int, spec: dict, st: dict, previous: dict | None = None) -> dict:
+        """Create or update the local to-do behind each row so both stay in step. With ``previous`` (the spec
+        being replaced), a row whose label or due date changed passes that change on to its to-do; rows that did
+        not change leave the to-do's own title and time alone."""
         links = dict(st.get("links") or {})
+        before = {r["id"]: r for s in (previous or {}).get("sections", []) for r in s["rows"]}
         for s in spec["sections"]:
             for r in s["rows"]:
                 want = "done" if st["done"].get(r["id"]) else "open"
@@ -282,12 +290,16 @@ class ComponentService:
                     except NotFound:
                         aid = None
                     else:
-                        if cur["task_state"] != want:
-                            self.annotations.update(account_id, aid, task_state=want)
+                        changes = {"task_state": want} if cur["task_state"] != want else {}
+                        old = before.get(r["id"])
+                        if old is not None and old["label"] != r["label"]:
+                            changes["title"] = r["label"]
+                        if old is not None and self._todo_due(old) != self._todo_due(r):
+                            changes["local_due"] = self._todo_due(r)
+                        if changes:
+                            self.annotations.update(account_id, aid, **changes)
                         continue
-                due = r.get("due")
-                if due and len(due) == 10:
-                    due = None          # date-only dues stay on the row; to-dos need an exact time
+                due = self._todo_due(r)
                 try:
                     a = self.annotations.create(account_id, kind="task", title=r["label"], item_id=r.get("item_id"),
                                                 local_due=due, task_state=want)

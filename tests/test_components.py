@@ -297,3 +297,21 @@ def test_uncollected_submissions_stay_open(hub, account, fixture_pkg):
     ctx = ToolContext(api=HubAPI(hub), account_id=aid)
     b = json.loads(run_tool_display(ctx, "course_score_lines", {"course_id": "4242"}, {"read"})[0])["buckets"][0]
     assert b["status"] == "pending" and "not collected" in b["note"]
+
+
+def test_renamed_or_rescheduled_rows_update_their_todos(hub, account):
+    aid = account["id"]
+    svc = hub.components
+    spec = {"title": "T", "sync_todos": True, "sections": [{"id": "s", "rows": [
+        {"id": "r1", "label": "Draft", "due": "2026-11-03T23:59:00+08:00"}, {"id": "r2", "label": "Read"}]}]}
+    v = svc.create(aid, "checklist", spec)
+    links = v["state"]["links"]
+    hub.annotations.update(aid, links["r2"], title="Read ch. 4 (my words)")      # the user's own edit
+    spec["sections"][0]["rows"][0].update(label="Final draft", due="2026-11-05T23:59:00+08:00")
+    v = svc.update_spec(aid, v["id"], spec)
+    t1, t2 = hub.annotations.get(aid, links["r1"]), hub.annotations.get(aid, links["r2"])
+    assert t1["title"] == "Final draft" and t1["local_due"].startswith("2026-11-05")
+    assert t2["title"] == "Read ch. 4 (my words)"                              # unchanged rows leave it alone
+    svc.undo(aid, v["id"])                                                       # undo puts the old ones back
+    t1 = hub.annotations.get(aid, links["r1"])
+    assert t1["title"] == "Draft" and t1["local_due"].startswith("2026-11-03")
