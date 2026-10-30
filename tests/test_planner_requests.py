@@ -147,3 +147,31 @@ def test_assistant_components_and_planner_tools(hub, account, fixture_pkg):
         assert {"show_timetable", "show_choices", "get_timetable"} <= {t["function"]["name"] for t in fake.requests[0]["tools"]}
     finally:
         fake.stop()
+
+
+def test_study_task_does_not_complete_deadline(hub, account, fixture_pkg):
+    pkg, due = _future_fixture(fixture_pkg)
+    hub.importer.import_package(pkg)
+    aid = account["id"]
+    week_of = due.astimezone(__import__("zoneinfo").ZoneInfo("Asia/Hong_Kong")).date().isoformat()
+
+    def proposal():
+        evs = [e for d in hub.planner.week(aid, week_of=week_of)["days"] for e in d["events"]]
+        return next(e for e in evs if e["kind"] == "deadline" and e["title"] == "Project proposal")
+    item_id = proposal()["item_id"]
+    study = hub.annotations.create(aid, kind="task", title="Study: Project proposal", item_id=item_id,
+                                   local_due=(due - timedelta(days=2)).isoformat())
+    hub.annotations.update(aid, study["id"], task_state="done")
+    assert proposal()["done"] is False                         # a finished study block is only a step
+    marker = hub.annotations.create(aid, kind="task", title="Project proposal", item_id=item_id, task_state="done")
+    assert proposal()["done"] is True                          # the undated "Mark done locally" marker
+    hub.annotations.delete(aid, marker["id"])
+
+
+def test_large_component_is_not_truncated():
+    from canvas_hub.agent_tools import MAX_RESULT_CHARS, run_tool_display
+    cols = [f"c{i}" for i in range(8)]
+    rows = [["x" * 100] * 8 for _ in range(40)]
+    text, err, display = run_tool_display(None, "show_table", {"columns": cols, "rows": rows}, {"ui"})
+    assert not err and display["component"] == "table" and len(display["rows"]) == 40
+    assert len(text) <= MAX_RESULT_CHARS + 100 and "display" not in text

@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from ..agent_tools import ToolContext, run_tool, tools_for
+from ..agent_tools import ToolContext, run_tool_display, tools_for
 from ..util import InvalidInput, NotFound, now_iso
 from .providers import ANTHROPIC_DEFAULT_MODEL, RESERVED_PARAMS, THINKING_LEVELS, ProviderError, make_provider
 
@@ -364,20 +364,20 @@ class AssistantService:
                 results = []
                 for c in turn.tool_calls:
                     if cid in self._cancel:
-                        content, is_err = json.dumps({"error": "cancelled", "message": "The user stopped the assistant."}), True
+                        content, is_err, display = json.dumps({"error": "cancelled", "message": "The user stopped the assistant."}), True, None
                     elif c.input_error or c.input is None:
-                        content, is_err = json.dumps({"INVALID_INPUT": c.input_error or "missing input"}), True
+                        content, is_err, display = json.dumps({"INVALID_INPUT": c.input_error or "missing input"}), True, None
                     else:
-                        content, is_err = run_tool(ctx, c.name, c.input, perms)
+                        content, is_err, display = run_tool_display(ctx, c.name, c.input, perms)
                     entry = {"id": c.id, "name": c.name, "content": content, "is_error": is_err}
-                    if c.name.startswith("show_") and not is_err:
+                    if display is not None:
                         # The component goes to the UI; the model gets the compact summary.
+                        entry["display"] = display
                         try:
-                            data = json.loads(content)
-                            entry["display"] = data.pop("display")
-                            entry["content"] = json.dumps({"shown_to_user": True, **data}, ensure_ascii=False)
-                        except (ValueError, KeyError, TypeError):
-                            pass
+                            rest = json.loads(content)
+                        except ValueError:      # the summary itself was truncated
+                            rest = {"summary": content}
+                        entry["content"] = json.dumps({"shown_to_user": True, **rest}, ensure_ascii=False)
                     results.append(entry)
                 self._append(cid, "tool", {"results": results})
             else:

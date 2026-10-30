@@ -259,7 +259,8 @@ def h_deadlines(ctx, a):
                     "points": d.get("points_possible"), "location": d.get("location_name"),
                     "submission": {k: s.get(k) for k in ("workflow_state", "submitted_at", "late", "missing", "excused",
                                                          "score", "grade", "grade_visible", "observed_at", "state") if k in s} or None,
-                    "my_local_tasks": d.get("local_tasks"), "source_url": d["source_url"]})
+                    "marked_done_locally": d.get("done_locally"), "my_local_tasks": d.get("local_tasks"),
+                    "source_url": d["source_url"]})
     return {"time_zone": r["time_zone"], "range": r["range"], "deadlines": out,
             "unresolved_dates": [{"item_id": u["item_id"], "title": u["title"], "as_written": u["date"].get("raw")}
                                  for u in r["unresolved_dates"]],
@@ -718,17 +719,26 @@ def tools_for(permissions: set[str]) -> list[AgentTool]:
 def run_tool(ctx: ToolContext, name: str, args: Any, permissions: set[str], *, with_account: bool = False) -> tuple[str, bool]:
     """Execute a tool. Returns (result_text, is_error); never raises for
     tool-level problems so the model can recover."""
+    text, is_error, _ = run_tool_display(ctx, name, args, permissions, with_account=with_account)
+    return text, is_error
+
+
+def run_tool_display(ctx: ToolContext, name: str, args: Any, permissions: set[str], *,
+                     with_account: bool = False) -> tuple[str, bool, dict | None]:
+    """Like run_tool, but a show_* component payload is returned separately
+    (untruncated) and only the rest of the result goes into the text."""
     tool = TOOLS_BY_NAME.get(name)
     if tool is None or tool.permission not in permissions:
-        return json.dumps({"error": "unknown_or_disabled_tool", "message": f"Tool '{name}' is not available."}), True
+        return json.dumps({"error": "unknown_or_disabled_tool", "message": f"Tool '{name}' is not available."}), True, None
     try:
         args = validate_args(tool, args if args is not None else {}, with_account=with_account)
         result = tool.handler(ctx, args)
+        display = result.pop("display", None) if isinstance(result, dict) else None
         text = json.dumps(result, ensure_ascii=False, default=str)
         if len(text) > MAX_RESULT_CHARS:
             text = text[:MAX_RESULT_CHARS] + '… [result truncated; narrow the query or page with cursor/offset]'
-        return text, False
+        return text, False, display
     except HubError as e:
-        return json.dumps(e.to_dict(), ensure_ascii=False), True
+        return json.dumps(e.to_dict(), ensure_ascii=False), True, None
     except Exception as e:  # noqa: BLE001
-        return json.dumps({"error": "tool_failed", "message": f"{type(e).__name__}: {e}"}), True
+        return json.dumps({"error": "tool_failed", "message": f"{type(e).__name__}: {e}"}), True, None

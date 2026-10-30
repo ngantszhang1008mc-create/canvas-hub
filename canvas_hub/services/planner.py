@@ -143,7 +143,7 @@ class PlannerService:
                                "course": d["course_title"], "item_id": d["item_id"], "source_url": d["source_url"]})
                 continue
             done = (sub.get("workflow_state") in _DONE_STATES or sub.get("excused") or sub.get("submitted_at")
-                    or any(t.get("task_state") == "done" for t in d.get("local_tasks") or []))
+                    or d.get("done_locally"))
             entry = {"kind": "deadline", "title": d["title"], "start": _iso_local(when, tz), "end": _iso_local(when, tz),
                      "course": d["course_title"], "item_id": d["item_id"], "source_url": d["source_url"],
                      "submission_state": "excused" if sub.get("excused") else sub.get("workflow_state"),

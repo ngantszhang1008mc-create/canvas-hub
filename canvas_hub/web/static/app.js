@@ -437,7 +437,7 @@ VIEWS.deadlines = async (main, _p, params) => {
     h("div", { class: "day-date" }, h("span", { class: "dow" }, p.dow), h("span", { class: "dnum" }, p.day),
       h("span", { class: "mon" }, p.mon), h("span", { class: "rel" }, p.rel)),
     h("div", { class: "day-items" }, list.map((d) => {
-      const doneLocal = d.local_tasks && d.local_tasks.some((t) => t.task_state === "done");
+      const doneLocal = d.done_locally;
       return h("div", { class: "deadline" + (doneLocal ? " done-local" : "") },
         h("div", { class: "time" }, fmtTime(d.date.iso)),
         h("div", null, h("div", { class: "row" }, h("a", { class: "strong", href: `#/item/${d.item_id}` }, d.title),
@@ -459,7 +459,7 @@ VIEWS.deadlines = async (main, _p, params) => {
 };
 
 function localTaskToggle(d) {
-  const t = (d.local_tasks || [])[0];
+  const t = (d.local_tasks || []).find((x) => !x.local_due);   // dated to-dos (e.g. study blocks) are separate
   const done = t && t.task_state === "done";
   return h("button", { class: "sm " + (done ? "" : "ghost"), title: "Private local marker; not a Canvas submission",
     onclick: async (e) => {
@@ -1200,7 +1200,7 @@ VIEWS.planner = async (main, _p, params) => {
   const [week, classes, courses] = await Promise.all([
     api(A("/planner/week") + qs({ week_of: weekOf, suggest: suggest ? "true" : "", hours: 3 })),
     api(A("/planner/classes")), api(A("/courses"))]);
-  const shift = (days) => { const d = new Date(week.week_start + "T12:00:00"); d.setDate(d.getDate() + days); return d.toISOString().slice(0, 10); };
+  const shift = (days) => { const d = new Date(week.week_start + "T00:00:00Z"); d.setUTCDate(d.getUTCDate() + days); return d.toISOString().slice(0, 10); };
   const go = (w, sg = suggest) => { location.hash = `#/planner${qs({ week: w, suggest: sg ? 1 : "" })}`; };
   const nav = h("div", { class: "row" },
     h("button", { class: "sm", onclick: () => go(shift(-7)) }, "‹ Previous"),
