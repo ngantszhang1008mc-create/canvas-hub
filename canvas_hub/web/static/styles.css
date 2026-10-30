@@ -662,3 +662,28 @@ button.copied { color: var(--ok); border-color: var(--ok); }
 .cl-rows li.done .check span { text-decoration: line-through; color: var(--text-3); }
 .cl-meta { display: flex; gap: 10px; align-items: center; }
 .cl-note { grid-column: 1 / -1; margin-left: 26px; }
+
+/* ---- confirmed writes ---- */
+.write-card { display: flex; flex-direction: column; gap: 8px; }
+.write-card.pending { border-left: 3px solid var(--warn); padding-left: 10px; }
+.write-fields { display: grid; grid-template-columns: 110px 1fr; gap: 4px 12px; margin: 0; font-size: 13px; }
+.write-fields dt { color: var(--text-3); }
+.write-fields dd { margin: 0; overflow-wrap: anywhere; }
+.write-body { background: var(--paper); border: 1px solid var(--rule); border-radius: 4px; padding: 8px 10px; margin: 4px 0 0;
+  white-space: pre-wrap; overflow-wrap: anywhere; max-height: 360px; overflow: auto; font-size: 13px; font-family: var(--sans); }
+.write-confirm { background: var(--warn-soft); border: 1px solid color-mix(in srgb, var(--warn) 40%, transparent); border-radius: var(--radius); padding: 10px 12px; }
+.warn-text { color: var(--warn); }
+label.btn input[type=file] { display: none; }
+
+/* ---- change bell ---- */
+.bell-wrap { position: relative; }
+.bell { position: relative; font-size: 16px; padding: 4px 8px; }
+.bell-n { position: absolute; top: -2px; right: -4px; background: var(--mark); color: #fff; border-radius: 999px; font-size: 10.5px; font-weight: 700; padding: 0 5px; line-height: 16px; min-width: 16px; text-align: center; }
+.bell-panel { position: absolute; right: 0; top: calc(100% + 6px); width: min(380px, 92vw); max-height: 70vh; overflow: auto; z-index: 40;
+  background: var(--paper); border: 1px solid var(--border-strong); border-radius: var(--radius); box-shadow: 0 10px 30px rgba(0, 0, 0, .15); padding: 12px; display: flex; flex-direction: column; gap: 6px; }
+.bell-list { list-style: none; margin: 4px 0 0; padding: 0; }
+.bell-list li { border-top: 1px solid var(--rule); }
+.bell-list li a { display: block; padding: 7px 4px; color: var(--ink); text-decoration: none; }
+.bell-list li a:hover { background: var(--surface-2); }
+.bell-list li.unread a { border-left: 3px solid var(--mark); padding-left: 8px; }
+.dup-note { margin-top: 8px; padding: 6px 8px; background: var(--warn-soft); border-radius: 4px; }

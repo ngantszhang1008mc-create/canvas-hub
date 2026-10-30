@@ -119,3 +119,19 @@ Don't paste your key into chat; enter it only in the app.
 | 10.4 | Ask for a checklist of this week's tasks linked to your to-dos; tick one; then mark another done under **Notes & tasks** | Both stay in step; nothing changes in Canvas |
 | 10.5 | Ask the assistant to write something long for you (a plan or a spec) | It appears in an artifact block; **Copy** puts the full text on the clipboard and **Download** saves the file |
 | 10.6 | On any table or chart, use **Copy ▾ → Copy as CSV**, paste into Numbers or Excel | The rows paste as columns |
+
+## 11. Confirmed writes, freshness and dates (needs your sign-in)
+
+Writing to Canvas is real: use a low-stakes assignment or a draft.
+
+| # | Step | Expected |
+| --- | --- | --- |
+| 11.1 | With writes off, ask the assistant to submit something | It says writing is off, and nothing is prepared |
+| 11.2 | **Data & settings → Writing to Canvas**: switch on. Ask it to prepare your Study Plan upload (it saves the file first) | A *Prepared for Canvas* card shows the course, assignment, file name, size and SHA-256. Nothing appears in Canvas yet |
+| 11.3 | Press **Send to Canvas… → Yes, send it** | *Sent to Canvas* with the attempt number. Canvas shows the submission. The write log and **Changes → What you sent** list it |
+| 11.4 | Prepare a reply, then press **Cancel**; prepare another and leave it for 24 hours | *Cancelled* and *Expired*; neither is sent |
+| 11.5 | **Collection → Automatic refresh: every hour**; leave the app open | Quick checks appear in Jobs about hourly; the 🔔 bell lists new grades or announcements |
+| 11.6 | **Include Inbox**, run a quick check | Instructor and group messages appear (sender, unread state), and Canvas still shows them as unread |
+| 11.7 | **Deadlines → Dates found in course pages** | The COMP2711H midterm (Rm 2503/2504, 19:00–22:00) is suggested. **Confirm** puts it in the Planner |
+| 11.8 | **Courses** | AISC1000A / COMP4900 / LANG1406 duplicates show *Possible duplicate*; TEMG1011 shows *Not accessible*; empty or hidden shells are labelled |
+| 11.9 | Start `canvas-hub mcp --allow-fulfil` in Codex and ask it to serve requests | **Agent requests** shows Codex as connected; an open COMP1023 request is claimed |

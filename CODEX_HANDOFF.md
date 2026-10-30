@@ -514,6 +514,47 @@ canvas-hub mcp --allow-settings     # + scope changes
   - The result is imported through the normal observation importer as an `external_link` item with `content`, `provided_by` and `read_at` fields. It is searchable, versioned on re-reads, and labelled in the UI as agent-provided, not Canvas-reported.
   - Canvas Hub itself never opens these sites or reads any other browser profile.
 
+### Phase 2: confirmed writes, freshness, notes and files, query layer
+
+- **Confirmed writes** (`services/writes.py`, `collector/writer.py`, table `canvas_writes`):
+  - Off per account until the user enables them in Data & settings (`account_settings` key `canvas_writes`).
+  - Kinds: `submission_text`, `submission_file`, `discussion_reply`, `message`.
+  - `prepare` checks the target and builds an exact preview with a SHA-256 `preview_hash`:
+    - submission type allowed, not locked, the availability window still open, and attempts left;
+    - warnings for late submissions and resubmissions.
+  - Only `POST /api/accounts/{id}/writes/{wid}/confirm` with the matching hash sends. No tool or MCP call can confirm: the assistant gets only the `prepare_*` tools, and only while writes are on.
+  - Sending uses four documented Canvas endpoints from the signed-in browser, with the session's CSRF token. Failures are recorded and never retried. Prepared writes expire after 24 hours.
+- **Saved files** (`services/files.py`, table `saved_files`):
+  - Tools `save_file`, `list_files` and `get_file`.
+  - The artifact block has a **Save to files** button.
+  - Downloads are always `application/octet-stream` attachments with `nosniff`.
+- **Notes:**
+  - `get_note` reads a note in full, paged in chunks of up to 100 000 characters.
+  - `update_note` takes `mode=append|prepend`.
+  - `list_notes` takes `query` and flags truncated bodies.
+- **Freshness:**
+  - **Automatic refresh:** `account_settings.auto_refresh.minutes`, read in `JobRunner._auto_refresh`. It runs only in this app process, only when signed in and after a first completed collection, with no stacking and never a sign-in window.
+  - **The bell:** `services/notifications.py` turns the change log into a feed of important changes since `last_seen_change_id`. Baseline events and calendar mirrors of assignments are skipped. The assistant reads it with the `whats_new` tool.
+- **Inbox:** the opt-in collector now also keeps personal and group conversations, with `started_by`, `last_author` and a volatile `unread` field. It still reads with `auto_mark_as_read=false`.
+- **Course shells:** `list_courses` adds:
+  - `content_state`: has_content / empty / hidden / inaccessible / not_checked;
+  - `blocked_sections`;
+  - `possible_duplicates`: same course code;
+  - user-confirmed links (`course_links`, `PUT /api/accounts/{id}/courses/{cid}/link`).
+- **Dates in course text** (`services/datefinder.py`, table `date_candidates`):
+  - It finds assessment sentences with dates in pages, syllabi, announcements and course home text. It reads 12-hour and 24-hour times and time ranges, rooms, and infers a missing year from the reference date, flagging the guess.
+  - The user confirms each suggestion; a confirmed one becomes a dated to-do.
+  - `POST /api/accounts/{id}/planner/import-ics` turns weekly recurring events into class times.
+- **Query layer** (`services/querylayer.py`):
+  - `query_data` runs SQL on a separate read-only connection, with temporary views scoped to the account.
+  - An authorizer allows only SELECT through those views. Results are capped at 500 rows and 3 seconds.
+  - `calculate` is an AST-based arithmetic evaluator.
+  - `find_clashes` finds days with several deadlines, and events that overlap class times.
+- **Connected agents:** the MCP server records each client's name and permissions (`app_settings.mcp_agents`), shown on the Agent requests page. With `--allow-fulfil`, `wait_for_view_requests` waits up to 300 s for new requests.
+- **Not done, by design:**
+  - LTI tools are not launched, because launching can record attendance or start attempts.
+  - OCR is phase 4.
+
 ### Still left for Codex
 
 1. **Codex-side configuration.** Register `canvas-hub mcp` (with whatever flags the user chooses) in Codex's MCP configuration. Re-check [MCP tools for Codex](https://learn.chatgpt.com/docs/extend/mcp).

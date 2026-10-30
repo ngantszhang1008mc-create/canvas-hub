@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
+import time
 from datetime import datetime, timezone
 
 from ..services.jobs import WORKER_ID
@@ -32,6 +33,7 @@ class JobRunner:
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._loop, name="canvas-hub-runner", daemon=True)
         self.has_lock = False
+        self._last_auto = 0.0
         self.current_job: int | None = None
         self.worker.on_signed_in = self._on_signed_in
 
@@ -82,9 +84,51 @@ class JobRunner:
                 if job:
                     self._run_one(job)
                     continue
-            except Exception:  # noqa: BLE001
+                self._auto_refresh()
+            except Exception:
                 log.exception("runner loop error")
             self._stop.wait(self.poll)
+
+    def _auto_refresh(self) -> None:
+        """Queue a quick check for accounts that asked for automatic refresh.
+
+        Runs only inside this app process (no system scheduler), only for a
+        signed-in session that has finished a first collection, and never
+        opens a sign-in window: an expired session simply waits for the user."""
+        now = time.monotonic()
+        if now - self._last_auto < 60:
+            return
+        self._last_auto = now
+        rows = self.hub.db.query("SELECT account_id, value_json FROM account_settings WHERE key='auto_refresh'")
+        for r in rows:
+            minutes = int(json.loads(r["value_json"]).get("minutes") or 0)
+            if minutes <= 0:
+                continue
+            aid = r["account_id"]
+            busy = self.hub.db.one("""SELECT 1 FROM jobs WHERE account_id=? AND kind='collect'
+                                      AND state IN ('queued','running','cancel_requested','needs_login','paused','interrupted')""", (aid,))
+            if busy:
+                continue
+            last = self.hub.db.one("""SELECT MAX(finished_at) AS f FROM jobs WHERE account_id=? AND kind='collect'
+                                      AND state IN ('completed','completed_with_gaps')""", (aid,))
+            if not last or not last["f"]:
+                continue                       # the user runs the first baseline themselves
+            if (datetime.now(timezone.utc) - parse_iso(last["f"])).total_seconds() < minutes * 60:
+                continue
+            acct = self.hub.identity.get_account(aid)
+            sess = self.worker.session(acct["instance_id"])
+            if sess.get("status") == "unknown":
+                try:
+                    sess = self.worker.call(lambda i=acct["instance_id"]: self.worker.check_session(i), timeout=60)
+                except Exception:
+                    continue
+            if sess.get("status") != "signed_in" or sess.get("account_id") != aid:
+                continue
+            try:
+                job = self.start_collection(aid, "quick")
+                self.hub.jobs.update_stats(job["id"], note=f"Automatic quick check (every {minutes} min while the app runs).")
+            except Exception:
+                log.exception("automatic refresh could not start")
 
     def _run_one(self, job: dict) -> None:
         inst = job["instance_id"]
@@ -114,7 +158,7 @@ class JobRunner:
         try:
             result = self.worker.call(work, timeout=None)
             log.info("job %s finished: %s", job["id"], result)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             log.exception("job %s crashed", job["id"])
             self.hub.jobs.set_state(job["id"], "failed", error=f"{type(e).__name__}: {e}",
                                     message="The job stopped unexpectedly; verified observations were kept. Resume to retry.")
@@ -124,7 +168,7 @@ class JobRunner:
                 # Refresh cached session state after a job (it may have expired).
                 try:
                     self.worker.call(self.worker.check_session, inst, timeout=60)
-                except Exception:  # noqa: BLE001
+                except Exception:
                     pass
 
     def _on_signed_in(self, instance_id: int, account_id: int) -> None:
@@ -132,7 +176,7 @@ class JobRunner:
         for r in rows:
             try:
                 self.hub.jobs.resume(r["id"])
-            except Exception:  # noqa: BLE001
+            except Exception:
                 pass
 
     # ---- API used by the web layer ---------------------------------------------

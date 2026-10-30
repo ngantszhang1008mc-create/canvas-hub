@@ -31,6 +31,7 @@ from typing import Any, Callable
 from . import dates
 from .htmltools import to_text
 from .model import CATEGORIES, ITEM_TYPES
+from .services.querylayer import VIEW_HELP
 from .util import HubError, InvalidInput
 
 PERMISSIONS = ("read", "notes", "collect", "settings", "ui", "fulfil")
@@ -148,7 +149,12 @@ def h_list_courses(ctx, a):
     cs = ctx.api.list_courses(aid)["courses"]
     return {"courses": [{"course_id": c["course_id"], "title": c["title"], "code": c["course_code"], "term": c["term"],
                          "section": c["listing_section"], "access": c["access"], "item_counts": c["item_counts"],
-                         "last_read": c["last_observed_at"]} for c in cs]}
+                         "content_state": c.get("content_state"), "content_state_reason": c.get("content_state_reason"),
+                         "blocked_sections": c.get("blocked_sections") or None,
+                         "possible_duplicates": c.get("possible_duplicates") or None, "same_course_as": c.get("linked_shells") or None,
+                         "last_read": c["last_observed_at"]} for c in cs],
+            "note": "content_state: has_content / empty (sections shown, nothing in them) / hidden (no sections in the course "
+                    "menu) / inaccessible / not_checked. possible_duplicates are shells with the same course code."}
 
 
 def h_search(ctx, a):
@@ -376,9 +382,29 @@ def h_cancel_job(ctx, a):
 def h_list_notes(ctx, a):
     aid = _account(ctx, a)
     r = ctx.api.list_annotations(aid, item_id=a.get("item_id"), kind=a.get("kind"), task_state=a.get("task_state"))
+    notes = r["annotations"]
+    q = (a.get("query") or "").strip().lower()
+    if q:
+        words = q.split()
+        notes = [n for n in notes if all(w in f"{n['title'] or ''} {n['body'] or ''}".lower() for w in words)]
     return {"notes": [{"note_id": n["id"], "kind": n["kind"], "title": n["title"], "body": _clip(n["body"], 2000),
+                       "body_chars": len(n["body"] or ""), "truncated": len(n["body"] or "") > 2000,
                        "task_state": n["task_state"], "local_due": n["local_due"], "item_id": n["item_id"],
-                       "item_title": n["item_title"], "updated_at": n["updated_at"]} for n in r["annotations"]]}
+                       "item_title": n["item_title"], "updated_at": n["updated_at"]} for n in notes],
+            "hint": "Bodies over 2,000 characters are cut here; read the whole note with get_note."}
+
+
+def h_get_note(ctx, a):
+    aid = _account(ctx, a)
+    n = ctx.api.hub.annotations.get(aid, a["note_id"])
+    body = n["body"] or ""
+    off = max(0, a.get("offset") or 0)
+    size = min(max(1000, a.get("max_chars") or 50000), 100000)
+    chunk = body[off:off + size]
+    return {"note_id": n["id"], "kind": n["kind"], "title": n["title"], "task_state": n["task_state"],
+            "local_due": n["local_due"], "item_id": n["item_id"], "updated_at": n["updated_at"],
+            "body_chars": len(body), "offset": off, "body": chunk,
+            "next_offset": off + len(chunk) if off + len(chunk) < len(body) else None}
 
 
 def h_create_note(ctx, a):
@@ -392,6 +418,11 @@ def h_create_note(ctx, a):
 def h_update_note(ctx, a):
     aid = _account(ctx, a)
     data = {k: a[k] for k in ("title", "body", "task_state", "local_due") if k in a}
+    mode = a.get("mode") or "replace"
+    if "body" in data and mode != "replace":
+        cur = ctx.api.hub.annotations.get(aid, a["note_id"])["body"] or ""
+        sep = "\n\n" if cur and data["body"] else ""
+        data["body"] = cur + sep + data["body"] if mode == "append" else data["body"] + sep + cur
     n = ctx.api.update_annotation(aid, a["note_id"], data)
     return {"updated": {"note_id": n["id"], "title": n["title"], "task_state": n["task_state"], "body": _clip(n["body"], 500)}}
 
@@ -765,6 +796,122 @@ def h_show_diff(ctx, a):
                     f"Showed {len(changes)} change(s) side by side" + ("" if changes else " (no recorded edits)") + ".")
 
 
+def h_whats_new(ctx, a):
+    aid = _account(ctx, a)
+    f = ctx.api.hub.notifications.feed(aid, a.get("limit") or 20)
+    if a.get("mark_seen"):
+        ctx.api.hub.notifications.mark_seen(aid, f["latest_change_id"])
+    return f | {"note": "Changes found by the latest collection runs. Run a quick check first if freshness matters."}
+
+
+def h_wait_requests(ctx, a):
+    aid = _account(ctx, a)
+    deadline = time.monotonic() + max(5, min(a.get("timeout_seconds") or 120, 300))
+    while True:
+        open_ = ctx.api.hub.requests.list(aid, "open")
+        if open_ or time.monotonic() >= deadline:
+            return {"requests": [{"request_id": r["id"], "url": r["url"], "title": r["title"], "note": r["note"],
+                                  "course_id": r["course_canvas_id"], "created_at": r["created_at"]} for r in open_],
+                    "note": "Claim one with claim_view_request, read it with your own browser, then submit_view_result."
+                    if open_ else "No open requests yet; call again to keep waiting."}
+        time.sleep(3)
+
+
+def h_find_dates(ctx, a):
+    aid = _account(ctx, a)
+    r = ctx.api.hub.datefinder.scan(aid) if a.get("rescan", True) else ctx.api.hub.datefinder.list(aid)
+    return {"suggestions": [{"id": c["id"], "label": c["label"], "starts_at": c["starts_at"], "ends_at": c["ends_at"],
+                             "location": c["location"], "course": c["course_title"], "source_item_id": c["item_id"],
+                             "source": c["item_title"], "snippet": c["snippet"], "status": c["status"]}
+                            for c in r["candidates"] if c["status"] != "dismissed"],
+            "note": "Suggestions found in page/announcement/syllabus text (e.g. exams). They are not Canvas deadlines. "
+                    "The user confirms them on the Deadlines page; confirmed ones become dated to-dos in the Planner."}
+
+
+def h_query_data(ctx, a):
+    from .services.querylayer import run_query
+    return run_query(ctx.api.hub.paths.db, _account(ctx, a), a["sql"])
+
+
+def h_calculate(ctx, a):
+    from .services.querylayer import evaluate
+    return {"expression": a["expression"], "result": evaluate(a["expression"], a.get("variables"))}
+
+
+def h_find_clashes(ctx, a):
+    from .services.querylayer import find_clashes
+    return find_clashes(ctx.api.hub, _account(ctx, a), a.get("days_ahead") or 21)
+
+
+# ---- saved files ---------------------------------------------------------------------
+def h_save_file(ctx, a):
+    aid = _account(ctx, a)
+    f = ctx.api.hub.files.save(aid, filename=a["filename"], content=a["content"], title=a.get("title"),
+                               course_id=a.get("course_id"), created_by="assistant", conversation_id=ctx.conversation_id)
+    return {"saved": {k: f[k] for k in ("id", "title", "filename", "size", "sha256", "created_at")},
+            "note": "Saved in Canvas Hub (Notes & tasks → Files). It can be downloaded or attached to a prepared submission."}
+
+
+def h_list_files(ctx, a):
+    return {"files": [{k: f[k] for k in ("id", "title", "filename", "mime", "size", "created_by", "created_at")}
+                      for f in ctx.api.hub.files.list(_account(ctx, a))]}
+
+
+def h_get_file(ctx, a):
+    aid = _account(ctx, a)
+    f = ctx.api.hub.files.get(aid, a["file_id"])
+    if not f["is_text"]:
+        return {k: f[k] for k in ("id", "title", "filename", "mime", "size")} | {"note": "binary file; content not shown"}
+    text = ctx.api.hub.files.text(aid, f["id"])
+    off = max(0, a.get("offset") or 0)
+    chunk = text[off:off + 50000]
+    return {k: f[k] for k in ("id", "title", "filename", "mime", "size")} | {
+        "offset": off, "content": chunk, "chars": len(text), "next_offset": off + len(chunk) if off + len(chunk) < len(text) else None}
+
+
+# ---- confirmed writes (prepare only; the user confirms in the app) -------------------------
+def _write_display(ctx, w: dict) -> dict:
+    return {"display": {"component": "write_preview", "write": w},
+            "summary": (f"Prepared write #{w['id']} ({w['preview']['action']}) to '{w['preview'].get('target') or ''}' in "
+                        f"{w['preview'].get('course') or w['course_id']}. NOTHING HAS BEEN SENT: the user must review the "
+                        "preview and press Send in the app. Do not tell the user it was submitted; check later with "
+                        "list_canvas_writes."
+                        + (" Warnings: " + " ".join(w["warnings"]) if w["warnings"] else "")),
+            "write_id": w["id"], "status": w["status"]}
+
+
+def h_prepare_submission(ctx, a):
+    aid = _account(ctx, a)
+    kind = "submission_file" if a.get("file_id") is not None else "submission_text"
+    w = ctx.api.hub.writes.prepare(aid, kind, prepared_by="assistant", item_id=a["item_id"], text=a.get("text"),
+                                   file_id=a.get("file_id"), conversation_id=ctx.conversation_id)
+    return _write_display(ctx, w)
+
+
+def h_prepare_reply(ctx, a):
+    aid = _account(ctx, a)
+    w = ctx.api.hub.writes.prepare(aid, "discussion_reply", prepared_by="assistant", item_id=a["item_id"], text=a["text"],
+                                   conversation_id=ctx.conversation_id)
+    return _write_display(ctx, w)
+
+
+def h_prepare_message(ctx, a):
+    aid = _account(ctx, a)
+    w = ctx.api.hub.writes.prepare(aid, "message", prepared_by="assistant", course_id=a["course_id"],
+                                   recipients=a["recipient_ids"], subject=a["subject"], text=a["body"],
+                                   conversation_id=ctx.conversation_id)
+    return _write_display(ctx, w)
+
+
+def h_list_writes(ctx, a):
+    aid = _account(ctx, a)
+    rows = ctx.api.hub.writes.list(aid, a.get("status"))
+    return {"enabled": ctx.api.hub.writes.get_settings(aid)["enabled"],
+            "writes": [{"write_id": w["id"], "kind": w["kind"], "status": w["status"], "target": w["target_title"],
+                        "course_id": w["course_id"], "created_at": w["created_at"], "finished_at": w["finished_at"],
+                        "result": w["result"], "error": w["error"]} for w in rows[:50]]}
+
+
 _CATS = [c for c in CATEGORIES if c != "courses"]
 _DATE_DESC = "ISO-8601 timestamp with offset, e.g. 2026-11-01T00:00:00+08:00"
 
@@ -813,19 +960,68 @@ TOOLS: list[AgentTool] = [
     AgentTool("list_jobs", "Recent collection jobs.", "read", {"limit": {"type": "integer", "minimum": 1, "maximum": 20}},
               [], h_list_jobs),
     AgentTool("get_job", "State and progress of a collection job.", "read", {"job_id": {"type": "integer"}}, ["job_id"], h_get_job),
-    AgentTool("list_notes", "The user's own local notes and to-dos.", "read",
+    AgentTool("list_notes", "The user's own local notes and to-dos, optionally filtered by words in the title or body. "
+              "Long bodies are cut at 2,000 characters; use get_note for the whole text.", "read",
               {"item_id": {"type": "integer"}, "kind": {"type": "string", "enum": ["note", "task"]},
-               "task_state": {"type": "string", "enum": ["open", "done"]}}, [], h_list_notes),
+               "task_state": {"type": "string", "enum": ["open", "done"]}, "query": {"type": "string"}}, [], h_list_notes),
+    AgentTool("get_note", "Read one local note in full (up to 100,000 characters per call; page with offset).", "read",
+              {"note_id": {"type": "integer"}, "offset": {"type": "integer", "minimum": 0},
+               "max_chars": {"type": "integer", "minimum": 1000, "maximum": 100000}}, ["note_id"], h_get_note),
+    AgentTool("list_files", "Files saved in Canvas Hub (finished work the assistant or the user saved).", "read",
+              handler=h_list_files),
+    AgentTool("get_file", "Read a saved text file (50,000 characters per call; page with offset).", "read",
+              {"file_id": {"type": "integer"}, "offset": {"type": "integer", "minimum": 0}}, ["file_id"], h_get_file),
+    AgentTool("find_dates_in_pages", "Dates of exams, quizzes, presentations and deadlines mentioned only in course pages, "
+              "the syllabus or announcements (not Canvas deadlines), with the sentence they came from.", "read",
+              {"rescan": {"type": "boolean"}}, [], h_find_dates),
+    AgentTool("query_data", "Run a read-only SQL SELECT over the user's stored Canvas data for counts, sums and "
+              "cross-course questions (max 500 rows, 3 s). " + VIEW_HELP,
+              "read", {"sql": {"type": "string"}}, ["sql"], h_query_data),
+    AgentTool("calculate", "Evaluate arithmetic exactly (e.g. 'min(20, hours / 20 * 20)', 'sum(scores) / len_') with "
+              "named numeric variables; supports + - * / // % **, comparisons, and/or, a if c else b, "
+              "min/max/sum/round/abs/ceil/floor/sqrt.", "read",
+              {"expression": {"type": "string"}, "variables": {"type": "object", "description": "name -> number or list"}},
+              ["expression"], h_calculate),
+    AgentTool("find_clashes", "Cross-course conflicts: days with two or more unsubmitted deadlines, and Canvas events "
+              "(e.g. exams) that overlap the user's saved class times.", "read",
+              {"days_ahead": {"type": "integer", "minimum": 1, "maximum": 120}}, [], h_find_clashes),
+    AgentTool("whats_new", "Important changes since the user last looked: new announcements and assignments, edited due "
+              "dates and instructions, newly posted grades, items that disappeared. Unread ones are flagged.", "read",
+              {"limit": {"type": "integer", "minimum": 1, "maximum": 60}, "mark_seen": {"type": "boolean"}}, [], h_whats_new),
+    AgentTool("list_canvas_writes", "Writes to Canvas you or the user prepared, and whether the user sent them "
+              "(prepared / sent / failed / cancelled / expired).", "read",
+              {"status": {"type": "string", "enum": ["prepared", "sending", "sent", "failed", "cancelled", "expired"]}},
+              [], h_list_writes),
     # ---- notes (local writes)
     AgentTool("create_note", "Create a local note or to-do, optionally attached to an item. Local only; never sent to Canvas "
               "and never a submission.", "notes",
               {"kind": {"type": "string", "enum": ["note", "task"]}, "title": {"type": "string"}, "body": {"type": "string"},
                "item_id": {"type": "integer"}, "local_due": {"type": "string", "description": _DATE_DESC},
                "task_state": {"type": "string", "enum": ["open", "done"]}}, ["kind"], h_create_note),
-    AgentTool("update_note", "Edit a local note or mark a local to-do open/done.", "notes",
+    AgentTool("update_note", "Edit a local note or mark a local to-do open/done. mode=append (or prepend) adds the body "
+              "text to the existing body instead of replacing it.", "notes",
               {"note_id": {"type": "integer"}, "title": {"type": "string"}, "body": {"type": "string"},
+               "mode": {"type": "string", "enum": ["replace", "append", "prepend"]},
                "task_state": {"type": "string", "enum": ["open", "done"]}, "local_due": {"type": "string", "description": _DATE_DESC}},
               ["note_id"], h_update_note),
+    AgentTool("save_file", "Save finished work as a file in Canvas Hub (e.g. study-plan.md, notes.csv). The user can "
+              "download it, and it can be attached to a prepared submission.", "notes",
+              {"filename": {"type": "string"}, "content": {"type": "string"}, "title": {"type": "string"},
+               "course_id": {"type": "string"}}, ["filename", "content"], h_save_file),
+    # ---- writes to Canvas: prepare only (offered only when the user switched writes on)
+    AgentTool("prepare_submission", "Prepare an assignment submission for the user to review: text (online text entry) or "
+              "a saved file (file_id from save_file). Nothing is sent until the user presses Send in the app.", "prepare",
+              {"item_id": {"type": "integer", "description": "Canvas Hub item id of the assignment"},
+               "text": {"type": "string", "description": "submission text, or a comment when file_id is given"},
+               "file_id": {"type": "integer"}}, ["item_id"], h_prepare_submission),
+    AgentTool("prepare_discussion_reply", "Prepare a reply to a discussion for the user to review. Nothing is sent until "
+              "the user presses Send in the app.", "prepare",
+              {"item_id": {"type": "integer"}, "text": {"type": "string"}}, ["item_id", "text"], h_prepare_reply),
+    AgentTool("prepare_message", "Prepare a Canvas inbox message for the user to review (recipients are Canvas user ids, "
+              "e.g. an announcement's author id). Nothing is sent until the user presses Send in the app.", "prepare",
+              {"course_id": {"type": "string"}, "recipient_ids": {"type": "array", "items": {"type": "string"}},
+               "subject": {"type": "string"}, "body": {"type": "string"}},
+              ["course_id", "recipient_ids", "subject", "body"], h_prepare_message),
     AgentTool("delete_note", "Delete a local note or to-do.", "notes", {"note_id": {"type": "integer"}}, ["note_id"], h_delete_note),
     # ---- collection (Canvas traffic through the app's browser)
     AgentTool("start_collection", "Check Canvas for updates using the app's signed-in browser and store what it finds. "
@@ -873,6 +1069,9 @@ TOOLS += [
               {"url": {"type": "string"}, "title": {"type": "string"}, "course_id": {"type": "string"},
                "note": {"type": "string", "description": "instructions for the agent, e.g. which browser profile to use"}},
               ["url"], h_request_view),
+    AgentTool("wait_for_view_requests", "Wait (up to timeout_seconds, max 300) until the user leaves a request to read an "
+              "external site, then return the open requests. Use it to serve requests as they arrive.", "fulfil",
+              {"timeout_seconds": {"type": "integer", "minimum": 5, "maximum": 300}}, [], h_wait_requests),
     AgentTool("claim_view_request", "Claim an open request to read an external site, so other agents leave it to you.", "fulfil",
               {"request_id": {"type": "integer"}, "agent_name": {"type": "string", "description": "who you are, e.g. Codex"}},
               ["request_id", "agent_name"], h_claim_request),

@@ -1385,26 +1385,35 @@ class CollectionRun:
         pkg = Package(self, task["task_key"])
         scoped = {f"course_{c}" for c in self.scoped_courses}
         kept = 0
+        me = str(self.account["canvas_user_id"])
         for cv in res.items:
             ctx = cv.get("context_code") or ""
-            if ctx not in scoped:
+            # Course conversations only for in-scope courses; personal and group messages are kept too
+            # (they are often how instructors reach a student).
+            if ctx.startswith("course_") and ctx not in scoped:
                 continue
             full = self.client.api_get(f"/api/v1/conversations/{cv['id']}", [("auto_mark_as_read", "false")])
             t = now_iso()
             names = {str(p.get("id")): p.get("name") for p in full.get("participants") or []}
+            msgs = sorted(full.get("messages") or [], key=lambda m: m.get("created_at") or "")
+            first = msgs[0] if msgs else {}
+            last = msgs[-1] if msgs else {}
             kept += 1
-            pkg.item("conversation", course_id=ctx.split("_", 1)[1], canvas_id=cv["id"],
+            pkg.item("conversation", course_id=ctx.split("_", 1)[1] if ctx.startswith("course_") else None, canvas_id=cv["id"],
                      url=f"{self.origin}/conversations#filter=type=inbox", title=cv.get("subject") or "(no subject)",
                      observed_at=t, depth="body", fields={
                          "title": cv.get("subject") or "(no subject)", "message_count": cv.get("message_count"),
                          "last_message_at": _d(cv.get("last_message_at")), "workflow_state": cv.get("workflow_state"),
-                         "participants": [p.get("name") for p in full.get("participants") or []],
+                         "unread": cv.get("workflow_state") == "unread", "context": ctx or None,
+                         "started_by": names.get(str(first.get("author_id"))),
+                         "last_author": names.get(str(last.get("author_id"))),
+                         "participants": [p.get("name") for p in full.get("participants") or [] if str(p.get("id")) != me],
                          "messages": [{"author": names.get(str(m.get("author_id"))), "created_at": _d(m.get("created_at")),
-                                       "body": m.get("body")} for m in full.get("messages") or []],
+                                       "body": m.get("body")} for m in reversed(msgs)],
                      })
         pkg.coverage("inbox", "complete" if res.complete else "partial", index="complete" if res.complete else "partial",
                      body="complete", attachments="not_checked", collected=kept,
-                     detail={"filter": "conversations whose context is an in-scope course",
+                     detail={"filter": "personal and group conversations, and those of in-scope courses",
                              "note": "Read with auto_mark_as_read=false; nothing is ever sent."})
         pkg.commit()
 

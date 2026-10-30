@@ -11,14 +11,19 @@ from ..paths import AppPaths, get_paths
 from ..util import InvalidInput, NotFound
 from .annotations import AnnotationService
 from .components import ComponentService
+from .datefinder import DateFinder
+from .files import SavedFileService
 from .identity import IdentityService
 from .importer import Importer
 from .jobs import JobService
+from .notifications import NotificationService
 from .planner import PlannerService
 from .query import QueryService
 from .requests import RequestService
 from .resources import ResourceService
 from .search import SearchService
+from .settings import AccountSettings
+from .writes import WriteService
 
 
 class Hub:
@@ -38,6 +43,11 @@ class Hub:
         self.planner = PlannerService(self.db, self.query)
         self.requests = RequestService(self.db, self.identity, self.importer)
         self.components = ComponentService(self.db, self.annotations)
+        self.settings = AccountSettings(self.db)
+        self.files = SavedFileService(self.db)
+        self.writes = WriteService(self.db, self.identity, self.query, self.files, self.settings)
+        self.notifications = NotificationService(self.db, self.settings)
+        self.datefinder = DateFinder(self.db, self.query, self.annotations, self.settings)
 
     def close(self) -> None:
         self.db.close()

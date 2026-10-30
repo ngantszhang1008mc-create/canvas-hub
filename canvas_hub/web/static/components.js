@@ -336,6 +336,9 @@ export function makeComponents(env) {
     const copyBtn = h("button", { class: "sm primary", onclick: () => copyText(d.content, copyBtn) }, "Copy");
     const fname = d.filename || `${slug(d.title)}.${{ markdown: "md", md: "md", json: "json", csv: "csv", python: "py", html: "html", javascript: "js", text: "txt" }[d.language] || "txt"}`;
     const dl = h("button", { class: "sm", onclick: () => download(d.content, fname, d.language === "json" ? "application/json" : d.language === "csv" ? "text/csv" : "text/plain") }, "Download");
+    const save = h("button", { class: "sm ghost", title: "Keep it in Canvas Hub (Notes & tasks → Files)", onclick: async () => {
+      const r = await guard(() => api(A("/files"), { method: "POST", body: { filename: fname, title: d.title, content: d.content } }));
+      if (r) { save.textContent = "✓ Saved to files"; save.disabled = true; toast(`Saved as file #${r.id}`); } } }, "Save to files");
     const draw = () => {
       const show = expanded ? lines : lines.slice(0, LIMIT);
       mount(pre, h("ol", { class: "art-lines" }, show.map((l) => h("li", null, h("code", null, ...highlight(l, d.language))))));
@@ -347,7 +350,7 @@ export function makeComponents(env) {
     draw();
     const body = h("div", null,
       h("div", { class: "art-meta tiny muted" }, `${d.language || "text"} · ${lines.length} lines · ${words.toLocaleString()} words · ${d.content.length.toLocaleString()} characters`),
-      pre, h("div", { class: "row", style: "margin-top:8px" }, copyBtn, dl, more));
+      pre, h("div", { class: "row", style: "margin-top:8px" }, copyBtn, dl, save, more));
     return frame("artifact", d.title, body, () => ({ title: d.title, filename: fname.replace(/\.[^.]+$/, ""), text: d.content,
       markdown: d.language === "markdown" || d.language === "md" ? d.content : "```" + (d.language || "") + "\n" + d.content + "\n```",
       json: { title: d.title, language: d.language, content: d.content } }));
@@ -609,6 +612,91 @@ export function makeComponents(env) {
     });
   }
 
+  // ---------- confirmed writes to Canvas ----------
+  const WSTATUS = { prepared: ["warn", "Not sent — waiting for you"], sending: ["info", "Sending…"], sent: ["ok", "Sent to Canvas"],
+    failed: ["bad", "Failed"], cancelled: ["muted", "Cancelled"], expired: ["muted", "Expired"] };
+  function writePreviewView(initial) {
+    const host = h("div");
+    const draw = (w) => {
+      const pv = w.preview;
+      const st = WSTATUS[w.status] || ["muted", w.status];
+      const confirmRow = h("div", { class: "write-confirm", hidden: true },
+        h("div", { class: "strong" }, `${pv.action} in ${pv.course || "course " + w.course_id}?`),
+        h("div", { class: "small muted" }, "This sends exactly what is shown above, from your signed-in Canvas session. It cannot be undone from Canvas Hub."),
+        h("div", { class: "row", style: "margin-top:8px" },
+          h("button", { class: "danger", onclick: async (e) => {
+            e.target.disabled = true; e.target.textContent = "Sending…";
+            const r = await guard(() => api(A(`/writes/${w.id}/confirm`), { method: "POST", body: { preview_hash: pv.hash } }));
+            if (r) { draw(r); toast(r.status === "sent" ? "Sent to Canvas" : `Not sent: ${r.error || r.status}`, r.status !== "sent"); }
+            else { e.target.disabled = false; e.target.textContent = "Yes, send it"; }
+          } }, "Yes, send it"),
+          h("button", { class: "ghost", onclick: () => { confirmRow.hidden = true; actions.hidden = false; } }, "Back")));
+      const actions = h("div", { class: "row", style: "margin-top:10px" },
+        h("button", { class: "primary", onclick: () => { confirmRow.hidden = false; actions.hidden = true; } }, "Send to Canvas…"),
+        h("button", { class: "ghost", onclick: async () => { const r = await guard(() => api(A(`/writes/${w.id}/cancel`), { method: "POST" })); if (r) draw(r); } }, "Cancel"),
+        h("span", { class: "tiny muted" }, `Expires ${fmtDate(w.expires_at)}`));
+      const fields = [
+        ["Action", pv.action], ["Course", pv.course || w.course_id],
+        pv.target ? ["To", w.target_item_id ? itemLink(w.target_item_id, pv.target) : pv.target] : null,
+        pv.recipients ? ["Recipients", pv.recipients.map((r) => `${r.name || "user"} (${r.id})`).join(", ")] : null,
+        pv.subject ? ["Subject", pv.subject] : null,
+        pv.file ? ["File", `${pv.file.filename} · ${(pv.file.size / 1024).toFixed(1)} KB · sha256 ${pv.file.sha256.slice(0, 12)}…`] : null,
+        pv.canvas_url ? ["In Canvas", h("a", { href: pv.canvas_url, target: "_blank", rel: "noopener noreferrer" }, pv.canvas_url)] : null,
+      ].filter(Boolean);
+      const res = w.result ? Object.entries(w.result).filter(([, v]) => v != null).map(([k, v]) => `${k}: ${v}`).join(" · ") : null;
+      mount(host, frame("write", "Prepared for Canvas", h("div", { class: "write-card" + (w.status === "prepared" ? " pending" : "") },
+        h("div", { class: "row" }, pill(st[0], st[1]), h("span", { class: "tiny muted" }, `prepared by ${w.prepared_by} ${ago(w.created_at)}`)),
+        h("dl", { class: "write-fields" }, fields.map(([k, v]) => [h("dt", null, k), h("dd", null, v)])),
+        pv.body != null ? h("div", null, h("div", { class: "tiny muted" }, "Exact text that will be sent:"), h("pre", { class: "write-body" }, pv.body)) : null,
+        pv.comment ? h("div", null, h("div", { class: "tiny muted" }, "Comment with the file:"), h("pre", { class: "write-body" }, pv.comment)) : null,
+        (w.warnings || []).map((x) => h("div", { class: "small warn-text" }, "⚠ ", x)),
+        w.status === "prepared" ? [actions, confirmRow] : null,
+        w.status === "sent" ? h("div", { class: "small ok-text" }, `Sent ${fmtDate(w.finished_at)}${res ? ` · ${res}` : ""}`) : null,
+        w.status === "failed" ? h("div", { class: "small bad-text" }, `Not sent: ${w.error}`) : null),
+      () => ({ title: "Prepared write", markdown: `**${pv.action}** — ${pv.course || ""} — ${pv.target || pv.subject || ""}
+
+${pv.body || ""}`, json: w })));
+    };
+    draw(initial);
+    api(A(`/writes/${initial.id}`)).then(draw).catch(() => {});
+    return host;
+  }
+  function writesSettingsCard(data) {
+    const s = data.settings;
+    const LABEL = { submission_text: "Submit text to assignments", submission_file: "Upload files to assignments",
+      discussion_reply: "Reply in discussions", message: "Send inbox messages" };
+    const on = h("input", { type: "checkbox", checked: s.enabled ? true : null });
+    const kinds = Object.keys(LABEL).map((k) => [k, h("input", { type: "checkbox", checked: s.kinds.includes(k) ? true : null })]);
+    return h("div", { class: "card" }, h("div", { class: "card-head" }, h("h2", null, "Writing to Canvas"), pill(s.enabled ? "warn" : "muted", s.enabled ? "On — with confirmation" : "Off")),
+      h("p", { class: "small muted" }, "Off by default. When on, the assistant can prepare a submission, discussion reply or inbox message. Nothing is sent until you read the exact preview and press Send. Every write is logged below."),
+      h("label", { class: "check" }, on, h("strong", null, "Allow confirmed writes for this account")),
+      h("div", { class: "perm-list", style: "margin:6px 0 0 24px" }, kinds.map(([k, el]) => h("label", { class: "check small" }, el, LABEL[k]))),
+      h("div", { class: "row", style: "margin-top:10px" }, h("button", { class: "primary", onclick: async () => {
+        const r = await guard(() => api(A("/write-settings"), { method: "PUT", body: { enabled: on.checked, kinds: kinds.filter(([, el]) => el.checked).map(([k]) => k) } }));
+        if (r) { toast(r.enabled ? "Confirmed writes are on" : "Writes are off"); env.route(); } } }, "Save")),
+      data.writes.length ? h("div", { style: "margin-top:12px" }, h("div", { class: "small strong" }, "Write log"), writesLog(data.writes)) : null);
+  }
+  function writesLog(list) {
+    return h("ul", { class: "list" }, list.map((w) => { const st = WSTATUS[w.status] || ["muted", w.status];
+      return h("li", { class: "spread" }, h("div", null, h("span", { class: "strong" }, w.preview.action), " · ", w.target_title || w.preview.subject || "",
+        h("div", { class: "tiny muted" }, `${w.preview.course || w.course_id} · ${fmtDate(w.finished_at || w.created_at)}${w.error ? ` · ${w.error}` : ""}`)), pill(st[0], st[1])); }));
+  }
+  function filesCard(files) {
+    const input = h("input", { type: "file", "aria-label": "Add a file" });
+    input.addEventListener("change", async () => {
+      const f = input.files[0]; if (!f) return;
+      const r = await guard(() => api(A("/files"), { method: "POST", raw: true, body: f, contentType: f.type || "application/octet-stream", headers: { "X-Filename": encodeURIComponent(f.name) } }));
+      if (r) { toast(`Saved ${r.filename}`); env.route(); }
+    });
+    return h("div", { class: "card" }, h("div", { class: "card-head" }, h("h2", null, "Files"), h("label", { class: "btn sm" }, "Add a file…", input)),
+      h("p", { class: "small muted" }, "Finished work the assistant or you saved: download it, or have the assistant attach it to a prepared submission."),
+      files.length ? h("table", { class: "t" }, h("tbody", null, files.map((f) => h("tr", null,
+        h("td", null, h("span", { class: "strong" }, f.title), h("div", { class: "tiny muted" }, `${f.filename} · ${(f.size / 1024).toFixed(1)} KB · by ${f.created_by} · ${ago(f.created_at)}`)),
+        h("td", { class: "nowrap" }, h("a", { class: "btn sm", href: A(`/files/${f.id}/download`) }, "Download"), " ",
+          h("button", { class: "sm ghost", onclick: async () => { if (!confirm(`Delete ${f.filename}?`)) return; if (await guard(() => api(A(`/files/${f.id}`), { method: "DELETE" }))) env.route(); } }, "Delete")))))) :
+        h("div", { class: "muted small" }, "No files yet."));
+  }
+
   // ---------- dispatcher with a per-result cache ----------
   // The chat re-renders while the assistant works; keep the same element so
   // sorting, expanded rows and unsaved inputs survive. Callbacks read the chat
@@ -631,6 +719,7 @@ export function makeComponents(env) {
       else if (d.component === "diff") el = diffView(d);
       else if (d.component === "score_model") el = scoreModelView(d.view);
       else if (d.component === "checklist") el = checklistView(d.view);
+      else if (d.component === "write_preview") el = writePreviewView(d.write);
       else if (d.component === "choices") el = h("div", { class: "cmp cmp-choices" }, h("div", { class: "small" }, d.question),
         h("div", { class: "chips", style: "margin-top:6px" }, d.options.map((o) => h("button", { class: "chip", onclick: () => ref.ctx.send && ref.ctx.send(o) }, o))));
     } catch (e) {
@@ -654,5 +743,6 @@ export function makeComponents(env) {
     afterRender();
   }
 
-  return { componentView, openDrawer, closeDrawer, trackersView, countdown, copyText, download, evaluate, diffPair };
+  return { componentView, openDrawer, closeDrawer, trackersView, countdown, copyText, download, evaluate, diffPair,
+    writesSettingsCard, writesLog, filesCard };
 }

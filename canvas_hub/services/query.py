@@ -13,7 +13,7 @@ from .. import dates
 from ..db import Database
 from ..htmltools import absolutize
 from ..model import CATEGORIES, ITEM_TYPES, spec_for
-from ..util import InvalidInput, NotFound, clamp_limit, decode_cursor, encode_cursor, parse_iso, to_utc_iso
+from ..util import InvalidInput, NotFound, clamp_limit, decode_cursor, encode_cursor, now_iso, parse_iso, to_utc_iso
 
 
 def _tz(name: str | None, fallback: str | None) -> tuple[ZoneInfo, str]:
@@ -76,7 +76,67 @@ class QueryService:
                 "presence": r["presence"], "first_observed_at": r["first_observed_at"], "last_observed_at": r["last_observed_at"],
                 "item_counts": counts,
             })
+        self._annotate_shells(account_id, out)
         return out
+
+    def _annotate_shells(self, account_id: int, courses: list[dict]) -> None:
+        """content_state tells empty, hidden and inaccessible apart; possible
+        duplicates are shells with the same course code (the user decides)."""
+        for c in courses:
+            cov = {}
+            for r in self.db.query("""SELECT category, status, collected_count FROM coverage WHERE account_id=?
+                                      AND course_canvas_id=? ORDER BY id DESC""", (account_id, c["course_id"])):
+                cov.setdefault(r["category"], dict(r))
+            cats = {k: v for k, v in cov.items() if k not in ("courses", "home")}
+            content = sum(n for t, n in c["item_counts"].items() if t not in ("course", "syllabus"))
+            if c["access"] not in (None, "accessible"):
+                state, why = "inaccessible", "Canvas does not let you open this course (unpublished, concluded or not available)."
+            elif not cov:
+                state, why = "not_checked", "Not collected yet."
+            elif cats and all(v["status"] == "not_exposed" for v in cats.values()):
+                state, why = "hidden", "The course menu shows none of the collected sections; content may exist but is hidden from students."
+            elif content == 0 and all(v["status"] in ("complete", "not_exposed") for v in cats.values()):
+                state, why = "empty", "Sections are shown but contain nothing yet."
+            else:
+                state, why = "has_content", None
+            c["content_state"] = state
+            c["content_state_reason"] = why
+            c["blocked_sections"] = sorted(k for k, v in cats.items() if v["status"] == "blocked")
+        links = {(r["course_canvas_id"], r["other_canvas_id"]): r["relation"] for r in self.db.query(
+            "SELECT course_canvas_id, other_canvas_id, relation FROM course_links WHERE account_id=?", (account_id,))}
+
+        def key(c):
+            code = (c.get("course_code") or "").strip().upper()
+            return code or None
+        for c in courses:
+            k = key(c)
+            same, maybe = [], []
+            for o in courses:
+                if o is c:
+                    continue
+                rel = links.get((c["course_id"], o["course_id"])) or links.get((o["course_id"], c["course_id"]))
+                if rel == "same":
+                    same.append(o["course_id"])
+                elif rel != "different" and k and key(o) == k:
+                    maybe.append(o["course_id"])
+            c["linked_shells"] = same
+            c["possible_duplicates"] = maybe
+
+    def link_courses(self, account_id: int, course_id: str, other_id: str, relation: str) -> None:
+        if relation not in ("same", "different", "none"):
+            raise InvalidInput("relation must be same, different or none")
+        a, b = sorted((str(course_id), str(other_id)))
+        if a == b:
+            raise InvalidInput("pick two different courses")
+        known = {r["source_key"] for r in self.db.query(
+            "SELECT source_key FROM items WHERE account_id=? AND item_type='course' AND source_key IN (?,?)", (account_id, a, b))}
+        if known != {a, b}:
+            raise NotFound("both courses must be among the collected courses", code="course_not_found")
+        with self.db.tx() as c:
+            c.execute("DELETE FROM course_links WHERE account_id=? AND course_canvas_id=? AND other_canvas_id=?", (account_id, a, b))
+            if relation != "none":
+                c.execute("INSERT INTO course_links(account_id, course_canvas_id, other_canvas_id, relation, created_at) "
+                          "VALUES (?,?,?,?,?)", (account_id, a, b, relation, now_iso()))
 
     # ---- items -----------------------------------------------------------
     def list_items(self, account_id: int, *, course_id: str | None = None, item_type: str | None = None,
