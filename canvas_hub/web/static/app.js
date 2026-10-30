@@ -366,6 +366,7 @@ async function route() {
   const params = new URLSearchParams(query || "");
   clearInterval(S.jobPoll);
   clearInterval(assistantPoll);
+  document.body.classList.remove("chat-focus");      // only the assistant pages use focus mode; they turn it back on
   let view = parts[0] || "overview";
   if (!S.accountId && !["setup", "settings"].includes(view)) view = "setup";
   setActiveNav(view === "course" ? "courses" : view === "item" ? "" : view);
@@ -382,6 +383,20 @@ async function route() {
   if (main.isConnected) main.focus({ preventScroll: true });
 }
 window.addEventListener("hashchange", route);
+
+// Assistant focus mode: the window holds just the chat, its tabs and the composer (remembered in this browser).
+// The page's toggle buttons are kept here, so Esc pressed while the page is still drawing updates them too.
+let focusButtons = [];
+function setChatFocus(on, buttons = focusButtons) {
+  focusButtons = buttons;
+  store.set("chatFocus", on ? "1" : "0");
+  document.body.classList.toggle("chat-focus", on);
+  for (const b of buttons) { b.textContent = on ? "Exit focus" : "⤢ Focus"; b.setAttribute("aria-pressed", on ? "true" : "false"); }
+  window.dispatchEvent(new Event("resize"));          // the chat refits to the space it now has
+}
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && document.body.classList.contains("chat-focus") && !document.querySelector(".cmp.fullscreen")) setChatFocus(false);
+});
 
 function pageHead(title, sub, ...actions) {
   return h("div", { class: "page-head" }, h("div", null, h("h1", null, title), sub ? h("p", null, sub) : null),
@@ -1215,7 +1230,7 @@ function renderMessages(list, msgs, ctx = {}) {
       m.setup ? h("div", { class: "msg-meta tiny muted" }, `${m.setup}${m.reasoning ? ` · reasoning ${m.reasoning}` : ""}`) : null));
     else if (m.role === "assistant") {
       const parts = [];
-      if (m.text) parts.push(renderMarkdown(m.text));
+      if (m.text) parts.push(ctx.typed ? ctx.typed(m) : renderMarkdown(m.text));
       const plain = (m.tool_calls || []).filter((c) => !(results[c.id] && results[c.id].display));
       if (plain.length) parts.push(h("div", { class: "steps" }, plain.map((c) => stepRow(c, results[c.id]))));
       for (const c of m.tool_calls || []) if (results[c.id] && results[c.id].display) parts.push(componentView(results[c.id].display, ctx, c.id));
@@ -1232,10 +1247,17 @@ VIEWS.assistant = async (main, parts, params) => {
   const cfg = await api("/api/assistant/config");
   const onSettings = parts[0] === "settings";
   const head = pageHead("Assistant", "Ask about your courses. Answers come from your Canvas Hub data; with permission it can check Canvas for updates and keep your notes.");
+  // Focus mode: the window holds just the chat, these tabs and the composer (remembered in this browser).
+  const focusBtn = h("button", { class: "sm ghost focus-toggle", title: "Show only the chat (Esc to leave)",
+    onclick: () => setChatFocus(!document.body.classList.contains("chat-focus")) });
   const tabs = h("div", { class: "tabs" },
     h("button", { class: onSettings ? "" : "active", onclick: () => { location.hash = "#/assistant"; } }, "Chat"),
     h("button", { class: onSettings ? "active" : "", onclick: () => { location.hash = "#/assistant/settings"; } },
-      "Settings", cfg.profiles.length ? h("span", { class: "tab-count" }, String(cfg.profiles.length)) : null));
+      "Settings", cfg.profiles.length ? h("span", { class: "tab-count" }, String(cfg.profiles.length)) : null),
+    h("span", { class: "grow" }),
+    onSettings ? null : h("a", { class: "btn sm focus-only", href: "#/assistant" }, "+ New chat"),
+    focusBtn);
+  setChatFocus(store.get("chatFocus") === "1", [focusBtn]);
   if (onSettings) return assistantSettingsView(main, head, tabs, cfg, params);
   if (!cfg.configured) {
     mount(main, head, tabs, empty("Set up the assistant first", "Add a provider and your API key. You can save several setups and switch between them.",
@@ -1260,16 +1282,63 @@ VIEWS.assistant = async (main, parts, params) => {
   let current = convId; let lastSeq = 0; let all = []; let stick = true; let wasBusy = false;
   showConvs(convs);
 
-  const chatCtx = { send: (t) => send(t) };   // one per chat view: components can tell a new view from a re-render
+  // ---- replies appear word by word: from the live stream, or all at once for providers that do not stream ----
+  const calm = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const typers = new Map();        // message seq, or "live" for the reply being written -> { el, target, shown, drawn }
+  let openedAt = null;             // messages up to this seq were there when the chat opened: shown at once
+  let tick = null;
+  const follow = () => { if (scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 90) scroller.scrollTop = scroller.scrollHeight; };
+  const draw = (t) => { if (t.drawn !== t.shown) { mount(t.el, renderMarkdown(t.target.slice(0, t.shown))); t.drawn = t.shown; } };
+  const step = () => {
+    tick = null;
+    let more = false;
+    for (const t of typers.values()) {
+      if (t.shown >= t.target.length) { draw(t); continue; }
+      const left = t.target.length - t.shown;
+      let n = t.shown + Math.max(3, Math.ceil(left / 20));             // a few words a frame; faster when behind
+      const gap = t.target.slice(n).search(/\s/);                     // and always end on a whole word
+      t.shown = gap < 0 ? t.target.length : n + gap;
+      draw(t);
+      if (t.shown < t.target.length) more = true;
+    }
+    follow();
+    if (more) tick = setTimeout(step, 30);
+  };
+  const typer = (key, text, animate) => {
+    let t = typers.get(key);
+    if (!t) { t = { el: h("div", { class: "typed" }), target: "", shown: 0, drawn: -1 }; typers.set(key, t); }
+    if (!text.startsWith(t.target.slice(0, t.shown))) t.shown = 0;   // a different text: start over
+    t.target = text;
+    if (!animate || calm) t.shown = text.length;
+    if (t.shown < text.length) { if (!tick) tick = setTimeout(step, 30); } else draw(t);
+    return t.el;
+  };
+  const typed = (m) => {
+    const fresh = openedAt !== null && m.seq > openedAt;
+    const live = typers.get("live");
+    if (fresh && !typers.has(m.seq) && live && m.text.startsWith(live.target.slice(0, live.shown))) {
+      typers.set(m.seq, live);       // the saved reply takes over from the draft without starting again
+      typers.delete("live");
+    }
+    return typer(m.seq, m.text, fresh);
+  };
+  const chatCtx = { send: (t) => send(t), typed };   // one per chat view: components can tell a new view from a re-render
+  let refreshing = false;
   const refresh = async () => {
-    if (!current) return;
+    if (!current || refreshing) return;
+    refreshing = true;
     const d = await api(A(`/assistant/conversations/${current}`) + qs({ after: 0 })).catch(() => null);
+    refreshing = false;
     if (!d) return;
+    if (openedAt === null) openedAt = d.messages.length ? d.messages[d.messages.length - 1].seq : 0;
     // Follow new output only while the reader is at the bottom of the chat.
     const atBottom = stick || scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 60;
     const prevTop = scroller.scrollTop;
     all = d.messages;
     renderMessages(log, all, chatCtx);
+    if (d.draft && d.draft.text) {
+      log.append(h("div", { class: "msg assistant live", "aria-busy": "true" }, typer("live", d.draft.text, true)));
+    } else typers.delete("live");
     const st = d.conversation.run_state;
     const busy = st === "running" || st === "cancelling";
     sendBtn.disabled = busy; stopBtn.hidden = !busy;
@@ -1293,9 +1362,10 @@ VIEWS.assistant = async (main, parts, params) => {
     const emptyEl = document.getElementById("chat-empty");
     if (emptyEl) emptyEl.remove();
     if (current !== r.conversation_id) { current = r.conversation_id; history.replaceState(null, "", `#/assistant/${current}`); reloadConvs(); }
+    if (openedAt === null) openedAt = 0;      // a new chat: everything from here on is typed out
     stick = true;
     clearInterval(assistantPoll);
-    assistantPoll = setInterval(refresh, 1000);
+    assistantPoll = setInterval(refresh, 400);   // often enough for the reply to flow while it is written
     refresh();
   };
   sendBtn.addEventListener("click", () => send());
@@ -1343,7 +1413,7 @@ VIEWS.assistant = async (main, parts, params) => {
   };
   fit();
   window.addEventListener("resize", fit);
-  if (current) { await refresh(); assistantPoll = setInterval(refresh, 1000); }
+  if (current) { await refresh(); assistantPoll = setInterval(refresh, 400); }
   input.focus({ preventScroll: true });
 };
 

@@ -791,3 +791,23 @@ label.btn input[type=file] { display: none; }
 .dash-t td:nth-child(2), .dash-t td:nth-child(3) { min-width: 130px; }
 .dash-t tbody th[scope=row] { text-transform: none; letter-spacing: normal; font-size: 14px; color: var(--ink); border-bottom: 1px solid var(--rule); }
 .dash-t tbody th[scope=row] .tiny { font-weight: 400; }
+
+/* ---- assistant reply being written: a cursor at its end ---- */
+.msg.assistant.live .typed .md > :last-child:not(ul, ol)::after,
+.msg.assistant.live .typed .md > :is(ul, ol):last-child > li:last-child::after { content: "▍"; margin-left: 1px; color: var(--text-3); animation: caret-blink 1s steps(1) infinite; }
+@keyframes caret-blink { 50% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .msg.assistant.live .typed .md *::after { animation: none; } }
+
+/* ---- assistant focus mode: just the chat, its tabs and the composer ---- */
+.tabs .grow { flex: 1; }
+.tabs .focus-toggle, .tabs .focus-only { align-self: center; margin-bottom: 4px; }
+.focus-only { display: none; }
+body.chat-focus .focus-only { display: inline-flex; }
+body.chat-focus .sidebar, body.chat-focus .topbar, body.chat-focus .main > .page-head, body.chat-focus .conv-list { display: none; }
+body.chat-focus .main { max-width: none; padding: 10px 24px 12px; }
+body.chat-focus .main > .tabs { margin-bottom: 10px; }
+body.chat-focus .assistant-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); }
+body.chat-focus .chat-log, body.chat-focus .chat-status, body.chat-focus .chat-empty,
+body.chat-focus .composer > *, body.chat-focus .chat-foot { width: 100%; max-width: 920px; margin-left: auto; margin-right: auto; }
+body.chat-focus .chat-foot { box-sizing: border-box; max-width: 960px; }     /* its own 20px padding lines it up with the composer */
+@media (max-width: 860px) { body.chat-focus .main { padding: 8px 10px; } }

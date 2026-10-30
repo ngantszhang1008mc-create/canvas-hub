@@ -23,11 +23,11 @@ SPEC_TEXT = "SPEC: Canvas Hub components to add\n" + "\n".join(f"{i}. item {i} â
 
 
 @contextmanager
-def serve(hub, plan):
+def serve(hub, plan, **fake_options):
     """The app on a free port, with a scripted model that calls the tools in ``plan``."""
     import uvicorn
     api = HubAPI(hub)
-    fake = FakeLLM(plan)
+    fake = FakeLLM(plan, **fake_options)
     api.assistant = AssistantService(hub, api)
     api.assistant.update_config({"preset": "custom", "base_url": fake.url + "/v1", "model": "m"})
     with socket.socket() as s:
