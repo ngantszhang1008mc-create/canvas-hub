@@ -1404,15 +1404,18 @@ VIEWS.assistant = async (main, parts, params) => {
     const prof = usable.find((x) => x.id === setupSel.value);
     modelSel.hidden = !isCodexSetup() || !codexModels || !codexModels.length;
     if (modelSel.hidden) return;
-    const fallback = (codexModels.find((m) => m.default) || codexModels[0]).id;
-    const chosen = store.get(`model.${setupSel.value}`) || prof.model || fallback;
-    const list = codexModels.some((m) => m.id === chosen) ? codexModels : [...codexModels, { id: chosen, name: chosen }];
+    // The first choice sends no model, so the setup's model, or the default in the user's own Codex configuration,
+    // is used as is (the catalogue's "default" can differ from what the user set in Codex).
+    const own = prof.model && (codexModels.find((m) => m.id === prof.model) || { name: prof.model });
+    const chosen = store.get(`model.${setupSel.value}`) || "";
+    const list = [{ id: "", name: own ? `${own.name} (setup)` : "Codex default" }, ...codexModels];
+    if (chosen && !codexModels.some((m) => m.id === chosen)) list.push({ id: chosen, name: chosen });
     mount(modelSel, list.map((m) => h("option", { value: m.id, selected: m.id === chosen ? true : null, title: m.description || null },
       `Model: ${m.name}`)));
   };
   const fillReasoning = () => {
     const prof = usable.find((x) => x.id === setupSel.value);
-    const model = !modelSel.hidden && codexModels.find((m) => m.id === modelSel.value);
+    const model = !modelSel.hidden && codexModels.find((m) => m.id === (modelSel.value || (prof && prof.model)));
     const levels = (model && model.efforts) || (prof && prof.reasoning_levels) || [];   // what this model supports
     const saved = store.get(`reasoning.${setupSel.value}`) || "";
     mount(reasoningSel, ["", ...levels].map((v) => h("option", { value: v, selected: v === saved ? true : null }, `Reasoning: ${v || "default"}`)));
@@ -1527,8 +1530,9 @@ function assistantSettingsCard(cfg, prof) {
     api("/api/assistant/codex/models").then((r) => {
       const models = r.models || [];
       if (!models.length) { codexListed = false; mount(hint, r.error || "Codex did not list any models; type a model name or leave it empty."); return; }
-      const def = models.find((m) => m.default);
-      const opts = [{ id: "", name: `Codex default${def ? ` (${def.name})` : ""}` }, ...models];
+      // "Codex default" sends no model, so the user's own Codex configuration decides (it may differ from the
+      // catalogue's default).
+      const opts = [{ id: "", name: "Codex default (as set in Codex)" }, ...models];
       if (model.value && !models.some((m) => m.id === model.value)) opts.push({ id: model.value, name: model.value });
       mount(modelPick, opts.map((m) => h("option", { value: m.id, selected: m.id === model.value ? true : null, title: m.description || null }, m.name)));
       modelPick.hidden = presetSel.value !== "codex";

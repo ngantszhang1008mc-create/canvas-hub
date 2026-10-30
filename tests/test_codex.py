@@ -230,7 +230,7 @@ def test_codex_setup_and_chat_work_in_the_browser(hub, account, fake_codex):
         expect(page.get_by_label("Base URL", exact=True)).to_be_hidden()
         expect(page.get_by_text("Extra request settings", exact=False)).to_be_hidden()
         picker = page.get_by_label("Codex model", exact=True)                    # the CLI's own model list
-        expect(picker.locator("option")).to_have_text(["Codex default (Codex Fast)", "Codex Fast", "Codex Deep"])
+        expect(picker.locator("option")).to_have_text(["Codex default (as set in Codex)", "Codex Fast", "Codex Deep"])
         picker.select_option("codex-deep")
         expect(page.get_by_text("Install Codex CLI", exact=False)).to_be_visible()
         page.get_by_role("button", name="Save & test", exact=True).click()
@@ -240,10 +240,16 @@ def test_codex_setup_and_chat_work_in_the_browser(hub, account, fake_codex):
         expect(page.get_by_role("button", name="Use this setup", exact=True)).to_be_hidden()
         page.goto(f"{base}/#/assistant")
         chat_model = page.locator(".composer-bar select[title='Codex model for the next message']")
-        expect(chat_model).to_have_value("codex-deep")                           # the setup's model to start with
+        expect(chat_model).to_have_value("")                                     # the setup's model, not overridden
+        expect(chat_model.locator("option").first).to_have_text("Model: Codex Deep (setup)")
         reasoning = page.locator(".composer-bar select[title='Reasoning effort for the next message'] option")
         expect(reasoning).to_have_text(["Reasoning: default", "Reasoning: low", "Reasoning: medium", "Reasoning: high",
                                         "Reasoning: xhigh", "Reasoning: max"])
+        page.locator(".composer textarea").fill("Hello with the setup's model")
+        page.get_by_role("button", name="Send", exact=True).click()
+        expect(page.locator(".msg.assistant").last).to_have_text("Codex is connected", timeout=15000)
+        expect(page.locator(".msg.user .msg-meta").last).to_have_text("Codex setup")   # no override was sent
+        expect(page.get_by_role("button", name="Send", exact=True)).to_be_enabled()
         chat_model.select_option("codex-fast")                                   # switched for this message
         expect(reasoning).to_have_text(["Reasoning: default", "Reasoning: low", "Reasoning: medium"])
         page.locator(".composer textarea").fill("Hello Codex")
@@ -257,7 +263,7 @@ def test_codex_setup_and_chat_work_in_the_browser(hub, account, fake_codex):
     saved = api.assistant._load()
     assert saved["provider"] == "codex" and saved["model"] == "codex-deep"
     started = [m["params"] for m in messages() if m.get("method") == "thread/start"]
-    assert started[-1]["model"] == "codex-fast"
+    assert [s.get("model") for s in started[-2:]] == ["codex-deep", "codex-fast"]
 
 
 def test_codex_models_come_from_the_cli(hub, account, fake_codex):
@@ -274,8 +280,12 @@ def test_codex_models_come_from_the_cli(hub, account, fake_codex):
     assert starts() == 1 and svc.codex_models()["models"] == listed["models"] and starts() == 1   # reused
     svc.codex_models(refresh=True)
     assert starts() == 2
-    # One message can use another model; other providers cannot be switched this way.
+    # Without a model the user's own Codex configuration decides: none is named to Codex.
     svc.update_config({"preset": "codex", "name": "Codex"})
+    cid = svc.send(account["id"], "Hi")["conversation_id"]
+    svc.wait(cid, 10)
+    assert "model" not in next(m["params"] for m in reversed(messages()) if m.get("method") == "thread/start")
+    # One message can use another model; other providers cannot be switched this way.
     cid = svc.send(account["id"], "Hi", model="codex-deep", reasoning="max")["conversation_id"]
     svc.wait(cid, 10)
     assert next(m["params"] for m in reversed(messages()) if m.get("method") == "thread/start")["model"] == "codex-deep"
