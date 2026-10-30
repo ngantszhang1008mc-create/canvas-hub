@@ -275,3 +275,33 @@ def test_timetable_import_shows_skipped_recurrences(app_server, hub, account):
         expect(pg.locator("#toasts")).to_contain_text("no class times imported: only events that repeat every week are supported")
         assert len(hub.planner.list_classes(account["id"])) == 2
         b.close()
+
+
+def test_an_edit_made_while_undo_is_in_flight_is_kept(app_server, hub, account):
+    from playwright.sync_api import expect, sync_playwright
+    base, tok, _ = app_server
+    aid = account["id"]
+    v = hub.components.create(aid, "checklist", {"title": "Week", "sections": [
+        {"id": "s", "rows": [{"id": "r1", "label": "One"}, {"id": "r2", "label": "Two"}]}]})
+    hub.components.pin(aid, v["id"], True)
+    hub.components.set_state(aid, v["id"], {"done": {"r1": True}})            # something to undo
+    real = hub.components.undo
+
+    def slow_undo(*a, **k):
+        time.sleep(1.5)
+        return real(*a, **k)
+    hub.components.undo = slow_undo
+    with sync_playwright() as p:
+        b = p.chromium.launch()
+        pg = b.new_page(viewport={"width": 1280, "height": 900})
+        pg.goto(f"{base}/?token={tok}")
+        pg.goto(f"{base}/#/trackers")
+        cl = pg.locator(".cmp-checklist")
+        expect(cl.get_by_text("1/2 done")).to_be_visible()
+        cl.get_by_role("button", name="↶ Undo").click()
+        pg.wait_for_timeout(300)                                         # the undo is in flight
+        cl.get_by_role("checkbox", name="Two").check()
+        expect(cl.locator(".save-state")).to_contain_text("Saved", timeout=10000)
+        b.close()
+    hub.components.undo = real
+    assert hub.components.get(aid, v["id"])["state"]["done"] == {"r2": True}   # r1 undone, r2 kept
