@@ -178,7 +178,7 @@ def test_codex_settings_reject_keys_and_preserve_profile_choice(hub, fake_codex)
     assert pid != original and cfg["active_profile"] == original
     svc.activate_profile(pid)
     assert svc.test(pid)["ok"]
-    assert reasoning_levels(svc._load(pid)) == ["low", "medium", "high", "xhigh"]
+    assert reasoning_levels(svc._load(pid)) == ["low", "medium", "high", "xhigh", "max"]
     saved = json.loads(svc._path.read_text())
     codex = next(p for p in saved["profiles"] if p["id"] == pid)
     assert codex["api_key"] == "" and codex["extra_params"] == {} and codex["model"] == ""
@@ -229,7 +229,9 @@ def test_codex_setup_and_chat_work_in_the_browser(hub, account, fake_codex):
         expect(page.get_by_label("API key", exact=True)).to_be_hidden()
         expect(page.get_by_label("Base URL", exact=True)).to_be_hidden()
         expect(page.get_by_text("Extra request settings", exact=False)).to_be_hidden()
-        expect(page.get_by_placeholder("Codex default (optional)")).to_have_value("")
+        picker = page.get_by_label("Codex model", exact=True)                    # the CLI's own model list
+        expect(picker.locator("option")).to_have_text(["Codex default (Codex Fast)", "Codex Fast", "Codex Deep"])
+        picker.select_option("codex-deep")
         expect(page.get_by_text("Install Codex CLI", exact=False)).to_be_visible()
         page.get_by_role("button", name="Save & test", exact=True).click()
         expect(page.get_by_text("Connected · codex-test-model", exact=True)).to_be_visible(timeout=10000)
@@ -237,9 +239,59 @@ def test_codex_setup_and_chat_work_in_the_browser(hub, account, fake_codex):
         page.get_by_role("button", name="Use this setup", exact=True).click()
         expect(page.get_by_role("button", name="Use this setup", exact=True)).to_be_hidden()
         page.goto(f"{base}/#/assistant")
+        chat_model = page.locator(".composer-bar select[title='Codex model for the next message']")
+        expect(chat_model).to_have_value("codex-deep")                           # the setup's model to start with
+        reasoning = page.locator(".composer-bar select[title='Reasoning effort for the next message'] option")
+        expect(reasoning).to_have_text(["Reasoning: default", "Reasoning: low", "Reasoning: medium", "Reasoning: high",
+                                        "Reasoning: xhigh", "Reasoning: max"])
+        chat_model.select_option("codex-fast")                                   # switched for this message
+        expect(reasoning).to_have_text(["Reasoning: default", "Reasoning: low", "Reasoning: medium"])
         page.locator(".composer textarea").fill("Hello Codex")
         page.get_by_role("button", name="Send", exact=True).click()
         expect(page.locator(".msg.assistant").last).to_have_text("Codex is connected", timeout=15000)
+        expect(page.locator(".msg.user .msg-meta").last).to_have_text("Codex setup · codex-fast")
+        page.reload()
+        expect(chat_model).to_have_value("codex-fast")                           # remembered in this browser
         browser.close()
     assert not errors, errors
-    assert api.assistant._load()["provider"] == "codex"
+    saved = api.assistant._load()
+    assert saved["provider"] == "codex" and saved["model"] == "codex-deep"
+    started = [m["params"] for m in messages() if m.get("method") == "thread/start"]
+    assert started[-1]["model"] == "codex-fast"
+
+
+def test_codex_models_come_from_the_cli(hub, account, fake_codex):
+    setup, messages = fake_codex
+    setup(reply="ok")
+    svc = AssistantService(hub, HubAPI(hub))
+    listed = svc.codex_models()
+    assert listed["error"] is None
+    assert [(m["id"], m["name"], m["default"], m["efforts"]) for m in listed["models"]] == [
+        ("codex-fast", "Codex Fast", True, ["low", "medium"]),
+        ("codex-deep", "Codex Deep", False, ["low", "medium", "high", "xhigh", "max"])]   # hidden and "ultra" left out
+    def starts():
+        return sum(1 for m in messages() if m.get("method") == "initialize")
+    assert starts() == 1 and svc.codex_models()["models"] == listed["models"] and starts() == 1   # reused
+    svc.codex_models(refresh=True)
+    assert starts() == 2
+    # One message can use another model; other providers cannot be switched this way.
+    svc.update_config({"preset": "codex", "name": "Codex"})
+    cid = svc.send(account["id"], "Hi", model="codex-deep", reasoning="max")["conversation_id"]
+    svc.wait(cid, 10)
+    assert next(m["params"] for m in reversed(messages()) if m.get("method") == "thread/start")["model"] == "codex-deep"
+    first = svc.get_conversation(account["id"], cid)["messages"][0]
+    assert first["model"] == "codex-deep" and first["reasoning"] == "max"
+    for bad in ("", " ", "-rm", "a b", "x" * 101):
+        if bad.strip():
+            with pytest.raises(InvalidInput):
+                svc.send(account["id"], "Hi", model=bad)
+    svc.update_config({"profile_id": "new", "preset": "deepseek", "api_key": "sk-test-abc", "activate": True})
+    with pytest.raises(InvalidInput, match="only available for Codex"):
+        svc.send(account["id"], "Hi", model="codex-deep")
+
+
+def test_codex_model_list_errors_are_reported(hub, fake_codex):
+    setup, _ = fake_codex
+    setup(no_models=True)
+    out = AssistantService(hub, HubAPI(hub)).codex_models()
+    assert out["models"] == [] and "model list unavailable" in out["error"]

@@ -19,8 +19,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import secrets
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -31,7 +33,9 @@ from .providers import ANTHROPIC_DEFAULT_MODEL, RESERVED_PARAMS, ProviderError, 
 
 log = logging.getLogger("canvas_hub.assistant")
 CONFIG_FILE = "assistant.json"
-MAX_STEPS = 16
+MAX_STEPS = 64             # model turns per message; reading the course data can take dozens of tool calls
+CODEX_MODELS_TTL = 600    # seconds the list of Codex models is reused
+_MODEL_NAME = re.compile(r"^[A-Za-z0-9][\w.:/-]{0,99}$")
 
 PRESETS = [
     {"id": "anthropic", "label": "Anthropic (Claude)", "provider": "anthropic", "base_url": "",
@@ -65,7 +69,7 @@ def reasoning_levels(cfg: dict) -> list[str]:
     if cfg.get("provider") == "openai_compatible":
         return ["low", "medium", "high"]                     # reasoning_effort
     if cfg.get("provider") == "codex":
-        return ["low", "medium", "high", "xhigh"]
+        return ["low", "medium", "high", "xhigh", "max"]     # the chat narrows this to what the chosen model supports
     return []
 DEFAULT_CONFIG = {
     "preset": None, "provider": None, "base_url": "", "model": "", "api_key": "", "effort": "",
@@ -126,6 +130,8 @@ class AssistantService:
         # _live_lock, and get_conversation reads both under it, so a reader never sees both or neither.
         self._live: dict[int, str] = {}
         self._live_lock = threading.Lock()
+        self._codex_models: tuple[float, list] | None = None     # (fetched at, models): asking Codex takes a second
+        self._codex_models_lock = threading.Lock()
         with self.hub.db.tx() as c:   # runs interrupted by an app restart
             c.execute("UPDATE assistant_conversations SET run_state='error', run_error='Interrupted by app restart' "
                       "WHERE run_state IN ('running','cancelling')")
@@ -355,6 +361,20 @@ class AssistantService:
                 provider.close()
         return {"ok": True, "model": turn.model, "reply": (turn.text or "")[:200]}
 
+    def codex_models(self, refresh: bool = False) -> dict:
+        """The models the installed Codex CLI offers, for the setup form and the chat's model picker."""
+        from .codex import list_models
+        with self._codex_models_lock:
+            cached = self._codex_models
+            if cached and not refresh and time.monotonic() - cached[0] < CODEX_MODELS_TTL:
+                return {"models": cached[1], "error": None}
+            try:
+                models = list_models()
+            except ProviderError as e:
+                return {"models": [], "error": str(e)}
+            self._codex_models = (time.monotonic(), models)
+            return {"models": models, "error": None}
+
     # ---- conversations ---------------------------------------------------------
     def list_conversations(self, account_id: int) -> list[dict]:
         return [dict(r) for r in self.hub.db.query(
@@ -386,7 +406,7 @@ class AssistantService:
                 continue
             v = {"seq": m["seq"], "role": m["role"]}
             if m["role"] == "user":
-                v.update(text=m["text"], setup=m.get("setup"), reasoning=m.get("reasoning"))
+                v.update(text=m["text"], setup=m.get("setup"), reasoning=m.get("reasoning"), model=m.get("model"))
             elif m["role"] == "assistant":
                 v.update(text=m.get("text"), model=m.get("model"), stop=m.get("stop"),
                          tool_calls=[{"id": c["id"], "name": c["name"], "input": c.get("input"), "input_error": c.get("input_error")}
@@ -438,7 +458,7 @@ class AssistantService:
                       (state, error, now_iso(), cid))
 
     def send(self, account_id: int, text: str, conversation_id: int | None = None, profile_id: str | None = None,
-             reasoning: str | None = None) -> dict:
+             reasoning: str | None = None, model: str | None = None) -> dict:
         # The chat names the setup it shows, so a message never goes to a
         # different provider than the one the user picked.
         cfg = self._load(profile_id)
@@ -451,6 +471,13 @@ class AssistantService:
                 raise InvalidInput(f"reasoning for this setup must be one of {levels}" if levels
                                    else "this setup has no reasoning setting")
             cfg["effort" if cfg["provider"] == "anthropic" else "thinking"] = reasoning
+        model = (model or "").strip()
+        if model:       # a Codex setup can use another of the CLI's models for one message
+            if cfg["provider"] != "codex":
+                raise InvalidInput("choosing a model per message is only available for Codex setups")
+            if not _MODEL_NAME.match(model):
+                raise InvalidInput("that does not look like a model name")
+            cfg["model"] = model
         text = (text or "").strip()
         if not text:
             raise InvalidInput("message is empty")
@@ -474,7 +501,8 @@ class AssistantService:
         self._repair(cid)
         # The time stamp is stored with the message (history stays append-only).
         sent = f"[Now: {now_local.strftime('%A %d %B %Y %H:%M %Z')}]\n\n{text}"
-        self._append(cid, "user", {"text": text, "sent_text": sent, "setup": cfg.get("name"), "reasoning": reasoning})
+        self._append(cid, "user", {"text": text, "sent_text": sent, "setup": cfg.get("name"), "reasoning": reasoning,
+                                   "model": model or None})
         self._set_state(cid, "running")
         th = threading.Thread(target=self._run, args=(cid, account_id, cfg, acct), name=f"assistant-{cid}", daemon=True)
         with self._lock:

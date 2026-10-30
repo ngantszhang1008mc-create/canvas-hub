@@ -574,6 +574,11 @@ def create_app(api: HubAPI, *, token: str, port: int) -> FastAPI:
         pid = (await body(request)).get("profile_id")
         return await run_in_threadpool(_assistant().test, pid)
 
+    @app.get("/api/assistant/codex/models")
+    async def assistant_codex_models(refresh: bool = False):
+        # Starts the Codex CLI for a moment to read its model list; keep it off the event loop.
+        return await run_in_threadpool(_assistant().codex_models, refresh)
+
     @app.post("/api/assistant/profiles/{pid}/activate")
     def assistant_activate(pid: str):
         return _assistant().activate_profile(pid)
@@ -592,9 +597,9 @@ def create_app(api: HubAPI, *, token: str, port: int) -> FastAPI:
         b = await body(request)
         api.get_account(aid)
         cid = b.get("conversation_id")
-        pid, reasoning = b.get("profile_id"), b.get("reasoning")
+        pid, reasoning, model = b.get("profile_id"), b.get("reasoning"), b.get("model")
         return _assistant().send(aid, b.get("text", ""), int(cid) if cid else None, str(pid) if pid else None,
-                                 str(reasoning) if reasoning else None)
+                                 str(reasoning) if reasoning else None, str(model) if model else None)
 
     @app.get("/api/accounts/{aid}/assistant/conversations/{cid}")
     def assistant_conversation(aid: int, cid: int, after: int = 0):

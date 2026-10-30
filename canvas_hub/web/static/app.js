@@ -1242,7 +1242,7 @@ function renderMessages(list, msgs, ctx = {}) {
   const out = [];
   for (const m of msgs) {
     if (m.role === "user") out.push(h("div", { class: "msg user" }, h("div", { class: "bubble" }, m.text),
-      m.setup ? h("div", { class: "msg-meta tiny muted" }, `${m.setup}${m.reasoning ? ` · reasoning ${m.reasoning}` : ""}`) : null));
+      m.setup ? h("div", { class: "msg-meta tiny muted" }, `${m.setup}${m.model ? ` · ${m.model}` : ""}${m.reasoning ? ` · reasoning ${m.reasoning}` : ""}`) : null));
     else if (m.role === "assistant") {
       const parts = [];
       if (m.text) parts.push(ctx.typed ? ctx.typed(m) : renderMarkdown(m.text));
@@ -1371,7 +1371,7 @@ VIEWS.assistant = async (main, parts, params) => {
     if (!t) return;
     sendBtn.disabled = true;
     const r = await guard(() => api(A("/assistant/messages"), { method: "POST", body: { text: t, conversation_id: current, profile_id: setupSel.value || cfg.active_profile,
-      reasoning: reasoningSel.hidden ? "" : reasoningSel.value } }));
+      reasoning: reasoningSel.hidden ? "" : reasoningSel.value, model: modelSel.hidden ? "" : modelSel.value } }));
     if (!r) { sendBtn.disabled = false; return; }
     input.value = "";
     const emptyEl = document.getElementById("chat-empty");
@@ -1395,15 +1395,37 @@ VIEWS.assistant = async (main, parts, params) => {
   const setupSel = h("select", { class: "chat-pick", title: "Saved API setup (provider and model) for the next message" },
     usable.map((x) => h("option", { value: x.id, selected: x.id === cfg.active_profile ? true : null }, `${x.name} · ${x.model || "default model"}`)));
   const reasoningSel = h("select", { class: "chat-pick", title: "Reasoning effort for the next message" });
+  // A Codex setup can use any of the Codex CLI's models; the list comes from the CLI itself, and the choice is
+  // remembered per setup in this browser.
+  let codexModels = null;                         // null until loaded; [] when Codex could not list them
+  const modelSel = h("select", { class: "chat-pick", title: "Codex model for the next message", hidden: true });
+  const isCodexSetup = () => (usable.find((x) => x.id === setupSel.value) || {}).provider === "codex";
+  const fillModels = () => {
+    const prof = usable.find((x) => x.id === setupSel.value);
+    modelSel.hidden = !isCodexSetup() || !codexModels || !codexModels.length;
+    if (modelSel.hidden) return;
+    const fallback = (codexModels.find((m) => m.default) || codexModels[0]).id;
+    const chosen = store.get(`model.${setupSel.value}`) || prof.model || fallback;
+    const list = codexModels.some((m) => m.id === chosen) ? codexModels : [...codexModels, { id: chosen, name: chosen }];
+    mount(modelSel, list.map((m) => h("option", { value: m.id, selected: m.id === chosen ? true : null, title: m.description || null },
+      `Model: ${m.name}`)));
+  };
   const fillReasoning = () => {
     const prof = usable.find((x) => x.id === setupSel.value);
-    const levels = (prof && prof.reasoning_levels) || [];
+    const model = !modelSel.hidden && codexModels.find((m) => m.id === modelSel.value);
+    const levels = (model && model.efforts) || (prof && prof.reasoning_levels) || [];   // what this model supports
     const saved = store.get(`reasoning.${setupSel.value}`) || "";
     mount(reasoningSel, ["", ...levels].map((v) => h("option", { value: v, selected: v === saved ? true : null }, `Reasoning: ${v || "default"}`)));
     reasoningSel.hidden = !levels.length;
   };
   fillReasoning();
+  if (usable.some((x) => x.provider === "codex")) {
+    api("/api/assistant/codex/models").then((r) => { codexModels = r.models || []; }).catch(() => { codexModels = []; })
+      .then(() => { fillModels(); fillReasoning(); });
+  }
+  modelSel.addEventListener("change", () => { store.set(`model.${setupSel.value}`, modelSel.value); fillReasoning(); });
   setupSel.addEventListener("change", () => {
+    fillModels();
     fillReasoning();
     // Also make it the default for new chats; each message names its setup anyway.
     api(`/api/assistant/profiles/${encodeURIComponent(setupSel.value)}/activate`, { method: "POST" }).catch(() => null);
@@ -1416,7 +1438,7 @@ VIEWS.assistant = async (main, parts, params) => {
   if (!current) scroller.append(h("div", { class: "chat-empty", id: "chat-empty" }, h("div", { class: "e-title" }, "What would you like to know?"), suggestions));
   const chat = h("div", { class: "chat" }, scroller,
     h("div", { class: "composer" }, input,
-      h("div", { class: "composer-bar" }, setupSel, reasoningSel, h("span", { class: "grow" }), stopBtn, sendBtn)), footer);
+      h("div", { class: "composer-bar" }, setupSel, modelSel, reasoningSel, h("span", { class: "grow" }), stopBtn, sendBtn)), footer);
   const layout = h("div", { class: "assistant-layout" }, sideList, chat);
   main.classList.add("fill");
   mount(main, head, tabs, layout);
@@ -1495,6 +1517,24 @@ function assistantSettingsCard(cfg, prof) {
     cfg.presets.map((p) => h("option", { value: p.id, disabled: p.disabled ? true : null, selected: p.id === cur.preset ? true : null }, p.label)));
   const base = h("input", { type: "url", value: cur.base_url || "", placeholder: "https://…/v1" });
   const model = h("input", { type: "text", value: cur.model || "", placeholder: "model name" });
+  // For Codex the model is picked from the list the Codex CLI gives (the text box stays as the fallback).
+  const modelPick = h("select", { "aria-label": "Codex model", hidden: true, onchange: () => { model.value = modelPick.value; } });
+  let codexListed = false;
+  const listCodexModels = () => {
+    if (codexListed) return;
+    codexListed = true;
+    mount(modelPick, h("option", { value: model.value }, "Loading Codex models…"));
+    api("/api/assistant/codex/models").then((r) => {
+      const models = r.models || [];
+      if (!models.length) { codexListed = false; mount(hint, r.error || "Codex did not list any models; type a model name or leave it empty."); return; }
+      const def = models.find((m) => m.default);
+      const opts = [{ id: "", name: `Codex default${def ? ` (${def.name})` : ""}` }, ...models];
+      if (model.value && !models.some((m) => m.id === model.value)) opts.push({ id: model.value, name: model.value });
+      mount(modelPick, opts.map((m) => h("option", { value: m.id, selected: m.id === model.value ? true : null, title: m.description || null }, m.name)));
+      modelPick.hidden = presetSel.value !== "codex";
+      model.hidden = !modelPick.hidden;
+    }).catch(() => { codexListed = false; });
+  };
   const key = h("input", { type: "password", autocomplete: "off", placeholder: cur.api_key_saved ? `saved (${cur.api_key_hint}) — type to replace` : "paste your API key" });
   const keyField = h("label", { class: "field" }, h("span", null, "API key"), key);
   const baseField = h("label", { class: "field" }, h("span", null, "Base URL"), base);
@@ -1510,9 +1550,14 @@ function assistantSettingsCard(cfg, prof) {
     extraField.hidden = !p || isAnthropic || isCodex;
     baseField.hidden = keyField.hidden = !!isCodex;
     model.placeholder = isCodex ? "Codex default (optional)" : "model name";
+
     baseField.querySelector("span").textContent = isAnthropic ? "Base URL (leave empty for the Claude API)" : "Base URL";
     if (p && presetSel.value !== cur.preset) { base.value = p.base_url; if (p.model) model.value = p.model; else if (cur.provider !== p.provider) model.value = ""; }
-    mount(hint, p ? (isCodex ? "Install Codex CLI 0.163.0 or newer and run `codex login` on this computer, then Save & test. Canvas Hub uses that login without storing its credentials. Leave Model empty to use your Codex default. Questions and selected course data are sent to Codex." : isAnthropic ? "Without a pasted key, ANTHROPIC_API_KEY or an `ant auth login` profile is used." : p.id === "ollama" ? "Runs on your own computer; no key and nothing leaves it." : `Key format: ${p.key_hint || "provider API key"}. For OpenAI-compatible providers OPENAI_API_KEY is used if no key is saved.`) : "");
+    if (isCodex) listCodexModels();
+    modelPick.hidden = !isCodex || !modelPick.options.length || modelPick.options[0].textContent.startsWith("Loading");
+    model.hidden = !!isCodex && !modelPick.hidden;
+    if (!modelPick.hidden) modelPick.value = model.value;
+    mount(hint, p ? (isCodex ? "Install Codex CLI 0.163.0 or newer and run `codex login` on this computer, then Save & test. Canvas Hub uses that login without storing its credentials. Pick a model or keep your Codex default; you can also switch models next to the message box. Questions and selected course data are sent to Codex." : isAnthropic ? "Without a pasted key, ANTHROPIC_API_KEY or an `ant auth login` profile is used." : p.id === "ollama" ? "Runs on your own computer; no key and nothing leaves it." : `Key format: ${p.key_hint || "provider API key"}. For OpenAI-compatible providers OPENAI_API_KEY is used if no key is saved.`) : "");
   };
   presetSel.addEventListener("change", sync); sync();
   const result = h("div", { class: "small" });
@@ -1553,7 +1598,7 @@ function assistantSettingsCard(cfg, prof) {
       !isNew && cur.id === cfg.active_profile ? pill("ok", "In use") : h("span", { class: "sub" }, "provider settings stored only on this computer")),
     h("div", { class: "banner info" }, h("div", { class: "b-body small" }, cfg.privacy, " Keys are kept in a private file outside your course data, so they are never included in backups or exports.")),
     h("div", { class: "grid cols-2" }, h("label", { class: "field", style: "grid-column:1/-1" }, h("span", null, "Name"), name),
-      h("label", { class: "field" }, h("span", null, "Provider"), presetSel), h("label", { class: "field" }, h("span", null, "Model"), model),
+      h("label", { class: "field" }, h("span", null, "Provider"), presetSel), h("label", { class: "field" }, h("span", null, "Model"), model, modelPick),
       baseField, keyField, extraField),
     hint,
     h("div", { class: "tiny muted" }, "Reasoning effort is not part of a setup: choose it next to the message box for each message."),
