@@ -172,3 +172,27 @@ def test_quick_replies_after_leaving_and_reopening_a_chat(hub, account):
         pg.locator(".cmp-choices").get_by_role("button", name="Week 10").click()
         expect(pg.locator(".msg.user .bubble", has_text="Week 10")).to_be_visible(timeout=10000)
         b.close()
+
+
+def test_a_page_that_loads_late_does_not_replace_the_next_one(hub, account):
+    # Leaving a page before its data arrives must not let it draw over the page opened after it.
+    from playwright.sync_api import expect, sync_playwright
+    with serve(hub, []) as (base, tok, api), sync_playwright() as p:
+        real = api.deadlines
+
+        def slow(*a, **k):
+            time.sleep(1.5)
+            return real(*a, **k)
+        api.deadlines = slow
+        b = p.chromium.launch()
+        pg = b.new_page()
+        pg.goto(f"{base}/?token={tok}")
+        expect(pg.locator("h1")).to_have_text("Overview")    # the app has loaded the account
+        with pg.expect_request(lambda r: "/deadlines?" in r.url):
+            pg.goto(f"{base}/#/deadlines")
+        pg.goto(f"{base}/#/notes")
+        expect(pg.locator("h1")).to_have_text("Notes & tasks")
+        pg.wait_for_timeout(2500)                        # the deadlines answer has arrived by now
+        expect(pg.locator("h1")).to_have_text("Notes & tasks")
+        assert pg.locator("#main").count() == 1
+        b.close()
