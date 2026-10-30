@@ -20,6 +20,15 @@ mimetypes.add_type("font/woff2", ".woff2")
 STATIC = Path(str(importlib_resources.files("canvas_hub") / "web" / "static"))
 
 
+def mcp_command() -> list[str]:
+    """The command an MCP client should run to reach this installation."""
+    import shutil
+    import sys
+    exe = Path(sys.executable).parent / "canvas-hub"
+    cmd = str(exe) if exe.exists() else (shutil.which("canvas-hub") or "canvas-hub")
+    return [cmd, "mcp"]
+
+
 def create_app(api: HubAPI, *, token: str, port: int) -> FastAPI:
     app = FastAPI(title="Canvas Hub", docs_url=None, redoc_url=None, openapi_url=None)
     hosts = allowed_hosts(port)
@@ -101,6 +110,7 @@ def create_app(api: HubAPI, *, token: str, port: int) -> FastAPI:
     @app.get("/api/info")
     def info():
         d = api.app_info()
+        d["mcp_command"] = mcp_command()
         d["runner"] = api.runner.status() if api.runner else None
         return d
 
@@ -319,6 +329,49 @@ def create_app(api: HubAPI, *, token: str, port: int) -> FastAPI:
     async def delete_data(aid: int, request: Request):
         b = await body(request)
         return api.delete_account_data(aid, b.get("confirm", ""))
+
+    # ---- assistant (bring-your-own API key) ---------------------------------------
+    def _assistant():
+        a = getattr(api, "assistant", None)
+        if a is None:
+            raise HubError("the assistant is not available in this process", code="assistant_unavailable", status=503)
+        return a
+
+    @app.get("/api/assistant/config")
+    def assistant_config():
+        return _assistant().public_config()
+
+    @app.put("/api/assistant/config")
+    async def assistant_set_config(request: Request):
+        return _assistant().update_config(await body(request))
+
+    @app.post("/api/assistant/test")
+    def assistant_test():
+        return _assistant().test()
+
+    @app.get("/api/accounts/{aid}/assistant/conversations")
+    def assistant_conversations(aid: int):
+        api.get_account(aid)
+        return {"conversations": _assistant().list_conversations(aid)}
+
+    @app.post("/api/accounts/{aid}/assistant/messages")
+    async def assistant_send(aid: int, request: Request):
+        b = await body(request)
+        api.get_account(aid)
+        cid = b.get("conversation_id")
+        return _assistant().send(aid, b.get("text", ""), int(cid) if cid else None)
+
+    @app.get("/api/accounts/{aid}/assistant/conversations/{cid}")
+    def assistant_conversation(aid: int, cid: int, after: int = 0):
+        return _assistant().get_conversation(aid, cid, after)
+
+    @app.post("/api/accounts/{aid}/assistant/conversations/{cid}/stop")
+    def assistant_stop(aid: int, cid: int):
+        return _assistant().stop(aid, cid)
+
+    @app.delete("/api/accounts/{aid}/assistant/conversations/{cid}")
+    def assistant_delete(aid: int, cid: int):
+        return _assistant().delete_conversation(aid, cid)
 
     @app.post("/api/instances/{iid}/clear-session")
     def clear_session(iid: int):

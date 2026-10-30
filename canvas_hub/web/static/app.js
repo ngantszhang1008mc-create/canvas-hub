@@ -306,6 +306,7 @@ async function route() {
   const parts = path.split("/");
   const params = new URLSearchParams(query || "");
   clearInterval(S.jobPoll);
+  clearInterval(assistantPoll);
   let view = parts[0] || "overview";
   if (!S.accountId && !["setup", "settings"].includes(view)) view = "setup";
   setActiveNav(view === "course" ? "courses" : view === "item" ? "" : view);
@@ -889,11 +890,222 @@ VIEWS.settings = async (main) => {
         if (r) { toast("Course data deleted"); S.accountId = null; await loadIdentities(); location.hash = "#/setup"; }
       } }, "Delete data"))));
   }
+  const acfg = await api("/api/assistant/config").catch(() => null);
+  if (acfg) cards.push(assistantSettingsCard(acfg));
+  cards.push(mcpCard(info));
   cards.push(h("div", { class: "card" }, h("h2", null, "About"), h("div", { class: "kv" },
     [["Version", info.version], ["Data folder", info.data_home], ["Collector", info.collection_available ? "available in this process" : "not available"],
-      ["Codex integration", "Not installed. Canvas Hub works fully without it; see CODEX_HANDOFF.md."]].map(([k, v]) => [h("div", { class: "k" }, k), h("div", { class: "wrap-anywhere" }, v), h("div", { class: "t" })]))));
+      ["Codex integration", "Direct Codex connection reserved for Codex to build (CODEX_HANDOFF.md). Codex can already use the MCP server above."]].map(([k, v]) => [h("div", { class: "k" }, k), h("div", { class: "wrap-anywhere" }, v), h("div", { class: "t" })]))));
   mount(main, pageHead("Data & settings"), h("div", { class: "stack" }, cards));
 };
+
+// ---------- assistant ----------
+const STEP_LABEL = {
+  search: (a) => `Searched “${a.query}”`, get_deadlines: () => "Checked deadlines", get_item: (a) => `Read item ${a.item_id}`,
+  get_item_history: (a) => `Read history of item ${a.item_id}`, list_items: () => "Listed items", get_announcements: () => "Read announcements",
+  get_changes: () => "Checked recent changes", get_coverage: () => "Checked coverage", get_freshness: () => "Checked freshness",
+  read_document: () => "Read a document", get_signin_status: () => "Checked Canvas sign-in", list_jobs: () => "Listed jobs",
+  get_job: (a) => `Checked job ${a.job_id}`, list_courses: () => "Listed courses", list_accounts: () => "Listed accounts",
+  list_notes: () => "Read your notes", create_note: (a) => `Created a local ${a.kind === "task" ? "to-do" : "note"}${a.title ? ` “${a.title}”` : ""}`,
+  update_note: () => "Updated a local note", delete_note: () => "Deleted a local note",
+  start_collection: (a) => `Started a ${a.mode || "quick"} check of Canvas`, wait_for_job: () => "Waited for the Canvas check",
+  cancel_job: () => "Cancelled a job", update_scope: () => "Changed the collection scope",
+};
+
+function mdInline(text) {
+  const out = [];
+  const re = /(\*\*([^*]+)\*\*|`([^`]+)`|\[([^\]]+)\]\((https?:\/\/[^)\s]+)\))/g;
+  let last = 0; let m;
+  while ((m = re.exec(text))) {
+    out.push(text.slice(last, m.index));
+    if (m[2]) out.push(h("strong", null, m[2]));
+    else if (m[3]) out.push(h("code", null, m[3]));
+    else out.push(h("a", { href: m[5], target: "_blank", rel: "noopener noreferrer" }, m[4]));
+    last = re.lastIndex;
+  }
+  out.push(text.slice(last));
+  return out;
+}
+function renderMarkdown(src) {
+  // Minimal, DOM-built markdown (no HTML from the model is ever interpreted).
+  const root = h("div", { class: "md" });
+  let list = null;
+  for (const raw of (src || "").split("\n")) {
+    const line = raw.trimEnd();
+    const bullet = line.match(/^\s*[-*•]\s+(.*)$/); const num = line.match(/^\s*\d+[.)]\s+(.*)$/);
+    const head = line.match(/^(#{1,3})\s+(.*)$/);
+    if (bullet || num) {
+      const tag = bullet ? "ul" : "ol";
+      if (!list || list.tagName.toLowerCase() !== tag) { list = h(tag); root.append(list); }
+      list.append(h("li", null, mdInline((bullet || num)[1])));
+      continue;
+    }
+    list = null;
+    if (!line.trim()) continue;
+    if (head) root.append(h(head[1].length === 1 ? "h3" : "h4", null, mdInline(head[2])));
+    else root.append(h("p", null, mdInline(line)));
+  }
+  return root;
+}
+
+function stepRow(call, result) {
+  const label = (STEP_LABEL[call.name] || ((a) => call.name))(call.input || {});
+  const bad = call.input_error || (result && result.is_error);
+  return h("details", { class: "step" + (bad ? " bad" : "") },
+    h("summary", null, h("span", { class: "step-dot" }), label, result ? null : h("span", { class: "muted tiny" }, " …")),
+    call.input && Object.keys(call.input).length ? h("pre", { class: "text tiny" }, JSON.stringify(call.input, null, 2)) : null,
+    call.input_error ? h("div", { class: "small", style: "color:var(--bad)" }, call.input_error) : null,
+    result ? h("pre", { class: "text tiny" }, result.preview) : null);
+}
+
+function renderMessages(list, msgs) {
+  const results = {};
+  for (const m of msgs) if (m.role === "tool") for (const r of m.results) results[r.id] = r;
+  const out = [];
+  for (const m of msgs) {
+    if (m.role === "user") out.push(h("div", { class: "msg user" }, h("div", { class: "bubble" }, m.text)));
+    else if (m.role === "assistant") {
+      const parts = [];
+      if (m.text) parts.push(renderMarkdown(m.text));
+      if (m.tool_calls && m.tool_calls.length) parts.push(h("div", { class: "steps" }, m.tool_calls.map((c) => stepRow(c, results[c.id]))));
+      if (m.stop === "refusal") parts.push(h("div", { class: "small muted" }, "The model declined to continue."));
+      if (parts.length) out.push(h("div", { class: "msg assistant" }, parts));
+    }
+  }
+  mount(list, out);
+}
+
+let assistantPoll = null;
+VIEWS.assistant = async (main, parts) => {
+  clearInterval(assistantPoll);
+  const cfg = await api("/api/assistant/config");
+  const convId = parts[0] ? Number(parts[0]) : null;
+  const convs = (await api(A("/assistant/conversations"))).conversations;
+  const preset = cfg.presets.find((p) => p.id === cfg.preset);
+  const head = pageHead("Assistant", "Ask about your courses. Answers come from your Canvas Hub data; with permission it can check Canvas for updates and keep your notes.",
+    h("button", { class: "ghost", onclick: () => { const c = $("#assistant-settings"); c.hidden = !c.hidden; } }, "Settings"));
+  const settings = h("div", { id: "assistant-settings", hidden: cfg.configured ? true : null }, assistantSettingsCard(cfg));
+  if (!cfg.configured) { mount(main, head, settings); return; }
+
+  const sideList = h("div", { class: "conv-list" },
+    h("a", { class: "btn sm" + (convId ? "" : " primary"), href: "#/assistant" }, "+ New chat"),
+    convs.map((c) => h("a", { class: "conv" + (c.id === convId ? " on" : ""), href: `#/assistant/${c.id}` },
+      h("span", { class: "conv-title" }, c.title || "Untitled"), h("span", { class: "tiny muted" }, ago(c.updated_at)))));
+  const log = h("div", { class: "chat-log" });
+  const status = h("div", { class: "chat-status" });
+  const input = h("textarea", { rows: 2, placeholder: "Ask about deadlines, announcements, materials, grades…  (Enter to send, Shift+Enter for a new line)" });
+  const sendBtn = h("button", { class: "primary" }, "Send");
+  const stopBtn = h("button", { class: "danger", hidden: true }, "Stop");
+  let current = convId; let lastSeq = 0; let all = [];
+
+  const refresh = async () => {
+    if (!current) return;
+    const d = await api(A(`/assistant/conversations/${current}`) + qs({ after: 0 })).catch(() => null);
+    if (!d) return;
+    all = d.messages;
+    renderMessages(log, all);
+    const st = d.conversation.run_state;
+    const busy = st === "running" || st === "cancelling";
+    sendBtn.disabled = busy; stopBtn.hidden = !busy;
+    mount(status, busy ? h("span", { class: "working" }, st === "cancelling" ? "Stopping…" : "Working…")
+      : st === "error" ? h("div", { class: "banner bad", style: "margin:0" }, h("div", { class: "b-body" }, h("div", { class: "b-title" }, "The assistant stopped"), h("div", { class: "small" }, d.conversation.run_error || ""))) : null);
+    if (all.length && all[all.length - 1].seq !== lastSeq) { lastSeq = all[all.length - 1].seq; log.scrollTop = log.scrollHeight; }
+    if (!busy) clearInterval(assistantPoll);
+  };
+  const send = async (text) => {
+    const t = (text ?? input.value).trim();
+    if (!t) return;
+    sendBtn.disabled = true;
+    const r = await guard(() => api(A("/assistant/messages"), { method: "POST", body: { text: t, conversation_id: current } }));
+    if (!r) { sendBtn.disabled = false; return; }
+    input.value = "";
+    const emptyEl = document.getElementById("chat-empty");
+    if (emptyEl) emptyEl.remove();
+    if (current !== r.conversation_id) { current = r.conversation_id; history.replaceState(null, "", `#/assistant/${current}`); }
+    clearInterval(assistantPoll);
+    assistantPoll = setInterval(refresh, 1000);
+    refresh();
+  };
+  sendBtn.addEventListener("click", () => send());
+  stopBtn.addEventListener("click", async () => { await guard(() => api(A(`/assistant/conversations/${current}/stop`), { method: "POST" })); refresh(); });
+  input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } });
+
+  const suggestions = h("div", { class: "chips suggest" }, ["What's due in the next 7 days?", "Anything new since yesterday?",
+    "Check Canvas for new announcements", "Which assignments haven't I submitted?"].map((s) => h("button", { class: "chip", onclick: () => send(s) }, s)));
+  const perms = cfg.permissions;
+  const footer = h("div", { class: "tiny muted" }, `${preset ? preset.label : cfg.provider} · ${cfg.model || "default model"} · can ${["read your data", perms.notes ? "edit your notes" : null, perms.collect ? "check Canvas" : null, perms.settings ? "change scope" : null].filter(Boolean).join(", ")}. Questions and the data it reads are sent to this provider.`);
+  const chat = h("div", { class: "chat" }, log, status,
+    current ? null : h("div", { class: "chat-empty", id: "chat-empty" }, h("div", { class: "e-title" }, "What would you like to know?"), suggestions),
+    h("div", { class: "composer" }, input, h("div", { class: "row" }, stopBtn, sendBtn)), footer);
+  mount(main, head, settings, h("div", { class: "assistant-layout" }, sideList, chat));
+  if (current) { await refresh(); const st = all.length; if (st) log.scrollTop = log.scrollHeight; assistantPoll = setInterval(refresh, 1000); }
+  input.focus();
+};
+
+function assistantSettingsCard(cfg) {
+  const presetSel = h("select", null, h("option", { value: "" }, "Choose a provider…"),
+    cfg.presets.map((p) => h("option", { value: p.id, disabled: p.disabled ? true : null, selected: p.id === cfg.preset ? true : null }, p.label)));
+  const base = h("input", { type: "url", value: cfg.base_url || "", placeholder: "https://…/v1" });
+  const model = h("input", { type: "text", value: cfg.model || "", placeholder: "model name" });
+  const key = h("input", { type: "password", autocomplete: "off", placeholder: cfg.api_key_saved ? `saved (${cfg.api_key_hint}) — type to replace` : "paste your API key" });
+  const effort = h("select", null, ["", "low", "medium", "high", "xhigh", "max"].map((e) => h("option", { value: e, selected: e === (cfg.effort || "") ? true : null }, e || "model default")));
+  const pNotes = h("input", { type: "checkbox", checked: cfg.permissions.notes ? true : null });
+  const pCollect = h("input", { type: "checkbox", checked: cfg.permissions.collect ? true : null });
+  const pSettings = h("input", { type: "checkbox", checked: cfg.permissions.settings ? true : null });
+  const baseField = h("label", { class: "field" }, h("span", null, "Base URL"), base);
+  const effortField = h("label", { class: "field" }, h("span", null, "Effort (Claude)"), effort);
+  const hint = h("div", { class: "tiny muted" });
+  const sync = () => {
+    const p = cfg.presets.find((x) => x.id === presetSel.value);
+    const isAnthropic = p && p.provider === "anthropic";
+    effortField.hidden = !isAnthropic;
+    baseField.querySelector("span").textContent = isAnthropic ? "Base URL (leave empty for the Claude API)" : "Base URL";
+    if (p && presetSel.value !== cfg.preset) { base.value = p.base_url; if (p.model) model.value = p.model; else if (cfg.provider !== p.provider) model.value = ""; }
+    mount(hint, p ? (isAnthropic ? "Without a pasted key, ANTHROPIC_API_KEY or an `ant auth login` profile is used." : p.id === "ollama" ? "Runs on your own computer; no key and nothing leaves it." : `Key format: ${p.key_hint || "provider API key"}. For OpenAI-compatible providers OPENAI_API_KEY is used if no key is saved.`) : "");
+  };
+  presetSel.addEventListener("change", sync); sync();
+  const result = h("div", { class: "small" });
+  const save = async () => {
+    const body = { base_url: base.value, model: model.value, effort: effort.value,
+      permissions: { notes: pNotes.checked, collect: pCollect.checked, settings: pSettings.checked } };
+    if (presetSel.value) body.preset = presetSel.value;
+    if (key.value) body.api_key = key.value;
+    const r = await guard(() => api("/api/assistant/config", { method: "PUT", body }));
+    if (r) { key.value = ""; toast("Assistant settings saved"); return r; }
+    return null;
+  };
+  return h("div", { class: "card", style: "margin-bottom:16px" },
+    h("div", { class: "card-head" }, h("h2", null, "Assistant settings"), h("span", { class: "sub" }, "your own API key · stored only on this computer")),
+    h("div", { class: "banner info" }, h("div", { class: "b-body small" }, cfg.privacy, " The key is kept in a private file outside your course data, so it is never included in backups or exports.")),
+    h("div", { class: "grid cols-2" }, h("label", { class: "field" }, h("span", null, "Provider"), presetSel), h("label", { class: "field" }, h("span", null, "Model"), model),
+      baseField, h("label", { class: "field" }, h("span", null, "API key"), key), effortField),
+    hint,
+    h("div", { style: "margin-top:14px" }, h("div", { class: "small strong", style: "margin-bottom:6px" }, "The assistant may"),
+      h("div", { class: "perm-list" },
+        h("label", { class: "check" }, h("input", { type: "checkbox", checked: true, disabled: true }), "Read your stored Canvas data (always)"),
+        h("label", { class: "check" }, pNotes, "Create and edit your local notes and to-dos (never sent to Canvas)"),
+        h("label", { class: "check" }, pCollect, "Check Canvas for updates using the app's signed-in browser (read-only; same safety rules as Quick check)"),
+        h("label", { class: "check" }, pSettings, "Change which courses and sections are collected"))),
+    h("div", { class: "row", style: "margin-top:14px" },
+      h("button", { class: "primary", onclick: async () => { if (await save()) route(); } }, "Save"),
+      h("button", { onclick: async () => { if (!(await save())) return; mount(result, h("span", { class: "muted" }, "Testing…"));
+        const t = await guard(() => api("/api/assistant/test", { method: "POST" }));
+        if (t) mount(result, t.ok ? pill("ok", `Connected · ${t.model || ""}`) : h("span", { style: "color:var(--bad)" }, t.message)); } }, "Save & test"),
+      cfg.api_key_saved ? h("button", { class: "ghost", onclick: async () => { await guard(() => api("/api/assistant/config", { method: "PUT", body: { clear_key: true } })); toast("Saved key removed"); route(); } }, "Remove saved key") : null,
+      result));
+}
+
+function mcpCard(info) {
+  const cmd = (info.mcp_command || ["canvas-hub", "mcp"]).join(" ");
+  const line = (flags) => `${cmd}${flags}`;
+  const copy = (t) => h("button", { class: "sm", onclick: async () => { try { await navigator.clipboard.writeText(t); toast("Copied"); } catch { toast("Copy failed — select the text instead", true); } } }, "Copy");
+  return h("div", { class: "card" }, h("div", { class: "card-head" }, h("h2", null, "Connect other agents (MCP)"), h("span", { class: "sub" }, "Codex, Claude Code, Claude Desktop, …")),
+    h("p", { class: "muted small" }, "Any MCP-capable agent can read your Canvas Hub data through a local MCP server. Register this command as a stdio MCP server in that agent's settings. It is read-only unless you add flags."),
+    h("div", { class: "kv" },
+      [["Read-only", ""], ["+ notes & to-dos", " --allow-notes"], ["+ notes & Canvas checks", " --allow-writes"]].map(([label, flags]) => [
+        h("div", { class: "k" }, label), h("div", null, h("code", { class: "wrap-anywhere" }, line(flags))), h("div", { class: "t" }, copy(line(flags)))])),
+    h("p", { class: "tiny muted", style: "margin-top:8px" }, "Canvas checks requested over MCP run in this app, which must be open and signed in. Browser sessions and credentials are never exposed to agents."));
+}
 
 // ---------- boot ----------
 async function boot() {

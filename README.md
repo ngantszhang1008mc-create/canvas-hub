@@ -62,6 +62,22 @@ uv run canvas-hub fake-canvas --port 8765    # synthetic data only
 
 In another terminal, run `uv run canvas-hub --home /tmp/canvas-hub-demo serve`, paste `http://127.0.0.1:8765/`, and sign in with the test credentials the fake server prints.
 
+## Assistant and other agents
+
+- **Assistant page:** chat with your Canvas data using your own API key.
+  - **Supported providers:** Anthropic (Claude), OpenAI, Google Gemini, OpenRouter, DeepSeek, a local Ollama model, or any OpenAI-compatible endpoint.
+  - **What it can do:** answer from the stored data. If you allow it, it can also check Canvas for updates through the app's signed-in browser (with the same read-only rules as Quick check) and create or edit your local notes and to-dos.
+  - **Your key:** stays in a private file on this computer and is never included in backups or exports. Your questions, and the course data the assistant reads, go to the provider you choose.
+- **MCP:** other agents such as Codex, Claude Code or Claude Desktop can use your data through a local MCP server:
+
+  ```bash
+  uv run canvas-hub mcp                 # read-only
+  uv run canvas-hub mcp --allow-writes  # also notes and Canvas checks
+  ```
+
+  The exact command for your installation is shown under **Data & settings → Connect other agents**.
+- **Direct Codex connection:** reserved for Codex to build (see `CODEX_HANDOFF.md` §6). Codex can already use the MCP server.
+
 ## Where your data lives
 
 | What | Where |

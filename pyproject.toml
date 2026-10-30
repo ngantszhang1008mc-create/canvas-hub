@@ -11,6 +11,9 @@ dependencies = [
   "playwright==1.63.0",
   "nh3>=0.2.17",
   "markitdown[pdf,docx,pptx,xlsx,xls]>=0.1.2,<0.2",
+  "anthropic>=1",
+  "openai>=1",
+  "mcp>=1",
 ]
 
 [project.scripts]

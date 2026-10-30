@@ -36,6 +36,8 @@ def cmd_serve(args):
     runner = JobRunner(hub, worker)
     runner.start()
     api = HubAPI(hub, runner=runner, worker=worker)
+    from .assistant import AssistantService
+    api.assistant = AssistantService(hub, api, worker)
     token = load_or_create_token(hub.paths.runtime)
     app = create_app(api, token=token, port=args.port)
     url = f"http://127.0.0.1:{args.port}/?token={token}"
@@ -143,6 +145,19 @@ def cmd_delete_data(args):
     return 0
 
 
+def cmd_mcp(args):
+    from .mcp_server import serve_stdio
+    perms = {"read"}
+    if args.allow_notes or args.allow_writes:
+        perms.add("notes")
+    if args.allow_collection or args.allow_writes:
+        perms.add("collect")
+    if args.allow_settings:
+        perms.add("settings")
+    serve_stdio(_hub(args), perms)
+    return 0
+
+
 def cmd_schema(args):
     from .observations import ObservationPackage
     text = json.dumps(ObservationPackage.model_json_schema(), indent=2)
@@ -215,6 +230,13 @@ def main(argv=None) -> int:
     s.add_argument("--account", required=True)
     s.add_argument("--confirm", required=True, help="must be DELETE")
     s.set_defaults(fn=cmd_delete_data)
+
+    s = sub.add_parser("mcp", help="run the local MCP server on stdio (for Codex, Claude Code, other agents)")
+    s.add_argument("--allow-notes", action="store_true", help="allow creating/editing local notes and to-dos")
+    s.add_argument("--allow-collection", action="store_true", help="allow starting/cancelling collection jobs")
+    s.add_argument("--allow-settings", action="store_true", help="allow changing the collection scope")
+    s.add_argument("--allow-writes", action="store_true", help="shorthand for --allow-notes --allow-collection")
+    s.set_defaults(fn=cmd_mcp)
 
     s = sub.add_parser("schema", help="print the observation package JSON Schema")
     s.add_argument("--output")
