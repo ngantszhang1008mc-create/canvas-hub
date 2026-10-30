@@ -1,0 +1,1220 @@
+// Canvas Hub — interactive components for assistant answers and the Trackers page.
+//
+// Every component is wrapped in a frame with a toolbar: copy as Markdown / CSV /
+// JSON, download as a file, and full screen. Score models and checklists keep
+// their state on the server (with undo) and recompute live in the page using the
+// same rules as canvas_hub/scoring.py. Clicking an item opens a side panel with
+// its full content.
+
+import { evaluate as formulaEval } from "./formula.js";
+
+export function makeComponents(env) {
+  const { h, mount, api, A, toast, guard, fmtDate, until, ago, pill, submissionPill, TYPE_LABEL, renderTimetable,
+    fieldValue, store } = env;
+
+  // ---------- small helpers ----------
+  const fmtN = (n) => (n == null || Number.isNaN(n) ? "–" : Number.isInteger(n) ? String(n) : String(Math.round(n * 100) / 100));
+  const esc = (s) => String(s ?? "").replace(/\|/g, "\\|").replace(/\n/g, " ");
+  const csvCell = (s) => { const t = String(s ?? ""); return /[",\n]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t; };
+  const toCSV = (cols, rows) => [cols.map(csvCell).join(","), ...rows.map((r) => r.map(csvCell).join(","))].join("\n");
+  const toMD = (cols, rows) => [`| ${cols.map(esc).join(" | ")} |`, `| ${cols.map(() => "---").join(" | ")} |`,
+    ...rows.map((r) => `| ${r.map(esc).join(" | ")} |`)].join("\n");
+  const slug = (s) => (String(s || "canvas-hub").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "canvas-hub").slice(0, 60);
+  const num = (v) => { if (typeof v === "number") return v; const n = Number(String(v ?? "").replace(/[,%\s]/g, "")); return Number.isFinite(n) ? n : null; };
+
+  // ---------- clipboard with fallback ----------
+  async function copyText(text, btn) {
+    let ok = false;
+    try { await navigator.clipboard.writeText(text); ok = true; } catch { ok = false; }
+    if (ok) {
+      if (btn) { const old = btn.textContent; btn.textContent = "Copied ✓"; btn.classList.add("copied"); setTimeout(() => { btn.textContent = old; btn.classList.remove("copied"); }, 1500); }
+      else toast("Copied");
+      return;
+    }
+    // Clipboard permission denied: show the text selected so ⌘C / Ctrl+C works.
+    const ta = h("textarea", { class: "mono copy-fallback", readonly: true, "aria-label": "Text to copy" });
+    ta.value = text;
+    const close = h("button", { class: "sm" }, "Close");
+    const dlg = h("div", { class: "modal", role: "dialog", "aria-modal": "true", "aria-label": "Copy text" },
+      h("div", { class: "modal-box" }, h("div", { class: "strong" }, "Press ⌘C (or Ctrl+C) to copy"),
+        h("div", { class: "tiny muted" }, "The browser did not allow automatic copying; the text is selected for you."), ta,
+        h("div", { class: "row", style: "justify-content:flex-end" }, close)));
+    close.addEventListener("click", () => dlg.remove());
+    dlg.addEventListener("keydown", (e) => { if (e.key === "Escape") dlg.remove(); });
+    document.body.append(dlg);
+    ta.focus(); ta.select();
+  }
+  function download(text, filename, type = "text/plain") {
+    const url = URL.createObjectURL(new Blob([text], { type: `${type};charset=utf-8` }));
+    const a = h("a", { href: url, download: filename });
+    document.body.append(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+  }
+
+  // One listener closes any open copy menu when clicking elsewhere.
+  document.addEventListener("click", (e) => {
+    for (const m of document.querySelectorAll(".cmp-menu:not([hidden])")) if (!m.parentElement.contains(e.target)) m.hidden = true;
+  });
+
+  // ---------- exports: calendar, snapshot, print ----------
+  const icsEsc = (t) => String(t ?? "").replace(/\\/g, "\\\\").replace(/;/g, "\\;").replace(/,/g, "\\,").replace(/\n/g, "\\n");
+  const icsTime = (iso) => new Date(iso).toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
+  function toICS(events, name) {
+    const stamp = icsTime(new Date().toISOString());
+    const lines = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//Canvas Hub//Components//EN", `X-WR-CALNAME:${icsEsc(name)}`];
+    events.forEach((e, i) => {
+      const start = new Date(e.start); if (Number.isNaN(start.getTime())) return;
+      const end = e.end ? new Date(e.end) : new Date(start.getTime() + 30 * 60000);
+      lines.push("BEGIN:VEVENT", `UID:canvashub-${slug(name)}-${i}-${icsTime(start.toISOString())}@local`, `DTSTAMP:${stamp}`,
+        `DTSTART:${icsTime(start.toISOString())}`, `DTEND:${icsTime(end.toISOString())}`, `SUMMARY:${icsEsc(e.title)}`,
+        e.description ? `DESCRIPTION:${icsEsc(e.description)}` : null, "END:VEVENT");
+    });
+    lines.push("END:VCALENDAR");
+    return lines.filter(Boolean).join("\r\n") + "\r\n";
+  }
+  const htmlEsc = (t) => String(t ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  function snapshotHTML(d, title) {
+    // A read-only, self-contained copy: the Markdown rendered as escaped text and tables, no scripts.
+    const body = d.markdown.split("\n\n").map((block) => {
+      const rows = block.split("\n").filter((l) => /^\|.*\|$/.test(l.trim()));
+      if (rows.length >= 2 && rows.length === block.split("\n").length) {
+        const cells = rows.filter((_, i) => i !== 1).map((r) => r.trim().slice(1, -1).split(" | "));
+        return `<table><thead><tr>${cells[0].map((c) => `<th>${htmlEsc(c)}</th>`).join("")}</tr></thead><tbody>${cells.slice(1).map((r) => `<tr>${r.map((c) => `<td>${htmlEsc(c)}</td>`).join("")}</tr>`).join("")}</tbody></table>`;
+      }
+      return `<p>${htmlEsc(block).replace(/\n/g, "<br>")}</p>`;
+    }).join("\n");
+    return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
+<title>${htmlEsc(d.title || title || "Canvas Hub snapshot")}</title><style>body{font:15px/1.5 system-ui,sans-serif;max-width:900px;margin:24px auto;padding:0 16px;color:#1e1b16;background:#faf8f2}
+table{border-collapse:collapse;width:100%;margin:12px 0}th,td{border-bottom:1px solid #ddd5c4;padding:6px 8px;text-align:left}th{font-size:12px;text-transform:uppercase;color:#554d40}
+footer{margin-top:24px;font-size:12px;color:#8b8170}</style></head><body><h1>${htmlEsc(d.title || title || "Snapshot")}</h1>${body}
+<footer>Read-only snapshot from Canvas Hub, ${htmlEsc(new Date().toLocaleString())}. Values are as stored when exported.</footer></body></html>`;
+  }
+  function printOnly(el) {
+    el.classList.add("print-target");
+    document.body.classList.add("printing-one");
+    const done = () => { el.classList.remove("print-target"); document.body.classList.remove("printing-one"); window.removeEventListener("afterprint", done); };
+    window.addEventListener("afterprint", done);
+    window.print();
+    setTimeout(done, 1500);
+  }
+
+  // ---------- frame: title + universal toolbar ----------
+  // getData() -> { title, markdown, csv?, json, filename? , text? }
+  function frame(kind, title, body, getData, { extra = [], sticky = false, full: startFull = false, onFull = null } = {}) {
+    const wrap = h("section", { class: `cmp cmp-${kind}${startFull ? " fullscreen" : ""}`, "aria-label": title || kind });
+    const menu = h("div", { class: "cmp-menu", hidden: true, role: "menu" });
+    const copyBtn = h("button", { class: "sm ghost", "aria-haspopup": "menu", title: "Copy or download" }, "Copy ▾");
+    const full = h("button", { class: "sm ghost", title: "Full screen", "aria-label": "Full screen" }, "⤢");
+    const fill = () => {
+      const d = getData();
+      const opts = [["Copy as Markdown", () => copyText(d.markdown, copyBtn)]];
+      if (d.csv != null) opts.push(["Copy as CSV", () => copyText(d.csv, copyBtn)]);
+      opts.push(["Copy as JSON", () => copyText(JSON.stringify(d.json, null, 2), copyBtn)]);
+      if (d.text != null) opts.unshift(["Copy text", () => copyText(d.text, copyBtn)]);
+      const base = d.filename || slug(d.title || title);
+      opts.push(["Download .md", () => download(d.markdown, `${base}.md`, "text/markdown")]);
+      if (d.csv != null) opts.push(["Download .csv", () => download(d.csv, `${base}.csv`, "text/csv")]);
+      opts.push(["Download .json", () => download(JSON.stringify(d.json, null, 2), `${base}.json`, "application/json")]);
+      if (d.ics && d.ics.length) opts.push(["Download .ics (calendar)", () => download(toICS(d.ics, d.title || title), `${base}.ics`, "text/calendar")]);
+      opts.push(["Download snapshot (.html)", () => download(snapshotHTML(d, title), `${base}-snapshot.html`, "text/html")]);
+      opts.push(["Print / Save as PDF", () => printOnly(wrap)]);
+      mount(menu, opts.map(([l, fn]) => h("button", { class: "cmp-menu-item", role: "menuitem", onclick: () => { menu.hidden = true; fn(); } }, l)));
+    };
+    copyBtn.addEventListener("click", (e) => { e.stopPropagation(); if (menu.hidden) fill(); menu.hidden = !menu.hidden; });
+    const setFull = (on) => {
+      wrap.classList.toggle("fullscreen", on);
+      full.textContent = on ? "✕" : "⤢";
+      full.setAttribute("aria-label", on ? "Exit full screen" : "Full screen");
+    };
+    setFull(startFull);
+    full.addEventListener("click", () => { const on = !wrap.classList.contains("fullscreen"); setFull(on); if (onFull) onFull(on); });
+    wrap.addEventListener("keydown", (e) => { if (e.key === "Escape" && wrap.classList.contains("fullscreen")) full.click(); });
+    const bar = h("div", { class: "cmp-bar" + (sticky ? " sticky" : "") },
+      h("div", { class: "cmp-head" }, title || ""), h("div", { class: "cmp-tools" }, ...extra, h("div", { class: "cmp-copy" }, copyBtn, menu), full));
+    wrap.append(bar, body);
+    return wrap;
+  }
+
+  // ---------- live countdowns ----------
+  let tickQueued = false;
+  function countdown(iso) {
+    if (!tickQueued) { tickQueued = true; requestAnimationFrame(() => { tickQueued = false; tickCountdowns(); }); }
+    return h("span", { class: "countdown", "data-due": iso, role: "timer", "aria-live": "off" }, cdText(iso));
+  }
+  function cdText(iso) {
+    const ms = new Date(iso) - Date.now();
+    if (Number.isNaN(ms)) return "";
+    const a = Math.abs(ms), m = Math.round(a / 60000), hh = Math.floor(m / 60), d = Math.floor(hh / 24);
+    const s = d >= 2 ? `${d} d ${hh % 24} h` : hh >= 1 ? `${hh} h ${m % 60} m` : `${m} m`;
+    return ms < 0 ? `overdue ${s}` : `in ${s}`;
+  }
+  function tickCountdowns() {
+    for (const el of document.querySelectorAll(".countdown[data-due]")) {
+      const ms = new Date(el.dataset.due) - Date.now();
+      el.textContent = cdText(el.dataset.due);
+      el.classList.toggle("overdue", ms < 0);
+      el.classList.toggle("urgent", ms >= 0 && ms < 24 * 3600e3);
+      el.classList.toggle("soon", ms >= 24 * 3600e3 && ms < 72 * 3600e3);
+    }
+  }
+  setInterval(tickCountdowns, 30000);
+  const afterRender = () => requestAnimationFrame(tickCountdowns);
+
+  // ---------- detail drawer ----------
+  let drawer = null;
+  async function openDrawer(itemId) {
+    if (!itemId) return;
+    if (!drawer) {
+      drawer = h("aside", { class: "drawer", role: "dialog", "aria-modal": "false", "aria-label": "Item details", tabindex: "-1" });
+      document.body.append(drawer);
+      document.addEventListener("keydown", (e) => { if (e.key === "Escape" && drawer.classList.contains("open")) closeDrawer(); });
+    }
+    mount(drawer, h("div", { class: "muted small", style: "padding:20px" }, "Loading…"));
+    drawer.classList.add("open");
+    let it;
+    try { it = await api(A(`/items/${itemId}`)); } catch (e) { mount(drawer, h("div", { style: "padding:20px" }, String(e.message || e))); return; }
+    const fields = it.fields.filter((f) => f.field !== "title");
+    const body = fields.filter((f) => f.kind === "html" && f.value);
+    const other = fields.filter((f) => !(f.kind === "html" && f.value));
+    const md = [`# ${it.title || "(untitled)"}`, "", ...other.map((f) => `- **${f.field}**: ${typeof f.value === "object" ? JSON.stringify(f.value) : f.value}`)].join("\n");
+    mount(drawer,
+      h("div", { class: "drawer-head" }, h("div", null, h("div", { class: "tiny muted" }, TYPE_LABEL[it.item_type] || it.item_type, it.course_title ? ` · ${it.course_title}` : ""),
+        h("h2", null, it.title || "(untitled)")),
+        h("button", { class: "ghost sm", "aria-label": "Close", onclick: closeDrawer }, "✕")),
+      h("div", { class: "row small", style: "padding:0 20px 10px" },
+        h("a", { href: `#/item/${it.id}`, onclick: closeDrawer }, "Open full page"),
+        it.source_url ? h("a", { href: it.source_url, target: "_blank", rel: "noopener noreferrer" }, "Open in Canvas") : null,
+        h("button", { class: "sm ghost", onclick: (e) => copyText(md, e.target) }, "Copy fields"),
+        h("span", { class: "muted" }, `first seen ${fmtDate(it.first_observed_at)} · last read ${ago(it.last_observed_at)}`)),
+      h("div", { class: "drawer-body" },
+        body.map((f) => h("div", { class: "drawer-sec" }, h("div", { class: "drawer-k" }, f.field, h("span", { class: "tiny muted" }, ` · read ${ago(f.last_observed_at)}`)), fieldValue(f.field, f, it))),
+        other.length ? h("dl", { class: "drawer-fields" }, other.map((f) => [h("dt", null, f.field), h("dd", null, fieldValue(f.field, f, it),
+          h("div", { class: "tiny muted" }, `read ${ago(f.last_observed_at)}`))])) : null));
+    drawer.focus();
+  }
+  function closeDrawer() { if (drawer) drawer.classList.remove("open"); }
+  const itemLink = (id, label) => id ? h("a", { href: `#/item/${id}`, class: "cmp-link", onclick: (e) => { if (e.metaKey || e.ctrlKey) return; e.preventDefault(); openDrawer(id); } }, label) : label;
+
+  // ---------- deadlines / items / timetable / choices (export added) ----------
+  function deadlinesView(d) {
+    const rows = d.deadlines.map((x) => [x.title, x.course || "", x.due_local, (x.submission || {}).workflow_state || ""]);
+    const body = h("div", { class: "cmp-deadlines" }, d.deadlines.length ? d.deadlines.map((x) => h("div", { class: "cmp-card" },
+      h("div", { class: "spread" }, h("div", null, h("div", { class: "cmp-when" }, fmtDate(x.due_local, { weekday: true }), " · ", countdown(x.due_local)),
+        itemLink(x.item_id, h("span", { class: "cmp-title" }, x.title)), h("div", { class: "tiny muted" }, x.course || "")),
+        submissionPill(x.submission ? { ...x.submission, state: x.submission.state } : null)),
+      h("div", { class: "row", style: "margin-top:8px" },
+        h("button", { class: "sm", onclick: async (ev) => { const r = await guard(() => api(A("/annotations"), { method: "POST", body: { kind: "task", item_id: x.item_id, title: x.title } })); if (r) { ev.target.textContent = "✓ Added"; ev.target.disabled = true; } } }, "+ To-do"),
+        x.source_url ? h("a", { class: "btn sm", href: x.source_url, target: "_blank", rel: "noopener noreferrer" }, "Open in Canvas") : null,
+        remindButton({ title: `Due: ${x.title}`, due: x.due_local, item_id: x.item_id })))) : h("div", { class: "muted small" }, "No deadlines in that range."));
+    afterRender();
+    return frame("deadlines", "Deadlines", body, () => ({ title: "Deadlines", markdown: toMD(["Title", "Course", "Due", "Status"], rows),
+      csv: toCSV(["Title", "Course", "Due", "Status"], rows), json: d.deadlines,
+      ics: d.deadlines.map((x) => ({ title: `Due: ${x.title}`, start: new Date(new Date(x.due_local) - 30 * 60000).toISOString(), end: x.due_local, description: x.course || "" })) }));
+  }
+  function itemsView(d) {
+    const rows = d.items.map((x) => [x.title || "", TYPE_LABEL[x.type] || x.type, x.course || "", x.due || "", x.source_url || ""]);
+    const body = h("div", { class: "cmp-deadlines" }, d.items.map((x) => h("div", { class: "cmp-card" },
+      h("div", { class: "tiny muted" }, TYPE_LABEL[x.type] || x.type, x.course ? " · " + x.course : "", x.due ? " · due " + x.due : ""),
+      itemLink(x.item_id, h("span", { class: "cmp-title" }, x.title || "(untitled)")),
+      x.excerpt ? h("div", { class: "small", style: "margin-top:4px" }, x.excerpt) : null,
+      x.source_url ? h("div", { style: "margin-top:6px" }, h("a", { class: "small", href: x.source_url, target: "_blank", rel: "noopener noreferrer" }, "Open in Canvas")) : null)));
+    return frame("items", "Items", body, () => ({ title: "Items", markdown: toMD(["Title", "Type", "Course", "Due", "Link"], rows),
+      csv: toCSV(["Title", "Type", "Course", "Due", "Link"], rows), json: d.items }));
+  }
+  function timetableView(d) {
+    const evs = d.week.days.flatMap((day) => day.events.map((e) => [day.date, e.kind, e.title, e.start.slice(11, 16), e.end.slice(11, 16), e.location || ""]));
+    const cols = ["Date", "Kind", "Title", "Start", "End", "Location"];
+    return frame("timetable", `Week of ${d.week.week_start}`, renderTimetable(d.week), () => ({ title: `Week of ${d.week.week_start}`,
+      markdown: toMD(cols, evs), csv: toCSV(cols, evs), json: d.week }));
+  }
+
+  // ---------- table v2 ----------
+  function tableView(d) {
+    const cols = d.columns, types = d.column_types || [];
+    const isNum = (i) => types[i] === "number" || (types[i] == null && d.rows.length && d.rows.every((r) => r[i] === "" || r[i] == null || num(r[i]) != null));
+    const st = { sort: null, dir: 1, filter: "", open: new Set() };
+    const filterIn = h("input", { type: "search", class: "cmp-filter", placeholder: "Filter rows", "aria-label": "Filter rows" });
+    const host = h("div", { class: "table-wrap" });
+    const visible = () => {
+      let idx = d.rows.map((_, i) => i);
+      if (st.filter) { const q = st.filter.toLowerCase(); idx = idx.filter((i) => d.rows[i].some((c) => String(c ?? "").toLowerCase().includes(q))); }
+      if (st.sort != null) {
+        const k = st.sort, n = isNum(k);
+        idx.sort((a, b) => { const x = d.rows[a][k], y = d.rows[b][k];
+          const c = n ? (num(x) ?? -Infinity) - (num(y) ?? -Infinity) : String(x ?? "").localeCompare(String(y ?? ""), undefined, { numeric: true });
+          return c * st.dir; });
+      }
+      return idx;
+    };
+    const gi = d.group_by ? cols.indexOf(d.group_by) : -1;
+    const totalsRow = (idx) => d.totals && d.totals.length ? h("tr", { class: "t-total" }, cols.map((c, i) => h("td", { class: isNum(i) ? "num" : "" },
+      i === 0 && !d.totals.includes(c) ? "Total" : d.totals.includes(c) ? fmtN(idx.reduce((s, r) => s + (num(d.rows[r][i]) || 0), 0)) : ""))) : null;
+    const rowEls = (i) => {
+      const r = d.rows[i];
+      const hasDetail = d.details && d.details[i];
+      const iid = d.item_ids && d.item_ids[i];
+      const toggle = hasDetail ? h("button", { class: "link-btn", "aria-expanded": st.open.has(i) ? "true" : "false", "aria-label": `Details for ${r[0]}`,
+        onclick: () => { st.open.has(i) ? st.open.delete(i) : st.open.add(i); draw(); } }, st.open.has(i) ? "▾ " : "▸ ") : null;
+      const tr = h("tr", { class: hasDetail ? "expandable" : "" }, cols.map((_, k) => h("td", { class: isNum(k) ? "num" : "" },
+        k === 0 ? [toggle, iid ? itemLink(iid, String(r[k] ?? "")) : String(r[k] ?? "")] : String(r[k] ?? ""))));
+      return [tr, hasDetail && st.open.has(i) ? h("tr", { class: "t-detail" }, h("td", { colspan: cols.length }, h("div", { class: "pre-wrap small" }, d.details[i]))) : null];
+    };
+    const draw = () => {
+      const idx = visible();
+      const head = h("thead", null, h("tr", null, cols.map((c, i) => h("th", { class: isNum(i) ? "num" : "", "aria-sort": st.sort === i ? (st.dir > 0 ? "ascending" : "descending") : "none" },
+        h("button", { class: "th-btn", onclick: () => { if (st.sort === i) st.dir = -st.dir; else { st.sort = i; st.dir = 1; } draw(); } },
+          c, st.sort === i ? (st.dir > 0 ? " ▲" : " ▼") : "")))));
+      let body;
+      if (gi >= 0) {
+        const groups = new Map();
+        for (const i of idx) { const g = String(d.rows[i][gi] ?? ""); if (!groups.has(g)) groups.set(g, []); groups.get(g).push(i); }
+        body = [...groups.entries()].map(([g, ix]) => h("tbody", null, h("tr", { class: "t-group" }, h("td", { colspan: cols.length }, `${g || "(none)"} · ${ix.length}`)),
+          ix.map(rowEls), totalsRow(ix)));
+      } else body = h("tbody", null, idx.map(rowEls));
+      mount(host, h("table", { class: "t" }, head, body, gi < 0 && totalsRow(idx) ? h("tfoot", null, totalsRow(idx)) : null),
+        idx.length < d.rows.length ? h("div", { class: "tiny muted", style: "padding:4px 2px" }, `${idx.length} of ${d.rows.length} rows`) : null);
+    };
+    filterIn.addEventListener("input", () => { st.filter = filterIn.value; draw(); });
+    draw();
+    const data = () => { const idx = visible(); const rows = idx.map((i) => d.rows[i]);
+      return { title: d.title || "Table", markdown: (d.title ? `**${d.title}**\n\n` : "") + toMD(cols, rows), csv: toCSV(cols, rows),
+        json: rows.map((r) => Object.fromEntries(cols.map((c, i) => [c, r[i]]))) }; };
+    return frame("table", d.title, h("div", null, d.rows.length > 5 ? filterIn : null, host), data);
+  }
+
+  // ---------- charts ----------
+  const SERIES = 6;
+  function chartView(d) {
+    const kind = d.kind || "bar";
+    const series = d.series && d.series.length ? d.series : [{ name: "Value", values: d.values || [] }];
+    const labels = d.labels || [];
+    const unit = d.unit || "";
+    const legend = series.length > 1 ? h("div", { class: "legend" }, series.map((s, i) => h("span", null, h("span", { class: `swatch s${i % SERIES}` }), s.name))) : null;
+    let body;
+    if (!labels.length) body = h("div", { class: "muted small" }, "No values to show.");
+    else if (kind === "stacked") {
+      const totals = labels.map((_, i) => series.reduce((s, x) => s + Math.max(0, x.values[i] || 0), 0));
+      const max = d.max || Math.max(1, d.threshold || 0, ...totals);
+      body = h("div", { class: "bars" }, labels.map((l, i) => h("div", { class: "bar-row" }, h("div", { class: "bar-label" }, l),
+        h("div", { class: "bar-track stacked", role: "img", "aria-label": `${l}: ${series.map((s) => `${s.name} ${fmtN(s.values[i])}${unit}`).join(", ")}` },
+          series.map((s, k) => h("span", { class: `seg s${k % SERIES}`, title: `${s.name}: ${fmtN(s.values[i])}${unit}`, style: `width:${Math.max(0, (s.values[i] || 0) / max * 100)}%` })),
+          d.threshold != null ? h("i", { class: "thr", style: `left:${Math.min(100, d.threshold / max * 100)}%`, title: `threshold ${fmtN(d.threshold)}` }) : null),
+        h("div", { class: "bar-val num" }, `${fmtN(totals[i])}${unit}`))));
+    } else if (kind === "waterfall") {
+      const vals = series[0].values; let run = 0;
+      const steps = vals.map((v) => { const from = run; run += v; return [from, run]; });
+      const max = d.max || Math.max(1, d.threshold || 0, ...steps.map((s) => Math.max(s[0], s[1])));
+      body = h("div", { class: "bars" }, labels.map((l, i) => { const [a, b] = steps[i]; const lo = Math.min(a, b), hi = Math.max(a, b);
+        return h("div", { class: "bar-row" }, h("div", { class: "bar-label" }, l),
+          h("div", { class: "bar-track", role: "img", "aria-label": `${l}: ${vals[i] >= 0 ? "+" : ""}${fmtN(vals[i])}${unit}, running total ${fmtN(b)}` },
+            h("span", { class: `wf ${vals[i] < 0 ? "neg" : "pos"}`, style: `left:${lo / max * 100}%;width:${Math.max(0.5, (hi - lo) / max * 100)}%` }),
+            d.threshold != null ? h("i", { class: "thr", style: `left:${Math.min(100, d.threshold / max * 100)}%` }) : null),
+          h("div", { class: "bar-val num" }, `${vals[i] >= 0 ? "+" : ""}${fmtN(vals[i])} → ${fmtN(b)}${unit}`)); }));
+    } else {
+      const max = d.max || Math.max(1, d.threshold || 0, ...series.flatMap((s) => s.values));
+      body = h("div", { class: "bars" }, labels.map((l, i) => h("div", { class: "bar-row" }, h("div", { class: "bar-label" }, l),
+        h("div", { class: "bar-group" }, series.map((s, k) => h("div", { class: "bar-track", role: "img", "aria-label": `${l}${series.length > 1 ? ` ${s.name}` : ""}: ${fmtN(s.values[i])}${unit}` },
+          h("span", { class: series.length > 1 ? `s${k % SERIES}` : "", style: `width:${Math.max(0, Math.min(100, (s.values[i] || 0) / max * 100))}%` }),
+          d.threshold != null ? h("i", { class: "thr", style: `left:${Math.min(100, d.threshold / max * 100)}%` }) : null))),
+        h("div", { class: "bar-val num" }, series.map((s) => `${fmtN(s.values[i])}${unit}`).join(" / ")))));
+    }
+    const cols = ["Label", ...series.map((s) => s.name)];
+    const rows = labels.map((l, i) => [l, ...series.map((s) => s.values[i])]);
+    return frame("chart", d.title, h("div", null, legend, body,
+      d.threshold != null ? h("div", { class: "tiny muted", style: "margin-top:6px" }, `Threshold line at ${fmtN(d.threshold)}${unit}`) : null,
+      (d.notes || []).length ? h("div", { class: "tiny muted", style: "margin-top:6px" }, d.notes.join(" · ")) : null),
+    () => ({ title: d.title || "Chart", markdown: (d.title ? `**${d.title}**\n\n` : "") + toMD(cols, rows), csv: toCSV(cols, rows), json: d }));
+  }
+
+  // ---------- gauge ----------
+  function gaugeEl(segments, max, threshold, unit, style = "bar") {
+    const total = segments.reduce((s, x) => s + x.value, 0);
+    const label = `${fmtN(total)} of ${fmtN(max)}${unit}${threshold != null ? `, threshold ${fmtN(threshold)}` : ""}`;
+    let vis;
+    if (style === "donut") {
+      let acc = 0;
+      const stops = segments.map((s, i) => { const a = acc / max * 360; acc += s.value; const b = Math.min(360, acc / max * 360); return `var(--s${i % SERIES}) ${a}deg ${b}deg`; });
+      stops.push(`var(--surface-2) ${Math.min(360, acc / max * 360)}deg 360deg`);
+      vis = h("div", { class: "donut", role: "img", "aria-label": label, style: `background:conic-gradient(${stops.join(",")})` },
+        h("div", { class: "donut-hole" }, h("div", { class: "donut-n" }, fmtN(total)), h("div", { class: "tiny muted" }, `of ${fmtN(max)}${unit}`)),
+        threshold != null ? h("i", { class: "donut-thr", style: `transform:rotate(${threshold / max * 360}deg)` }) : null);
+    } else {
+      vis = h("div", { class: "gauge", role: "img", "aria-label": label },
+        segments.map((s, i) => h("span", { class: `seg s${i % SERIES}`, title: `${s.label}: ${fmtN(s.value)}${unit}`, style: `width:${Math.max(0, s.value / max * 100)}%` })),
+        threshold != null ? h("i", { class: "thr", style: `left:${Math.min(100, threshold / max * 100)}%`, title: `threshold ${fmtN(threshold)}` }) : null);
+    }
+    const delta = threshold != null ? total - threshold : null;
+    return h("div", { class: "gauge-wrap" }, vis,
+      h("div", { class: "legend" }, segments.map((s, i) => h("span", null, h("span", { class: `swatch s${i % SERIES}` }), `${s.label} ${fmtN(s.value)}${unit}`))),
+      delta != null ? h("div", { class: "small " + (delta >= 0 ? "ok-text" : "bad-text") }, delta >= 0 ? `Threshold reached (+${fmtN(delta)}${unit})` : `${fmtN(-delta)}${unit} to the threshold`) : null);
+  }
+  function gaugeView(d) {
+    const cols = ["Segment", "Value"], rows = d.segments.map((s) => [s.label, s.value]);
+    return frame("gauge", d.title, gaugeEl(d.segments, d.max, d.threshold, d.unit || "", d.style),
+      () => ({ title: d.title || "Progress", markdown: toMD(cols, rows), csv: toCSV(cols, rows), json: d }));
+  }
+
+  // ---------- artifact block ----------
+  function highlight(line, lang) {
+    if (lang === "json") {
+      const out = []; const re = /("(?:[^"\\]|\\.)*")(\s*:)?|(-?\b\d+(?:\.\d+)?(?:[eE][+-]?\d+)?\b)|\b(true|false|null)\b/g;
+      let last = 0, m;
+      while ((m = re.exec(line))) {
+        out.push(line.slice(last, m.index));
+        if (m[1]) out.push(h("span", { class: m[2] ? "hl-k" : "hl-s" }, m[1]), m[2] || "");
+        else if (m[3]) out.push(h("span", { class: "hl-n" }, m[3]));
+        else out.push(h("span", { class: "hl-b" }, m[4]));
+        last = re.lastIndex;
+      }
+      out.push(line.slice(last));
+      return out;
+    }
+    if (lang === "markdown" || lang === "md") {
+      if (/^#{1,6}\s/.test(line)) return [h("span", { class: "hl-k" }, line)];
+      if (/^\s*([-*]|\d+\.)\s/.test(line)) { const m = line.match(/^(\s*(?:[-*]|\d+\.)\s)(.*)$/); return [h("span", { class: "hl-n" }, m[1]), m[2]]; }
+    }
+    return [line];
+  }
+  function artifactView(d) {
+    const lines = d.content.split("\n");
+    const words = (d.content.match(/\S+/g) || []).length;
+    const LIMIT = 24;
+    let expanded = lines.length <= LIMIT;
+    const pre = h("div", { class: "art-body", role: "region", "aria-label": `${d.title} content`, tabindex: "0" });
+    const more = h("button", { class: "sm" });
+    const copyBtn = h("button", { class: "sm primary", onclick: () => copyText(d.content, copyBtn) }, "Copy");
+    const fname = d.filename || `${slug(d.title)}.${{ markdown: "md", md: "md", json: "json", csv: "csv", python: "py", html: "html", javascript: "js", text: "txt" }[d.language] || "txt"}`;
+    const dl = h("button", { class: "sm", onclick: () => download(d.content, fname, d.language === "json" ? "application/json" : d.language === "csv" ? "text/csv" : "text/plain") }, "Download");
+    const save = h("button", { class: "sm ghost", title: "Keep it in Canvas Hub (Notes & tasks → Files)", onclick: async () => {
+      const r = await guard(() => api(A("/files"), { method: "POST", body: { filename: fname, title: d.title, content: d.content } }));
+      if (r) { save.textContent = "✓ Saved to files"; save.disabled = true; toast(`Saved as file #${r.id}`); } } }, "Save to files");
+    const draw = () => {
+      const show = expanded ? lines : lines.slice(0, LIMIT);
+      mount(pre, h("ol", { class: "art-lines" }, show.map((l) => h("li", null, h("code", null, ...highlight(l, d.language))))));
+      pre.classList.toggle("clipped", !expanded);
+      more.hidden = lines.length <= LIMIT;
+      more.textContent = expanded ? "Collapse" : `Expand full (${lines.length} lines)`;
+    };
+    more.addEventListener("click", () => { expanded = !expanded; draw(); });
+    draw();
+    const body = h("div", null,
+      h("div", { class: "art-meta tiny muted" }, `${d.language || "text"} · ${lines.length} lines · ${words.toLocaleString()} words · ${d.content.length.toLocaleString()} characters`),
+      pre, h("div", { class: "row", style: "margin-top:8px" }, copyBtn, dl, save, more));
+    return frame("artifact", d.title, body, () => ({ title: d.title, filename: fname.replace(/\.[^.]+$/, ""), text: d.content,
+      markdown: d.language === "markdown" || d.language === "md" ? d.content : "```" + (d.language || "") + "\n" + d.content + "\n```",
+      json: { title: d.title, language: d.language, content: d.content } }));
+  }
+
+  // ---------- JSON tree ----------
+  function treeNode(key, v, depth) {
+    const k = key != null ? h("span", { class: "hl-k" }, `${key}: `) : null;
+    if (v === null || typeof v !== "object") {
+      const cls = typeof v === "string" ? "hl-s" : typeof v === "number" ? "hl-n" : "hl-b";
+      return h("div", { class: "tree-leaf" }, k, h("span", { class: cls }, typeof v === "string" ? JSON.stringify(v) : String(v)));
+    }
+    const arr = Array.isArray(v), entries = arr ? v.map((x, i) => [i, x]) : Object.entries(v);
+    const det = h("details", { class: "tree-node", open: depth < 2 ? true : null },
+      h("summary", null, k, h("span", { class: "muted" }, arr ? `[${entries.length}]` : `{${entries.length}}`)));
+    det.addEventListener("toggle", () => {
+      if (det.open && det.children.length === 1) det.append(...entries.map(([kk, x]) => treeNode(kk, x, depth + 1)));
+    }, { once: false });
+    if (depth < 2) det.append(...entries.map(([kk, x]) => treeNode(kk, x, depth + 1)));
+    return det;
+  }
+  function jsonView(d) {
+    const root = h("div", { class: "tree" }, treeNode(null, d.data, 0));
+    const setAll = (open) => { for (let i = 0; i < 6; i++) root.querySelectorAll("details").forEach((x) => { if (x.open !== open) { x.open = open; x.dispatchEvent(new Event("toggle")); } }); };
+    return frame("json", d.title, root, () => ({ title: d.title || "Data", markdown: "```json\n" + JSON.stringify(d.data, null, 2) + "\n```", json: d.data }),
+      { extra: [h("button", { class: "sm ghost", onclick: () => setAll(true) }, "Expand all"), h("button", { class: "sm ghost", onclick: () => setAll(false) }, "Collapse")] });
+  }
+
+  // ---------- diff view ----------
+  function wordDiff(a, b) {
+    const x = String(a ?? "").split(/(\s+)/), y = String(b ?? "").split(/(\s+)/);
+    if (x.length * y.length > 4e6) return null;
+    const n = x.length, m = y.length, dp = Array.from({ length: n + 1 }, () => new Uint32Array(m + 1));
+    for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--) dp[i][j] = x[i] === y[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+    const out = []; let i = 0, j = 0;
+    while (i < n && j < m) {
+      if (x[i] === y[j]) { out.push(["=", x[i]]); i++; j++; } else if (dp[i + 1][j] >= dp[i][j + 1]) out.push(["-", x[i++]]); else out.push(["+", y[j++]]);
+    }
+    while (i < n) out.push(["-", x[i++]]);
+    while (j < m) out.push(["+", y[j++]]);
+    return out;
+  }
+  function diffPair(a, b, mode = "split") {
+    const ops = wordDiff(plain(a), plain(b));
+    if (!ops) return h("div", { class: "dv-cols" }, h("div", { class: "dv-side old" }, plain(a)), h("div", { class: "dv-side new" }, plain(b)));
+    if (mode === "inline") return h("div", { class: "dv-inline" }, ops.map(([t, s]) => t === "=" ? s : h(t === "+" ? "ins" : "del", null, s)));
+    return h("div", { class: "dv-cols" },
+      h("div", { class: "dv-side old", "aria-label": "Before" }, ops.filter((o) => o[0] !== "+").map(([t, s]) => t === "=" ? s : h("del", null, s))),
+      h("div", { class: "dv-side new", "aria-label": "After" }, ops.filter((o) => o[0] !== "-").map(([t, s]) => t === "=" ? s : h("ins", null, s))));
+  }
+  const plain = (v) => v == null ? "" : typeof v === "object" ? (v.local || v.iso || v.raw || JSON.stringify(v)) : String(v);
+  function diffView(d) {
+    let mode = store.get("diffmode") || "split";
+    const host = h("div");
+    const draw = () => {
+      mount(host, d.changes.length ? d.changes.map((c) => {
+        const head = h("div", { class: "dv-head" }, h("span", { class: "strong" }, c.field), c.when ? h("span", { class: "tiny muted" }, ` · ${fmtDate(c.when)}`) : null);
+        return h("div", { class: "dv" }, head, diffPair(c.old, c.new, mode));
+      }) : h("div", { class: "muted small" }, "No recorded edits."));
+    };
+    draw();
+    const toggle = h("button", { class: "sm ghost", onclick: () => { mode = mode === "split" ? "inline" : "split"; store.set("diffmode", mode); toggle.textContent = mode === "split" ? "Inline" : "Side by side"; draw(); } }, mode === "split" ? "Inline" : "Side by side");
+    const rows = d.changes.map((c) => [c.field, plain(c.old), plain(c.new), c.when || ""]);
+    return frame("diff", d.title, host, () => ({ title: d.title, markdown: rows.map((r) => `### ${r[0]}${r[3] ? ` (${r[3]})` : ""}\n\n- Before: ${r[1]}\n- After: ${r[2]}`).join("\n\n"),
+      csv: toCSV(["Field", "Before", "After", "When"], rows), json: d.changes }), { extra: [toggle] });
+  }
+
+  // ---------- score model: live mirror of canvas_hub/scoring.py ----------
+  function evaluate(model, state) {
+    const st = { include: state.include || {}, values: state.values || {} };
+    const lines = model.buckets.map((b) => {
+      const r = { id: b.id, label: b.label, max: b.max, status: b.status, unit: b.unit, group: b.group || null, points: 0, lost: 0, included: true, gated: false, note: null };
+      if (b.status === "excused") return { ...r, included: false, max: 0 };
+      if (b.status === "earned" || b.status === "lost") { r.points = Math.min(b.max, b.earned || 0); r.lost = b.max - r.points; return r; }
+      if (b.status === "locked") return { ...r, lost: b.max, included: false, note: "locked" };
+      r.included = st.include[b.id] !== false;
+      if (!r.included) return { ...r, note: "skipped" };
+      let pts;
+      if (b.formula) {
+        const val = st.values[b.id] ?? b.full_at ?? b.max;
+        r.value = val;
+        try {
+          pts = Math.min(b.max, Math.max(0, formulaEval(b.formula, { value: val, hours: b.unit === "hours" ? val : 0, max: b.max,
+            full_at: b.full_at || 0, min_value: b.min_value || 0 })));
+          if (b.gating === "min_threshold" && val < (b.min_value || 0)) { pts = 0; r.gated = true; r.note = `0 until ${fmtN(b.min_value)}${b.unit === "hours" ? " h" : ""}`; }
+          else if (b.gating === "all_or_nothing" && pts < b.max) { pts = 0; r.gated = true; r.note = "all or nothing"; }
+        } catch (e) { pts = 0; r.gated = true; r.note = e.message; }
+      } else if (b.unit === "hours") {
+        const hrs = st.values[b.id] ?? b.full_at ?? 0;
+        r.value = hrs;
+        pts = b.full_at ? b.max * Math.min(1, hrs / b.full_at) : b.max;
+        if (b.gating === "min_threshold" && hrs < (b.min_value || 0)) { pts = 0; r.gated = true; r.note = `0 until ${fmtN(b.min_value)} h`; }
+        else if (b.gating === "all_or_nothing" && b.full_at && hrs < b.full_at) { pts = 0; r.gated = true; r.note = "all or nothing"; }
+      } else {
+        const v = Math.min(b.max, st.values[b.id] ?? b.max);
+        r.value = v; pts = v;
+        if (b.gating === "all_or_nothing" && v < b.max) { pts = 0; r.gated = true; r.note = "all or nothing"; }
+        else if (b.gating === "min_threshold" && v < (b.min_value || 0)) { pts = 0; r.gated = true; r.note = `0 below ${fmtN(b.min_value)}`; }
+      }
+      r.points = Math.round(pts * 1e4) / 1e4;
+      return r;
+    });
+    const sum = (f) => lines.reduce((s, x) => s + f(x), 0);
+    const booked = sum((x) => ["earned", "lost"].includes(x.status) ? x.points : 0);
+    const projected = sum((x) => x.points);
+    const ceiling = booked + sum((x) => x.status === "pending" ? x.max : 0);
+    const t = { booked, projected, ceiling, lost: sum((x) => x.lost), remaining: sum((x) => x.status === "pending" ? x.points : 0),
+      skipped: sum((x) => x.status === "pending" && !x.included ? x.max : 0), possible: sum((x) => x.max),
+      open_count: lines.filter((x) => x.status === "pending" && x.included).length, threshold: model.threshold };
+    if (model.threshold != null) Object.assign(t, { margin: projected - model.threshold, passes: projected >= model.threshold - 1e-9,
+      skip_budget: Math.max(0, projected - model.threshold), ceiling_passes: ceiling >= model.threshold - 1e-9 });
+    const groups = {};
+    for (const x of lines) {
+      const g = groups[x.group || "Other"] ||= { earned: 0, remaining: 0, lost: 0, skipped: 0 };
+      if (x.status === "earned" || x.status === "lost") g.earned += x.points;
+      else if (x.status === "pending") { if (x.included) g.remaining += x.points; else g.skipped += x.max; }
+      g.lost += x.lost;
+    }
+    return { lines, totals: t, groups, alerts: alerts(model, lines, t) };
+  }
+  // Mirror of canvas_hub/scoring.py alerts().
+  function alerts(model, lines, t) {
+    const out = [], now = Date.now(), byId = Object.fromEntries(model.buckets.map((b) => [b.id, b])), thr = t.threshold;
+    if (thr != null) {
+      if (t.ceiling < thr - 1e-9) out.push({ level: "bad", text: `Even full marks on everything left gives ${fmtN(t.ceiling)}, below the pass mark ${fmtN(thr)}.` });
+      else if (!t.passes) out.push({ level: "bad", text: `Below the pass mark by ${fmtN(thr - t.projected)} with this plan.` });
+      else if (t.margin < Math.max(1, 0.05 * thr)) out.push({ level: "warn", text: `Only ${fmtN(t.margin)} to spare: losing any line worth more fails.` });
+    }
+    for (const x of lines) {
+      const b = byId[x.id];
+      if (x.status !== "pending" || !x.included) continue;
+      const due = b.due && b.due.length > 10 ? new Date(b.due).getTime() : null;
+      if (x.gated && b.unit === "hours" && b.gating === "min_threshold" && (x.value ?? 0) < (b.min_value || 0)) out.push({ level: "bad", text: `${b.label}: counts 0 until ${fmtN(b.min_value)} h are reached.` });
+      else if (x.gated) out.push({ level: "bad", text: `${b.label}: ${x.note} — currently worth 0.` });
+      if (due && due < now) out.push({ level: "warn", text: `${b.label} is past its due date but still planned.` });
+      else if (b.gating === "all_or_nothing" && due && due - now < 7 * 86400e3) out.push({ level: "warn", text: `At risk: ${b.label} is all-or-nothing and due within a week.` });
+    }
+    return out;
+  }
+  const alertList = (list) => list && list.length ? h("div", { class: "alerts", role: "status" }, list.map((a) => h("div", { class: `alert ${a.level}` }, a.level === "bad" ? "⚠ " : "• ", a.text))) : null;
+
+  // Shared plumbing for saved components: debounced save with version check, undo, pin.
+  // Saves run one at a time. Each carries the edit number it was taken at; when a
+  // reply arrives after newer local edits, those edits are kept (only the server's
+  // version is taken) and the next queued save sends them.
+  function savedComponent(view, render) {
+    let v = view, timer = null, saving = Promise.resolve(), isFull = false, edits = 0;
+    let seen = view.state;                 // the last state the server confirmed: sent as `base` so it can merge
+    let acked = 0;                         // edits the server has confirmed; fewer than `edits` = local changes pending
+    const el = h("div", { class: "saved-cmp" });
+    const status = h("span", { class: "tiny muted save-state", "aria-live": "polite" });
+    const redraw = () => { mount(el, render(v, api_)); };
+    const queue = (fn) => (saving = saving.then(fn, fn));
+    // Edits made while a save was in flight are re-applied on top of the server's answer (which may hold
+    // changes from elsewhere, e.g. a linked to-do finished meanwhile): per key, and per entry for maps.
+    const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+    const isMap = (x) => x && typeof x === "object" && !Array.isArray(x);
+    const rebase = (sentState, local, server) => {
+      const out = { ...server };
+      for (const k of new Set([...Object.keys(local), ...Object.keys(sentState)])) {
+        if (same(local[k], sentState[k])) continue;                 // not touched since the request: server's
+        if (isMap(local[k]) && isMap(sentState[k]) && isMap(server[k])) {
+          const m = { ...server[k] };
+          for (const j of new Set([...Object.keys(local[k]), ...Object.keys(sentState[k])])) {
+            if (same(local[k][j], sentState[k][j])) continue;
+            if (local[k][j] === undefined) delete m[j]; else m[j] = local[k][j];
+          }
+          out[k] = m;
+        } else if (local[k] === undefined) delete out[k];
+        else out[k] = local[k];
+      }
+      return out;
+    };
+    let pending = null;
+    const persist = () => {
+      clearTimeout(timer);
+      status.textContent = "Saving…";
+      pending = () => queue(async () => {
+        const sent = edits, sentState = v.state;
+        try {
+          const r = await api(A(`/components/${v.id}`), { method: "PATCH", body: { state: sentState, base: seen, expected_version: v.version } });
+          seen = r.state;
+          if (edits === sent) acked = sent;
+          v = edits === sent ? r : { ...r, state: rebase(sentState, v.state, r.state) };
+          if (edits === sent) redraw();
+          status.textContent = edits === sent ? `Saved ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : "Saving…";
+        } catch (e) {
+          if (e.status === 409) { v = await api(A(`/components/${v.id}`)); seen = v.state; acked = edits; redraw(); status.textContent = "Reloaded (changed elsewhere)"; }
+          else { status.textContent = "Not saved"; toast(e.message || "Could not save", true); }
+        }
+      });
+      timer = setTimeout(() => { const run = pending; pending = null; if (run) run(); }, 350);
+    };
+    const flush = () => { clearTimeout(timer); const run = pending; pending = null; if (run) run(); };
+    const api_ = {
+      setState: (fn) => { edits += 1; v = { ...v, state: fn(structuredClone(v.state)) }; redraw(); persist(); },
+      undo: () => { flush(); return queue(async () => {
+        const r = await guard(() => api(A(`/components/${v.id}`), { method: "PATCH", body: { undo: true } }));
+        if (r) { edits += 1; acked = edits; v = r; seen = r.state; redraw(); status.textContent = "Undone"; }
+      }); },
+      pin: () => queue(async () => {
+        const r = await guard(() => api(A(`/components/${v.id}`), { method: "PATCH", body: { pinned: !v.pinned } }));
+        if (r) { v = { ...r, state: v.state }; redraw(); toast(r.pinned ? "Pinned to Trackers" : "Unpinned"); }
+      }),
+      status,
+      get full() { return isFull; },
+      onFull: (on) => { isFull = on; },
+      get view() { return v; },
+    };
+    // The chat holds the definition from when it was created, and a cached copy may be shown again after
+    // edits elsewhere (Trackers, the assistant): load the latest, unless local changes are still unsaved.
+    const reload = () => api(A(`/components/${v.id}`)).then((fresh) => {
+      if (edits === acked && !pending && fresh.version !== v.version) { v = fresh; seen = fresh.state; redraw(); }
+    }).catch(() => {});
+    el.refresh = reload;
+    redraw();
+    reload();
+    return el;
+  }
+  const savedTools = (v, ctl) => [ctl.status,
+    h("button", { class: "sm ghost", title: "Undo the last change", disabled: v.can_undo ? null : true, onclick: () => ctl.undo() }, "↶ Undo"),
+    h("button", { class: "sm ghost", "aria-pressed": v.pinned ? "true" : "false", onclick: () => ctl.pin() }, v.pinned ? "★ Pinned" : "☆ Pin")];
+
+  function scoreModelView(view) {
+    return savedComponent(view, (v, ctl) => {
+      const model = v.spec, state = v.state || {};
+      const comp = evaluate(model, state);
+      const t = comp.totals, unit = ` ${model.unit_label || "pts"}`;
+      const byId = Object.fromEntries(model.buckets.map((b) => [b.id, b]));
+      const next = model.buckets.filter((b) => b.status === "pending" && b.due && (state.include || {})[b.id] !== false).sort((a, b) => a.due < b.due ? -1 : 1)[0];
+      const passPill = t.threshold == null ? null : t.passes ? pill("ok", `PASS · +${fmtN(t.margin)}`) : pill("bad", `${fmtN(-t.margin)} short`);
+      const summary = h("div", { class: "sl-side", "aria-label": "Summary" },
+        h("div", { class: "sl-big" }, h("span", { class: "num" }, fmtN(t.projected)), h("span", { class: "muted small" }, t.threshold != null ? ` / ${fmtN(t.threshold)} to pass` : unit)), passPill,
+        gaugeEl([{ label: "Booked", value: t.booked }, { label: "Planned", value: t.remaining }], Math.max(t.possible, 1), t.threshold, "", "bar"),
+        h("dl", { class: "sl-kv" },
+          h("dt", null, "Booked"), h("dd", { class: "num" }, fmtN(t.booked)),
+          h("dt", null, "Ceiling"), h("dd", { class: "num" }, fmtN(t.ceiling), t.ceiling_passes === false ? h("span", { class: "bad-text tiny" }, " below pass") : null),
+          h("dt", null, "Lost"), h("dd", { class: "num" }, fmtN(t.lost)),
+          t.threshold != null ? [h("dt", null, "Skip budget"), h("dd", { class: "num" }, fmtN(t.skip_budget))] : null,
+          h("dt", null, "Open lines"), h("dd", { class: "num" }, String(t.open_count)),
+          next ? [h("dt", null, "Next due"), h("dd", null, next.label, h("div", null, countdown(next.due)))] : null));
+      const scen = model.scenarios && model.scenarios.length ? h("div", { class: "row", role: "radiogroup", "aria-label": "Scenario" },
+        h("span", { class: "small muted" }, "Scenario:"), model.scenarios.map((s) => h("button", { class: "chip" + (state.scenario === s.id ? " on" : ""), role: "radio",
+          "aria-checked": state.scenario === s.id ? "true" : "false",
+          onclick: () => ctl.setState(() => ({ include: { ...s.include }, values: { ...s.values }, scenario: s.id })) }, s.label))) : null;
+      const STATUS = { earned: ["ok", "Earned"], pending: ["info", "To do"], lost: ["bad", "Lost"], locked: ["muted", "Locked"], excused: ["muted", "Excused"] };
+      const groups = new Map();
+      for (const x of comp.lines) { const g = byId[x.id].group || ""; if (!groups.has(g)) groups.set(g, []); groups.get(g).push(x); }
+      const rowsFor = (lines) => lines.map((x) => {
+        const b = byId[x.id];
+        const pending = b.status === "pending";
+        const box = h("input", { type: "checkbox", checked: x.included && b.status !== "locked" ? true : null, disabled: pending ? null : true,
+          "aria-label": `Include ${b.label}`, onchange: (e) => ctl.setState((s) => ({ ...s, scenario: null, include: { ...(s.include || {}), [b.id]: e.target.checked } })) });
+        const setVal = (n) => ctl.setState((s) => { const vals = { ...(s.values || {}) }; if (n == null || Number.isNaN(n)) delete vals[b.id]; else vals[b.id] = n; return { ...s, scenario: null, values: vals }; });
+        const top = b.unit === "hours" ? Math.max(b.full_at || b.max, (x.value || 0)) : b.max;
+        const input = pending && x.included ? h("div", { class: "num-pair" },
+          h("input", { type: "range", class: "num-slider", min: 0, max: top, step: b.unit === "hours" ? 0.5 : (b.max <= 10 ? 0.5 : 1), value: x.value ?? top,
+            "aria-label": `${b.unit === "hours" ? "Hours" : "Points"} for ${b.label} (slider)`,
+            oninput: (e) => { const n = e.target.nextSibling; if (n) n.value = e.target.value; }, onchange: (e) => setVal(Number(e.target.value)) }),
+          h("input", { type: "number", class: "num-in", min: 0, step: b.unit === "hours" ? 0.5 : 1, max: b.unit === "hours" ? null : b.max,
+            value: x.value ?? "", "aria-label": `${b.unit === "hours" ? "Hours" : "Points"} for ${b.label}`,
+            onchange: (e) => setVal(e.target.value === "" ? null : Number(e.target.value)) })) : null;
+        return h("tr", { class: (x.included ? "" : "off ") + (x.gated ? "gated" : "") },
+          h("td", null, box),
+          h("td", null, itemLink(b.item_id, b.label), h("span", { class: "st-inline" }, pill(STATUS[b.status][0], STATUS[b.status][1])), b.due ? h("div", { class: "tiny" }, fmtDate(b.due, { weekday: true }), " · ", countdown(b.due)) : null,
+            b.note ? h("div", { class: "tiny muted" }, b.note) : null),
+          h("td", null, pill(STATUS[b.status][0], STATUS[b.status][1]), b.gating !== "none" ? h("div", { class: "tiny muted" }, b.gating === "all_or_nothing" ? "all or nothing" : `min ${fmtN(b.min_value)}${b.unit === "hours" ? " h" : ""}`) : null,
+            b.formula ? h("div", { class: "tiny muted formula-text", title: "Formula for this line" }, h("code", null, b.formula)) : null),
+          h("td", { class: "num" }, input || (b.unit === "hours" && x.value != null ? `${fmtN(x.value)} h` : "")),
+          h("td", { class: "num" }, h("span", { class: "strong" }, fmtN(x.points)), ` / ${fmtN(b.max)}`, x.note && x.note !== "skipped" ? h("div", { class: "tiny bad-text" }, x.note) : null));
+      });
+      const table = h("div", { class: "table-wrap" }, h("table", { class: "t score-t" },
+        h("thead", null, h("tr", null, h("th", { "aria-label": "Include" }, "✓"), h("th", null, "Line"), h("th", null, "Status"), h("th", { class: "num" }, "Expected"), h("th", { class: "num" }, "Points"))),
+        [...groups.entries()].map(([g, lines]) => h("tbody", null, groups.size > 1 ? h("tr", { class: "t-group" }, h("td", { colspan: 5 },
+          `${g || "Other"} · ${fmtN(lines.reduce((s, x) => s + x.points, 0))} / ${fmtN(lines.reduce((s, x) => s + x.max, 0))}`)) : null, rowsFor(lines)))));
+      const gnames = Object.keys(comp.groups);
+      const gchart = gnames.length > 1 ? chartView({ title: "By category", kind: "stacked", labels: gnames, threshold: null,
+        series: [{ name: "Earned", values: gnames.map((g) => comp.groups[g].earned) }, { name: "Planned", values: gnames.map((g) => comp.groups[g].remaining) },
+          { name: "Lost", values: gnames.map((g) => comp.groups[g].lost) }, { name: "Skipped", values: gnames.map((g) => comp.groups[g].skipped) }] }) : null;
+      const cols = ["Line", "Status", "Included", "Points", "Max", "Note"];
+      const rows = comp.lines.map((x) => [x.label, x.status, x.included ? "yes" : "no", x.points, byId[x.id].max, x.note || ""]);
+      const data = () => ({ title: model.title, csv: toCSV(cols, rows), json: { model, state, totals: t },
+        ics: model.buckets.filter((b) => b.status === "pending" && b.due && b.due.length > 10 && (state.include || {})[b.id] !== false).map((b) => ({ title: `${b.label} (${fmtN(b.max)} ${model.unit_label || "pts"})`, start: b.due })),
+        markdown: `**${model.title}** — projected ${fmtN(t.projected)}${t.threshold != null ? ` / ${fmtN(t.threshold)} (${t.passes ? "pass" : "below"}, margin ${fmtN(t.margin)})` : ""}, booked ${fmtN(t.booked)}, ceiling ${fmtN(t.ceiling)}, lost ${fmtN(t.lost)}\n\n${toMD(cols, rows)}` });
+      return frame("score", model.title, h("div", { class: "sidebar-layout" }, summary, h("div", { class: "sl-main" }, alertList(comp.alerts), scen, table, gchart)), data,
+        { extra: savedTools(v, ctl), full: ctl.full, onFull: ctl.onFull });
+    });
+  }
+
+  function checklistView(view) {
+    return savedComponent(view, (v, ctl) => {
+      const spec = v.spec, state = v.state || {}, done = state.done || {}, collapsed = state.collapsed || {};
+      const all = spec.sections.flatMap((s) => s.rows);
+      const pts = all.reduce((s, r) => s + (r.points || 0), 0), dpts = all.reduce((s, r) => s + (done[r.id] ? r.points || 0 : 0), 0);
+      const dc = all.filter((r) => done[r.id]).length;
+      const progress = (a, b, what = "Checklist") => h("div", { class: "progress", role: "progressbar", "aria-valuemin": 0, "aria-valuemax": b, "aria-valuenow": a,
+        "aria-label": `${what}: ${a} of ${b} done` },
+        h("span", { style: `width:${b ? a / b * 100 : 0}%` }));
+      const sections = spec.sections.map((s) => {
+        const sp = s.rows.reduce((t, r) => t + (r.points || 0), 0), sd = s.rows.reduce((t, r) => t + (done[r.id] ? r.points || 0 : 0), 0);
+        const sc = s.rows.filter((r) => done[r.id]).length;
+        const det = h("details", { class: "cl-sec", open: collapsed[s.id] ? null : true },
+          h("summary", null, h("span", { class: "strong" }, s.title || "Items"), h("span", { class: "tiny muted" }, ` ${sc}/${s.rows.length}${sp ? ` · ${fmtN(sd)}/${fmtN(sp)} pts` : ""}`), progress(sc, s.rows.length, s.title || "Items")),
+          h("ul", { class: "cl-rows" }, s.rows.map((r) => h("li", { class: done[r.id] ? "done" : "" },
+            h("label", { class: "check" }, h("input", { type: "checkbox", checked: done[r.id] ? true : null,
+              onchange: (e) => ctl.setState((x) => { const d2 = { ...(x.done || {}) }; if (e.target.checked) d2[r.id] = true; else delete d2[r.id]; return { ...x, done: d2 }; }) }),
+            h("span", null, r.label)),
+            h("span", { class: "cl-meta" }, r.points != null ? h("span", { class: "num tiny" }, `${fmtN(r.points)} pts`) : null,
+              r.due ? countdown(r.due.length === 10 ? `${r.due}T23:59:00` : r.due) : null,
+              r.item_id ? itemLink(r.item_id, "details") : null),
+            r.note ? h("div", { class: "tiny muted cl-note" }, r.note) : null))));
+        det.addEventListener("toggle", () => { const want = !det.open; if (!!collapsed[s.id] !== want) ctl.setState((x) => ({ ...x, collapsed: { ...(x.collapsed || {}), [s.id]: want } })); });
+        return det;
+      });
+      const cols = ["Section", "Item", "Done", "Points", "Due"];
+      const rows = spec.sections.flatMap((s) => s.rows.map((r) => [s.title, r.label, done[r.id] ? "yes" : "no", r.points ?? "", r.due || ""]));
+      const data = () => ({ title: spec.title, csv: toCSV(cols, rows), json: { spec, state },
+        ics: all.filter((r) => r.due && !done[r.id]).map((r) => ({ title: r.label, start: r.due.length === 10 ? `${r.due}T23:59:00` : r.due })),
+        markdown: `**${spec.title}** — ${dc}/${all.length} done${pts ? `, ${fmtN(dpts)}/${fmtN(pts)} pts` : ""}\n\n` + spec.sections.map((s) => `${s.title ? `### ${s.title}\n` : ""}${s.rows.map((r) => `- [${done[r.id] ? "x" : " "}] ${r.label}${r.points != null ? ` (${fmtN(r.points)} pts)` : ""}${r.due ? ` — due ${r.due}` : ""}`).join("\n")}`).join("\n\n") });
+      afterRender();
+      return frame("checklist", spec.title, h("div", null,
+        h("div", { class: "cl-top" }, h("span", { class: "small" }, `${dc}/${all.length} done${pts ? ` · ${fmtN(dpts)}/${fmtN(pts)} pts` : ""}${spec.sync_todos ? " · linked to your to-dos" : ""}`), progress(dc, all.length, spec.title)),
+        sections), data, { extra: savedTools(v, ctl), full: ctl.full, onFull: ctl.onFull });
+    });
+  }
+
+  // ---------- confirmed writes to Canvas ----------
+  const WSTATUS = { prepared: ["warn", "Not sent — waiting for you"], sending: ["info", "Sending…"], sent: ["ok", "Sent to Canvas"],
+    failed: ["bad", "Failed"], cancelled: ["muted", "Cancelled"], expired: ["muted", "Expired"] };
+  function writePreviewView(initial) {
+    const host = h("div");
+    const draw = (w) => {
+      const pv = w.preview;
+      const st = WSTATUS[w.status] || ["muted", w.status];
+      const confirmRow = h("div", { class: "write-confirm", hidden: true },
+        h("div", { class: "strong" }, `${pv.action} in ${pv.course || "course " + w.course_id}?`),
+        h("div", { class: "small muted" }, "This sends exactly what is shown above, from your signed-in Canvas session. It cannot be undone from Canvas Hub."),
+        h("div", { class: "row", style: "margin-top:8px" },
+          h("button", { class: "danger", onclick: async (e) => {
+            e.target.disabled = true; e.target.textContent = "Sending…";
+            const r = await guard(() => api(A(`/writes/${w.id}/confirm`), { method: "POST", body: { preview_hash: pv.hash } }));
+            if (r) {
+              draw(r);
+              if (r.status === "sending") { toast("Still sending — the browser is busy; this updates when Canvas answers"); follow(w.id); }
+              else toast(r.status === "sent" ? "Sent to Canvas" : `Not sent: ${r.error || r.status}`, r.status !== "sent");
+            }
+            else { e.target.disabled = false; e.target.textContent = "Yes, send it"; }
+          } }, "Yes, send it"),
+          h("button", { class: "ghost", onclick: () => { confirmRow.hidden = true; actions.hidden = false; } }, "Back")));
+      const actions = h("div", { class: "row", style: "margin-top:10px" },
+        h("button", { class: "primary", onclick: () => { confirmRow.hidden = false; actions.hidden = true; } }, "Send to Canvas…"),
+        h("button", { class: "ghost", onclick: async () => { const r = await guard(() => api(A(`/writes/${w.id}/cancel`), { method: "POST" })); if (r) draw(r); } }, "Cancel"),
+        h("span", { class: "tiny muted" }, `Expires ${fmtDate(w.expires_at)}`));
+      const fields = [
+        ["Action", pv.action], ["Course", pv.course || w.course_id],
+        pv.target ? ["To", w.target_item_id ? itemLink(w.target_item_id, pv.target) : pv.target] : null,
+        pv.recipients ? ["Recipients", pv.recipients.map((r) => `${r.name || "user"} (${r.id})`).join(", ")] : null,
+        pv.subject ? ["Subject", pv.subject] : null,
+        pv.file ? ["File", `${pv.file.filename} · ${(pv.file.size / 1024).toFixed(1)} KB · sha256 ${pv.file.sha256.slice(0, 12)}…`] : null,
+        pv.canvas_url ? ["In Canvas", h("a", { href: pv.canvas_url, target: "_blank", rel: "noopener noreferrer" }, pv.canvas_url)] : null,
+      ].filter(Boolean);
+      const res = w.result ? Object.entries(w.result).filter(([, v]) => v != null).map(([k, v]) => `${k}: ${v}`).join(" · ") : null;
+      mount(host, frame("write", "Prepared for Canvas", h("div", { class: "write-card" + (w.status === "prepared" ? " pending" : "") },
+        h("div", { class: "row" }, pill(st[0], st[1]), h("span", { class: "tiny muted" }, `prepared by ${w.prepared_by} ${ago(w.created_at)}`)),
+        h("dl", { class: "write-fields" }, fields.map(([k, v]) => [h("dt", null, k), h("dd", null, v)])),
+        pv.body != null ? h("div", null, h("div", { class: "tiny muted" }, "Exact text that will be sent:"), h("pre", { class: "write-body" }, pv.body)) : null,
+        pv.comment ? h("div", null, h("div", { class: "tiny muted" }, "Comment with the file:"), h("pre", { class: "write-body" }, pv.comment)) : null,
+        (w.warnings || []).map((x) => h("div", { class: "small warn-text" }, "⚠ ", x)),
+        w.status === "prepared" ? [actions, confirmRow] : null,
+        w.status === "sent" ? h("div", { class: "small ok-text" }, `Sent ${fmtDate(w.finished_at)}${res ? ` · ${res}` : ""}`) : null,
+        w.status === "failed" ? h("div", { class: "small bad-text" }, `Not sent: ${w.error}`) : null),
+      () => ({ title: "Prepared write", markdown: `**${pv.action}** — ${pv.course || ""} — ${pv.target || pv.subject || ""}
+
+${pv.body || ""}`, json: w })));
+    };
+    // A send that outlasts the request stays "sending" on the server until the browser finishes; poll for it.
+    const follow = (id) => { const t = setInterval(async () => {
+      if (!host.isConnected) { clearInterval(t); return; }
+      const r = await api(A(`/writes/${id}`)).catch(() => null);
+      if (r && r.status !== "sending") { clearInterval(t); draw(r); toast(r.status === "sent" ? "Sent to Canvas" : `Not sent: ${r.error || r.status}`, r.status !== "sent"); }
+    }, 3000); };
+    draw(initial);
+    if (initial.status === "sending") follow(initial.id);
+    api(A(`/writes/${initial.id}`)).then(draw).catch(() => {});
+    return host;
+  }
+  function writesSettingsCard(data) {
+    const s = data.settings;
+    const LABEL = { submission_text: "Submit text to assignments", submission_file: "Upload files to assignments",
+      discussion_reply: "Reply in discussions", message: "Send inbox messages" };
+    const on = h("input", { type: "checkbox", checked: s.enabled ? true : null });
+    const kinds = Object.keys(LABEL).map((k) => [k, h("input", { type: "checkbox", checked: s.kinds.includes(k) ? true : null })]);
+    return h("div", { class: "card" }, h("div", { class: "card-head" }, h("h2", null, "Writing to Canvas"), pill(s.enabled ? "warn" : "muted", s.enabled ? "On — with confirmation" : "Off")),
+      h("p", { class: "small muted" }, "Off by default. When on, the assistant can prepare a submission, discussion reply or inbox message. Nothing is sent until you read the exact preview and press Send. Every write is logged below."),
+      h("label", { class: "check" }, on, h("strong", null, "Allow confirmed writes for this account")),
+      h("div", { class: "perm-list", style: "margin:6px 0 0 24px" }, kinds.map(([k, el]) => h("label", { class: "check small" }, el, LABEL[k]))),
+      h("div", { class: "row", style: "margin-top:10px" }, h("button", { class: "primary", onclick: async () => {
+        const r = await guard(() => api(A("/write-settings"), { method: "PUT", body: { enabled: on.checked, kinds: kinds.filter(([, el]) => el.checked).map(([k]) => k) } }));
+        if (r) { toast(r.enabled ? "Confirmed writes are on" : "Writes are off"); env.route(); } } }, "Save")),
+      data.writes.length ? h("div", { style: "margin-top:12px" }, h("div", { class: "small strong" }, "Write log"), writesLog(data.writes)) : null);
+  }
+  function writesLog(list) {
+    return h("ul", { class: "list" }, list.map((w) => { const st = WSTATUS[w.status] || ["muted", w.status];
+      return h("li", { class: "spread" }, h("div", null, h("span", { class: "strong" }, w.preview.action), " · ", w.target_title || w.preview.subject || "",
+        h("div", { class: "tiny muted" }, `${w.preview.course || w.course_id} · ${fmtDate(w.finished_at || w.created_at)}${w.error ? ` · ${w.error}` : ""}`)), pill(st[0], st[1])); }));
+  }
+  function filesCard(files) {
+    const input = h("input", { type: "file", "aria-label": "Add a file" });
+    input.addEventListener("change", async () => {
+      const f = input.files[0]; if (!f) return;
+      const r = await guard(() => api(A("/files"), { method: "POST", raw: true, body: f, contentType: f.type || "application/octet-stream", headers: { "X-Filename": encodeURIComponent(f.name) } }));
+      if (r) { toast(`Saved ${r.filename}`); env.route(); }
+    });
+    return h("div", { class: "card" }, h("div", { class: "card-head" }, h("h2", null, "Files"), h("label", { class: "btn sm" }, "Add a file…", input)),
+      h("p", { class: "small muted" }, "Finished work the assistant or you saved: download it, or have the assistant attach it to a prepared submission."),
+      files.length ? h("table", { class: "t" }, h("tbody", null, files.map((f) => h("tr", null,
+        h("td", null, h("span", { class: "strong" }, f.title), h("div", { class: "tiny muted" }, `${f.filename} · ${(f.size / 1024).toFixed(1)} KB · by ${f.created_by} · ${ago(f.created_at)}`)),
+        h("td", { class: "nowrap" }, h("a", { class: "btn sm", href: A(`/files/${f.id}/download`) }, "Download"), " ",
+          h("button", { class: "sm ghost", onclick: async () => { if (!confirm(`Delete ${f.filename}?`)) return; if (await guard(() => api(A(`/files/${f.id}`), { method: "DELETE" }))) env.route(); } }, "Delete")))))) :
+        h("div", { class: "muted small" }, "No files yet."));
+  }
+
+  // ---------- reminders ----------
+  function remindButton({ title, due, item_id, annotation_id }) {
+    const box = h("span", { class: "remind" });
+    const btn = h("button", { class: "sm ghost", title: "Remind me", "aria-haspopup": "menu" }, "⏰");
+    const menu = h("div", { class: "cmp-menu", hidden: true, role: "menu" });
+    const make = async (when, label) => {
+      menu.hidden = true;
+      const r = await guard(() => api(A("/reminders"), { method: "POST", body: { title, remind_at: when.toISOString(), item_id: item_id || undefined, annotation_id: annotation_id || undefined } }));
+      if (r) { btn.textContent = "⏰✓"; toast(`Reminder set: ${label}`); }
+    };
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const opts = [];
+      const d = due ? new Date(due) : null;
+      if (d && d - Date.now() > 86400e3) opts.push(["1 day before", new Date(d - 86400e3)]);
+      if (d && d - Date.now() > 3 * 3600e3) opts.push(["3 hours before", new Date(d - 3 * 3600e3)]);
+      const tm = new Date(); tm.setDate(tm.getDate() + 1); tm.setHours(9, 0, 0, 0); opts.push(["Tomorrow 9:00", tm]);
+      opts.push(["In 1 hour", new Date(Date.now() + 3600e3)]);
+      const custom = h("input", { type: "datetime-local", "aria-label": "Custom reminder time" });
+      mount(menu, opts.map(([l, w]) => h("button", { class: "cmp-menu-item", role: "menuitem", onclick: () => make(w, l) }, l)),
+        h("div", { class: "row", style: "padding:4px" }, custom, h("button", { class: "sm", onclick: () => { if (custom.value) make(new Date(custom.value), "custom"); } }, "Set")));
+      menu.hidden = !menu.hidden;
+    });
+    box.append(btn, menu);
+    return box;
+  }
+
+  // ---------- grade projector ----------
+  function projectGrades(spec, state) {
+    const hyp = (state && state.hypothetical) || {};
+    const catPct = (c, fill) => {
+      let pts = [];
+      for (const it of c.items) {
+        let sc = it.score != null ? it.score : hyp[it.id];
+        if (sc == null && fill != null) sc = it.max * fill / 100;
+        if (sc != null && it.max > 0) pts.push([Math.min(sc, it.max * 2), it.max]);
+      }
+      if (c.drop_lowest && pts.length > c.drop_lowest) pts = pts.sort((a, b) => a[0] / a[1] - b[0] / b[1]).slice(c.drop_lowest);
+      const got = pts.reduce((s, p) => s + p[0], 0), mx = pts.reduce((s, p) => s + p[1], 0);
+      return [mx ? 100 * got / mx : null, got, mx];
+    };
+    const overall = (fill) => {
+      const rows = spec.categories.map((c) => [c, ...catPct(c, fill)]);
+      if (spec.weighted) {
+        const counted = rows.filter(([c, p]) => p != null && (c.weight || 0) > 0);
+        const w = counted.reduce((s, [c]) => s + c.weight, 0);
+        return [w ? counted.reduce((s, [c, p]) => s + c.weight * p, 0) / w : null, rows];
+      }
+      const got = rows.reduce((s, r) => s + r[2], 0), mx = rows.reduce((s, r) => s + r[3], 0);
+      return [mx ? 100 * got / mx : null, rows];
+    };
+    const [pct, rows] = overall(null);
+    const letter = (v) => { for (const s of spec.scale) if (v >= s.min - 1e-9) return s.letter; return spec.scale.length ? spec.scale[spec.scale.length - 1].letter : null; };
+    const remaining = spec.categories.flatMap((c) => c.items).filter((it) => it.score == null && hyp[it.id] == null);
+    const needed = remaining.length ? spec.scale.map((s) => {
+      let lo = 0, hi = 200; const [best] = overall(hi);
+      if (best == null || best < s.min) return { letter: s.letter, needs: null, reachable: false };
+      for (let i = 0; i < 40; i++) { const mid = (lo + hi) / 2; const [v] = overall(mid); if (v != null && v >= s.min) hi = mid; else lo = mid; }
+      return { letter: s.letter, needs: Math.round(hi * 10) / 10, reachable: hi <= 100 + 1e-6 };
+    }) : [];
+    return { percent: pct, letter: pct != null ? letter(pct) : null, rows, needed, remaining: remaining.length };
+  }
+  function gradeProjectorView(view) {
+    return savedComponent(view, (v, ctl) => {
+      const spec = v.spec, hyp = (v.state || {}).hypothetical || {};
+      const pj = projectGrades(spec, v.state || {});
+      const setHyp = (id, n) => ctl.setState((s) => { const x = { ...(s.hypothetical || {}) }; if (n == null || Number.isNaN(n)) delete x[id]; else x[id] = n; return { ...s, hypothetical: x }; });
+      const fillAll = (pctFill) => ctl.setState((s) => { const x = { ...(s.hypothetical || {}) };
+        for (const c of spec.categories) for (const it of c.items) if (it.score == null) x[it.id] = Math.round(it.max * pctFill) / 100; return { ...s, hypothetical: x }; });
+      const side = h("div", { class: "sl-side" },
+        h("div", { class: "sl-big" }, h("span", { class: "num" }, pj.percent == null ? "–" : `${fmtN(Math.round(pj.percent * 10) / 10)}%`), h("span", { class: "muted small" }, pj.letter ? `  ${pj.letter}` : "")),
+        spec.weighted ? null : h("div", { class: "alert warn" }, "No category weights: points are pooled. Add the syllabus weights for a real projection."),
+        pj.needed.length ? h("dl", { class: "sl-kv" }, h("dt", { class: "strong", style: "grid-column:1/-1" }, "Needed on the rest"),
+          pj.needed.map((n) => [h("dt", null, n.letter), h("dd", { class: n.reachable ? "num" : "num bad-text" }, n.needs == null ? "out of reach" : n.reachable ? `${fmtN(n.needs)}%` : `${fmtN(n.needs)}% (over 100)`)])) : h("div", { class: "small muted" }, "Everything is graded or filled in."),
+        h("div", { class: "row", role: "group", "aria-label": "Assume a score on everything not graded" }, h("span", { class: "tiny muted" }, "Assume on the rest:"),
+          [60, 80, 100].map((f) => h("button", { class: "chip", onclick: () => fillAll(f) }, `${f}%`)),
+          h("button", { class: "chip", onclick: () => ctl.setState((s) => ({ ...s, hypothetical: {} })) }, "clear")));
+      const cats = pj.rows.map(([c, p, got, mx]) => h("tbody", null,
+        h("tr", { class: "t-group" }, h("td", { colspan: 4 }, h("div", { class: "spread" },
+          h("span", null, `${c.name}${c.weight != null ? ` · ${fmtN(c.weight)}%` : ""}${c.drop_lowest ? ` · drop ${c.drop_lowest}` : ""}`),
+          h("span", { class: "num" }, p == null ? "–" : `${fmtN(Math.round(p * 10) / 10)}%`)))),
+        c.items.map((it) => {
+          const graded = it.score != null;
+          const val = graded ? it.score : hyp[it.id];
+          return h("tr", { class: graded ? "" : "hyp" }, h("td", null, itemLink(it.item_id, it.label)),
+            h("td", null, graded ? pill("ok", "Graded") : pill("info", "What if")),
+            h("td", { class: "num" }, graded ? `${fmtN(it.score)}` : h("div", { class: "num-pair" },
+              h("input", { type: "range", class: "num-slider", min: 0, max: it.max, step: it.max <= 10 ? 0.5 : 1, value: val ?? 0, "aria-label": `What-if score for ${it.label} (slider)`,
+                oninput: (e) => { const n = e.target.nextSibling; if (n) n.value = e.target.value; }, onchange: (e) => setHyp(it.id, Number(e.target.value)) }),
+              h("input", { type: "number", class: "num-in", min: 0, max: it.max, step: "any", value: val ?? "", placeholder: "–", "aria-label": `What-if score for ${it.label}`,
+                onchange: (e) => setHyp(it.id, e.target.value === "" ? null : Number(e.target.value)) }))),
+            h("td", { class: "num" }, `/ ${fmtN(it.max)}`));
+        })));
+      const cols = ["Category", "Item", "Score", "Max", "Kind"];
+      const rows = spec.categories.flatMap((c) => c.items.map((it) => [c.name, it.label, it.score ?? hyp[it.id] ?? "", it.max, it.score != null ? "graded" : hyp[it.id] != null ? "what-if" : "open"]));
+      return frame("projector", spec.title, h("div", { class: "sidebar-layout" }, side,
+        h("div", { class: "sl-main" }, h("div", { class: "table-wrap" }, h("table", { class: "t score-t proj-t" }, h("thead", null, h("tr", null, h("th", null, "Item"), h("th", null, ""), h("th", { class: "num" }, "Score"), h("th", { class: "num" }, "Max"))), cats)))),
+      () => ({ title: spec.title, csv: toCSV(cols, rows), json: { spec, state: v.state, projection: pj },
+        markdown: `**${spec.title}** — ${pj.percent == null ? "no scores" : `${fmtN(Math.round(pj.percent * 10) / 10)}% (${pj.letter})`}\n\n${toMD(cols, rows)}` }),
+      { extra: savedTools(v, ctl), full: ctl.full, onFull: ctl.onFull });
+    });
+  }
+
+  // ---------- hours tracker ----------
+  function hoursTrackerView(view) {
+    return savedComponent(view, (v, ctl) => {
+      const spec = v.spec, st = v.state || {}, entries = st.entries || [];
+      const lastDay = spec.deadline ? spec.deadline.slice(0, 10) : null;          // as projections.hours_summary
+      const total = entries.reduce((s, e) => s + (!lastDay || e.date <= lastDay ? e.hours : 0), 0);
+      const late = entries.reduce((s, e) => s + (lastDay && e.date > lastDay ? e.hours : 0), 0);
+      const now = Date.now(), dl = spec.deadline ? new Date(spec.deadline).getTime() : null;
+      const counting = total >= spec.minimum;
+      const status = counting ? (total >= spec.target ? "complete" : "counting") : dl && dl < now ? "lost" : "below_minimum";
+      const pts = spec.points != null ? (counting ? spec.points * Math.min(1, total / spec.target) : 0) : null;
+      const left = Math.max(0, spec.target - total), days = dl ? (dl - now) / 86400e3 : null;
+      const perWeek = days && days > 0 && left ? left / Math.max(days / 7, 1 / 7) : null;
+      const date = h("input", { type: "date", value: new Date().toISOString().slice(0, 10), "aria-label": "Date" });
+      const hrs = h("input", { type: "number", min: 0, step: 0.5, placeholder: "hours", class: "num-in", "aria-label": "Hours" });
+      const note = h("input", { type: "text", placeholder: "what (optional)", "aria-label": "Note" });
+      const STAT = { complete: ["ok", "Target reached"], counting: ["info", "Counting"], below_minimum: ["warn", `0 until ${fmtN(spec.minimum)} ${spec.unit}`], lost: ["bad", "Below minimum at the deadline: lost"] };
+      const body = h("div", { class: "sidebar-layout" },
+        h("div", { class: "sl-side" }, h("div", { class: "sl-big" }, h("span", { class: "num" }, fmtN(total)), h("span", { class: "muted small" }, ` / ${fmtN(spec.target)} ${spec.unit}`)),
+          pill(STAT[status][0], STAT[status][1]),
+          gaugeEl([{ label: "Logged", value: Math.min(total, spec.target) }], spec.target, spec.minimum || null, ` ${spec.unit}`),
+          h("dl", { class: "sl-kv" }, pts != null ? [h("dt", null, "Points now"), h("dd", { class: "num" }, `${fmtN(Math.round(pts * 100) / 100)} / ${fmtN(spec.points)}`)] : null,
+            h("dt", null, "To minimum"), h("dd", { class: "num" }, `${fmtN(Math.max(0, spec.minimum - total))} ${spec.unit}`),
+            h("dt", null, "To target"), h("dd", { class: "num" }, `${fmtN(left)} ${spec.unit}`),
+            perWeek ? [h("dt", null, "Needed per week"), h("dd", { class: "num" }, `${fmtN(Math.round(perWeek * 10) / 10)} ${spec.unit}`)] : null,
+            spec.deadline ? [h("dt", null, "Deadline"), h("dd", null, countdown(spec.deadline))] : null,
+            late ? [h("dt", null, "After the deadline"), h("dd", { class: "num muted" }, `${fmtN(late)} ${spec.unit} (not counted)`)] : null),
+          h("div", { class: "tiny muted" }, st.refreshed_at ? `Checked against ${spec.source || "the source"} ${ago(st.refreshed_at)}` : `Not yet checked against ${spec.source || "the official count"}`),
+          h("button", { class: "sm", onclick: () => ctl.setState((s) => ({ ...s, refreshed_at: new Date().toISOString() })) }, "I checked it just now")),
+        h("div", { class: "sl-main" }, alertList(status === "below_minimum" ? [{ level: "bad", text: `Counts 0 until ${fmtN(spec.minimum)} ${spec.unit} are logged (${fmtN(spec.minimum - total)} to go).` }] : status === "lost" ? [{ level: "bad", text: "The deadline passed below the minimum, so this line is lost." }] : []),
+          h("div", { class: "table-wrap" }, h("table", { class: "t" }, h("thead", null, h("tr", null, h("th", null, "Date"), h("th", { class: "num" }, "Hours"), h("th", null, "Note"), h("th", null, ""))),
+            h("tbody", null, entries.map((e) => h("tr", null, h("td", null, e.date), h("td", { class: "num" }, fmtN(e.hours)), h("td", null, e.note),
+              h("td", null, h("button", { class: "sm ghost", "aria-label": `Remove ${e.date} entry`, onclick: () => ctl.setState((s) => ({ ...s, entries: (s.entries || []).filter((x) => x.id !== e.id) })) }, "✕"))))))),
+          h("div", { class: "row" }, date, hrs, note, h("button", { class: "sm primary", onclick: () => {
+            const n = Number(hrs.value); if (!n || n < 0) { toast("Enter the hours", true); return; }
+            ctl.setState((s) => ({ ...s, entries: [...(s.entries || []), { id: `e${Date.now()}`, date: date.value, hours: n, note: note.value }] }));
+          } }, "Log hours"))));
+      const cols = ["Date", "Hours", "Note"];
+      return frame("hours", spec.title, body, () => ({ title: spec.title, csv: toCSV(cols, entries.map((e) => [e.date, e.hours, e.note])), json: { spec, state: st },
+        markdown: `**${spec.title}** — ${fmtN(total)} of ${fmtN(spec.target)} ${spec.unit} (minimum ${fmtN(spec.minimum)})\n\n${toMD(cols, entries.map((e) => [e.date, e.hours, e.note]))}`,
+        ics: spec.deadline ? [{ title: `${spec.title} deadline`, start: spec.deadline }] : [] }),
+        { extra: savedTools(v, ctl), full: ctl.full, onFull: ctl.onFull });
+    });
+  }
+
+  // ---------- kanban of local to-dos ----------
+  const COLS = [["open", "To do"], ["in_progress", "In progress"], ["blocked", "Blocked"], ["done", "Done"]];
+  function kanbanView(d) {
+    const host = h("div", { class: "kanban" });
+    let tasks = [];
+    const move = async (t, state) => {
+      const r = await guard(() => api(A(`/annotations/${t.id}`), { method: "PATCH", body: { task_state: state } }));
+      if (r) { t.task_state = state; draw(); }
+    };
+    const draw = () => {
+      mount(host, COLS.map(([state, label], ci) => {
+        const col = h("div", { class: `kb-col kb-${state}`, "aria-label": label },
+          h("div", { class: "kb-head" }, label, h("span", { class: "tiny muted" }, ` ${tasks.filter((t) => t.task_state === state).length}`)),
+          tasks.filter((t) => t.task_state === state).map((t) => h("div", { class: "kb-card", draggable: "true", tabindex: "0",
+            ondragstart: (e) => { e.dataTransfer.setData("text/plain", String(t.id)); } },
+            h("div", { class: "small strong" }, t.title || (t.body || "").slice(0, 60) || "To-do"),
+            t.local_due ? h("div", { class: "tiny" }, fmtDate(t.local_due, { weekday: true }), " · ", countdown(t.local_due)) : null,
+            t.item_id ? h("div", { class: "tiny" }, itemLink(t.item_id, t.item_title || "linked item")) : null,
+            h("div", { class: "kb-moves" },
+              ci > 0 ? h("button", { class: "sm ghost", "aria-label": `Move ${t.title} to ${COLS[ci - 1][1]}`, onclick: () => move(t, COLS[ci - 1][0]) }, "←") : null,
+              ci < COLS.length - 1 ? h("button", { class: "sm ghost", "aria-label": `Move ${t.title} to ${COLS[ci + 1][1]}`, onclick: () => move(t, COLS[ci + 1][0]) }, "→") : null,
+              remindButton({ title: t.title || "To-do", due: t.local_due, annotation_id: t.id })))));
+        col.addEventListener("dragover", (e) => { e.preventDefault(); col.classList.add("over"); });
+        col.addEventListener("dragleave", () => col.classList.remove("over"));
+        col.addEventListener("drop", (e) => { e.preventDefault(); col.classList.remove("over"); const t = tasks.find((x) => String(x.id) === e.dataTransfer.getData("text/plain")); if (t && t.task_state !== state) move(t, state); });
+        return col;
+      }));
+    };
+    const load = async () => {
+      const r = await api(A("/annotations") + `?kind=task`).catch(() => ({ annotations: [] }));
+      tasks = r.annotations.filter((t) => !d.course_id || t.course_canvas_id === d.course_id);
+      draw();
+    };
+    load();
+    const add = h("input", { type: "text", placeholder: "New to-do", "aria-label": "New to-do" });
+    add.addEventListener("keydown", async (e) => {
+      if (e.key !== "Enter" || !add.value.trim()) return;
+      const r = await guard(() => api(A("/annotations"), { method: "POST", body: { kind: "task", title: add.value.trim(), course_id: d.course_id || undefined } }));
+      if (r) { add.value = ""; load(); }
+    });
+    return frame("kanban", d.title || "To-do board", h("div", null, add, host), () => {
+      const cols = ["State", "Title", "Due"], rows = tasks.map((t) => [t.task_state, t.title || "", t.local_due || ""]);
+      return { title: d.title || "To-do board", markdown: COLS.map(([s, l]) => `### ${l}\n${tasks.filter((t) => t.task_state === s).map((t) => `- ${t.title || ""}`).join("\n")}`).join("\n\n"),
+        csv: toCSV(cols, rows), json: tasks, ics: tasks.filter((t) => t.local_due && t.task_state !== "done").map((t) => ({ title: t.title || "To-do", start: t.local_due })) };
+    });
+  }
+
+  // ---------- term timeline ----------
+  function timelineView(d) {
+    const times = [...d.modules.map((m) => m.unlock_iso).filter(Boolean), ...d.marks.map((m) => m.when)].map((x) => new Date(x).getTime());
+    const nowT = new Date(d.now).getTime();
+    const t0 = Math.min(nowT, ...times) - 3 * 86400e3, t1 = Math.max(nowT, ...times) + 7 * 86400e3;
+    const pos = (t) => `${Math.max(0, Math.min(100, (t - t0) / (t1 - t0) * 100))}%`;
+    const weeks = [];
+    for (let t = t0; t < t1; t += 7 * 86400e3) weeks.push(t);
+    const mods = d.modules;
+    const rows = mods.map((m, i) => {
+      const start = m.unlock_iso ? new Date(m.unlock_iso).getTime() : (i ? null : t0);
+      const nextU = mods.slice(i + 1).map((x) => x.unlock_iso).find(Boolean);
+      const end = nextU ? new Date(nextU).getTime() : t1;
+      const locked = m.state === "locked" || (start && start > nowT);
+      return h("div", { class: "tl-row" }, h("div", { class: "tl-label" }, h("div", { class: "small strong" }, m.title),
+        m.prerequisites.length ? h("div", { class: "tiny muted" }, "after ", m.prerequisites.join(", ")) : null,
+        m.sequential ? h("div", { class: "tiny muted" }, "in order") : null),
+        h("div", { class: "tl-track" }, start != null ? h("span", { class: `tl-bar${locked ? " locked" : ""}${m.state === "completed" ? " done" : ""}`, role: "img",
+          "aria-label": `${m.title}: ${locked ? "locked" : m.state === "completed" ? "completed" : "open"}${m.unlock_at ? `, opens ${m.unlock_at}` : ""}`,
+          style: `left:${pos(start)};width:calc(${pos(end)} - ${pos(start)})`, title: `${m.title}${m.unlock_at ? ` · opens ${m.unlock_at}` : ""}${m.state ? ` · ${m.state}` : ""}` }) : h("span", { class: "tiny muted" }, "no date")));
+    });
+    const marks = h("div", { class: "tl-row" }, h("div", { class: "tl-label small strong" }, "Due & exams"),
+      h("div", { class: "tl-track marks" }, d.marks.map((m) => h("a", { class: `tl-mark ${m.done ? "done" : ""} ${m.kind}`, href: `#/item/${m.item_id}`, style: `left:${pos(new Date(m.when).getTime())}`,
+        title: `${m.title} · ${fmtDate(m.when, { weekday: true })}`, "aria-label": `${m.title}, ${fmtDate(m.when)}`, onclick: (e) => { e.preventDefault(); openDrawer(m.item_id); } }))));
+    const axis = h("div", { class: "tl-row tl-axis" }, h("div", { class: "tl-label" }), h("div", { class: "tl-track" },
+      weeks.map((t) => h("span", { class: "tl-week", style: `left:${pos(t)}` }, new Date(t).toLocaleDateString([], { month: "short", day: "numeric" }))),
+      h("span", { class: "tl-now", style: `left:${pos(nowT)}`, title: "today" })));
+    const cols = ["Module", "Opens", "After", "State"];
+    return frame("timeline", d.title, h("div", { class: "timeline-wrap" }, axis, rows, marks),
+      () => ({ title: d.title, csv: toCSV(cols, mods.map((m) => [m.title, m.unlock_at || "", m.prerequisites.join("; "), m.state || ""])), json: d,
+        markdown: toMD(cols, mods.map((m) => [m.title, m.unlock_at || "", m.prerequisites.join("; "), m.state || ""])) + "\n\n" + d.marks.map((m) => `- ${m.title}: ${m.when}`).join("\n"),
+        ics: d.marks.filter((m) => !m.done).map((m) => ({ title: m.title, start: m.when })) }));
+  }
+
+  // ---------- workload heatmap ----------
+  function heatmapView(d) {
+    const start = new Date(d.start + "T00:00:00Z");
+    const monday = new Date(start); monday.setUTCDate(monday.getUTCDate() - ((monday.getUTCDay() + 6) % 7));
+    // label a column only where a new month starts, so the labels never overlap
+    const monthOf = (w) => new Date(monday.getTime() + w * 7 * 86400e3);
+    const monthLabel = (w) => (w === 0 || monthOf(w).getUTCMonth() !== monthOf(w - 1).getUTCMonth()
+      ? monthOf(w).toLocaleDateString([], { month: "short", timeZone: "UTC" }) : "");
+    const max = Math.max(1, ...Object.values(d.days).map((x) => x.count));
+    const cells = [];
+    for (let w = 0; w < d.weeks + 1; w++) {
+      const col = [];
+      for (let k = 0; k < 7; k++) {
+        const day = new Date(monday.getTime() + (w * 7 + k) * 86400e3).toISOString().slice(0, 10);
+        const e = d.days[day];
+        const lvl = e ? Math.min(4, Math.ceil(e.count / max * 4)) : 0;
+        // days with deadlines are announced (with what is due); empty days are left out for screen readers
+        col.push(h("span", { class: `hm-cell l${lvl}${day === new Date().toISOString().slice(0, 10) ? " today" : ""}`, title: e ? `${day}: ${e.titles.join("; ")}` : day,
+          ...(e ? { role: "img", "aria-label": `${fmtDate(day + "T12:00:00Z", { weekday: true, time: false, year: false })}: ${e.count} due — ${e.titles.join("; ")}` } : { "aria-hidden": "true" }) }));
+      }
+      cells.push(h("div", { class: "hm-col" }, h("span", { class: "hm-wk tiny muted", "aria-hidden": "true" }, monthLabel(w)), col));
+    }
+    const rows = Object.entries(d.days).sort().map(([k, v]) => [k, v.count, v.points, v.titles.join("; ")]);
+    const busiest = Object.entries(d.days).sort((a, b) => b[1].count - a[1].count)[0];
+    const summary = `${Object.values(d.days).reduce((t, x) => t + x.count, 0)} deadlines over ${d.weeks} weeks` +
+      (busiest ? `; busiest day ${busiest[0]} with ${busiest[1].count}` : "");
+    return frame("heatmap", d.title, h("div", null, h("div", { class: "heatmap", role: "group", "aria-label": summary }, h("div", { class: "hm-days tiny muted", "aria-hidden": "true" }, ["", "Mon", "", "Wed", "", "Fri", "", ""].map((x) => h("span", null, x))), cells),
+      h("div", { class: "legend", style: "margin-top:8px", "aria-hidden": "true" }, "Less ", [0, 1, 2, 3, 4].map((l) => h("span", { class: `hm-cell l${l}` })), " More")),
+    () => ({ title: d.title, csv: toCSV(["Date", "Due", "Points", "Items"], rows), markdown: toMD(["Date", "Due", "Points", "Items"], rows), json: d }));
+  }
+
+  // ---------- multi-course dashboard ----------
+  // Every course on one scale. Bars carry text labels, so they read the same without colour or sight.
+  function meter(value, max, label, cls = "") {
+    const pctv = max ? Math.max(0, Math.min(100, (100 * value) / max)) : 0;
+    return h("div", { class: `meter ${cls}`, role: "meter", "aria-valuemin": 0, "aria-valuemax": max || 0, "aria-valuenow": value, "aria-label": label },
+      h("span", { style: `width:${pctv}%` }));
+  }
+  function dashboardView(d) {
+    const rows = d.courses;
+    const body = rows.length ? h("div", { class: "table-wrap" }, h("table", { class: "t dash-t" },
+      h("caption", { class: "sr-only" }, `${rows.length} courses: grade so far, work done and what is due in the next ${d.days} days`),
+      h("thead", null, h("tr", null, h("th", { scope: "col" }, "Course"), h("th", { scope: "col" }, "Grade so far"), h("th", { scope: "col" }, "Work done"),
+        h("th", { scope: "col", class: "num" }, `Due ≤ ${d.days} d`), h("th", { scope: "col" }, "Next deadline"))),
+      h("tbody", null, rows.map((c) => h("tr", null,
+        h("th", { scope: "row" }, h("a", { href: `#/course/${encodeURIComponent(c.course_id)}` }, c.code || c.title),
+          c.code && c.title !== c.code ? h("div", { class: "tiny muted" }, c.title) : null),
+        h("td", null, c.grade_percent == null ? h("span", { class: "small muted" }, "nothing graded yet") : [
+          h("div", { class: "spread" }, h("strong", null, `${fmtN(c.grade_percent)}%${c.letter ? ` ${c.letter}` : ""}`),
+            h("span", { class: "tiny muted" }, c.weighted ? "weighted" : "points only")),
+          meter(c.grade_percent, 100, `Grade so far ${fmtN(c.grade_percent)} percent`)]),
+        h("td", null, h("div", { class: "spread" }, h("span", { class: "small" }, `${c.done}/${c.assignments}`),
+          c.lost ? pill("bad", `${c.lost} lost`) : null), meter(c.done, c.assignments, `${c.done} of ${c.assignments} done`, "done")),
+        h("td", { class: "num" }, c.due_soon ? h("strong", null, c.due_soon) : h("span", { class: "muted" }, "0")),
+        h("td", null, c.next_due ? [h("div", { class: "small" }, c.next_due.item_id ? h("a", { href: `#/item/${c.next_due.item_id}` }, c.next_due.title) : c.next_due.title),
+          h("div", { class: "tiny muted" }, fmtDate(c.next_due.due), " · ", countdown(c.next_due.due))] : h("span", { class: "small muted" }, "none")))))))
+      : h("p", { class: "muted small" }, "No courses with graded work collected yet.");
+    const cols = ["Course", "Grade %", "Weighted", "Done", "Assignments", "Lost", `Due in ${d.days} d`, "Next deadline", "Next due"];
+    const data = rows.map((c) => [c.code || c.title, c.grade_percent ?? "", c.weighted ? "yes" : "no", c.done, c.assignments, c.lost, c.due_soon,
+      c.next_due ? c.next_due.title : "", c.next_due ? c.next_due.due : ""]);
+    return frame("dashboard", d.title || "All courses", body, () => ({ title: d.title || "All courses", csv: toCSV(cols, data), json: d,
+      markdown: `**${d.title || "All courses"}**\n\n| ${cols.join(" | ")} |\n|${cols.map(() => "---").join("|")}|\n` + data.map((r) => `| ${r.join(" | ")} |`).join("\n"),
+      ics: rows.filter((c) => c.next_due).map((c) => ({ title: `${c.code || c.title}: ${c.next_due.title}`, start: c.next_due.due })) }));
+  }
+
+  // ---------- custom HTML block (opt-in; runs in /sandbox, see sandbox.html) ----------
+  // The frame is sandboxed without allow-same-origin, so it has an opaque origin: no cookies, no
+  // access to this page or the API, and the sandbox page's CSP blocks every network request.
+  function htmlView(d) {
+    const box = h("div", { class: "html-box" });
+    const run = async () => {
+      const s = await guard(() => api(A("/custom-html")));
+      if (!s) return;
+      if (!s.enabled) { mount(box, h("p", { class: "small muted" }, "Custom HTML blocks are off. Turn them on under Data & settings to run this one.")); return; }
+      const frameEl = h("iframe", { class: "html-frame", sandbox: "allow-scripts", src: "/sandbox", referrerpolicy: "no-referrer",
+        title: d.title || "Custom block", loading: "lazy" });
+      const onMsg = (e) => {
+        if (e.source !== frameEl.contentWindow || !e.data) return;
+        if (e.data.type === "canvas-hub-ready") frameEl.contentWindow.postMessage({ type: "canvas-hub-render", html: d.html, data: d.data ?? null }, "*");
+        else if (e.data.type === "canvas-hub-height" && Number.isFinite(e.data.height)) frameEl.style.height = `${Math.max(60, Math.min(2000, e.data.height + 4))}px`;
+      };
+      window.addEventListener("message", onMsg);
+      mount(box, frameEl, h("div", { class: "tiny muted", style: "margin-top:4px" }, "Running in an isolated frame · no network · ",
+        h("button", { class: "linkish tiny", onclick: () => { window.removeEventListener("message", onMsg); mount(box, intro()); } }, "Stop")));
+    };
+    const intro = () => h("div", { class: "html-intro" },
+      h("p", { class: "small" }, "The assistant wrote a custom HTML block. It runs only when you press Run, in an isolated frame that cannot reach Canvas Hub, your sign-in or the network."),
+      h("div", { class: "row" }, h("button", { class: "primary sm", onclick: run }, "Run"),
+        h("details", null, h("summary", { class: "small" }, "View source"), h("pre", { class: "html-src" }, d.html))));
+    mount(box, intro());
+    return frame("html", d.title, box, () => ({ title: d.title, text: d.html, filename: slug(d.title || "custom-block"),
+      markdown: "```html\n" + d.html + "\n```", json: { html: d.html, data: d.data ?? null } }));
+  }
+  function customHtmlCard(s) {
+    const on = h("input", { type: "checkbox", checked: s.enabled ? true : null });
+    return h("div", { class: "card" }, h("div", { class: "card-head" }, h("h2", null, "Custom HTML blocks"), pill(s.enabled ? "warn" : "muted", s.enabled ? "On" : "Off")),
+      h("p", { class: "small muted" }, "Advanced. When on, the assistant may answer with its own HTML and JavaScript when no built-in view fits. Each block runs only after you press Run, in an isolated frame with no network access and no access to Canvas Hub or your sign-in. A frame can still navigate itself to another site, so only run blocks you expect."),
+      h("label", { class: "check" }, on, h("strong", null, "Allow custom HTML blocks")),
+      h("div", { class: "row", style: "margin-top:10px" }, h("button", { class: "primary", onclick: async () => {
+        const r = await guard(() => api(A("/custom-html"), { method: "PUT", body: { enabled: on.checked } }));
+        if (r) { toast(r.enabled ? "Custom HTML blocks are on" : "Custom HTML blocks are off"); env.route(); } } }, "Save")));
+  }
+
+  // ---------- dispatcher with a per-result cache ----------
+  // The chat re-renders while the assistant works; keep the same element so
+  // sorting, expanded rows and unsaved inputs survive. Callbacks read the chat
+  // context through `ref`, which is updated on reuse (the chat view may be new).
+  const cache = new Map();
+  function componentView(d, ctx = {}, key = null) {
+    if (!d) return null;
+    if (key && cache.has(key)) {
+      const hit = cache.get(key);
+      // Shown again in a different chat view: a saved component may have changed meanwhile (not on every re-render).
+      if (hit.ref.ctx !== ctx && hit.el.refresh) hit.el.refresh();
+      hit.ref.ctx = ctx;
+      return hit.el;
+    }
+    const ref = { ctx };
+    let el = null;
+    try {
+      if (d.component === "deadlines") el = deadlinesView(d);
+      else if (d.component === "timetable") el = timetableView(d);
+      else if (d.component === "items") el = itemsView(d);
+      else if (d.component === "table") el = tableView(d);
+      else if (d.component === "chart") el = chartView(d);
+      else if (d.component === "gauge") el = gaugeView(d);
+      else if (d.component === "artifact") el = artifactView(d);
+      else if (d.component === "html") el = htmlView(d);
+      else if (d.component === "dashboard") el = dashboardView(d);
+      else if (d.component === "json") el = jsonView(d);
+      else if (d.component === "diff") el = diffView(d);
+      else if (d.component === "score_model") el = scoreModelView(d.view);
+      else if (d.component === "checklist") el = checklistView(d.view);
+      else if (d.component === "write_preview") el = writePreviewView(d.write);
+      else if (d.component === "grade_projector") el = gradeProjectorView(d.view);
+      else if (d.component === "hours_tracker") el = hoursTrackerView(d.view);
+      else if (d.component === "kanban") el = kanbanView(d);
+      else if (d.component === "timeline") el = timelineView(d);
+      else if (d.component === "heatmap") el = heatmapView(d);
+      else if (d.component === "choices") el = h("div", { class: "cmp cmp-choices" }, h("div", { class: "small" }, d.question),
+        h("div", { class: "chips", style: "margin-top:6px" }, d.options.map((o) => h("button", { class: "chip", onclick: () => ref.ctx.send && ref.ctx.send(o) }, o))));
+    } catch (e) {
+      el = h("div", { class: "cmp muted small" }, `Could not show this ${d.component}: ${e.message}`);
+    }
+    if (key && el) { cache.set(key, { el, ref }); if (cache.size > 300) cache.delete(cache.keys().next().value); }
+    return el;
+  }
+
+  // ---------- Trackers page ----------
+  async function trackersView(main, pageHead, empty) {
+    const [pinned, all] = await Promise.all([api(A("/components?pinned=true")), api(A("/components"))]);
+    const others = all.components.filter((c) => !c.pinned);
+    const VIEW = { score_model: scoreModelView, checklist: checklistView, grade_projector: gradeProjectorView, hours_tracker: hoursTrackerView };
+    const cards = pinned.components.map((v) => (VIEW[v.kind] || checklistView)(v));
+    mount(main, pageHead("Trackers", "Score models and checklists you pinned. Ticks and values are saved on this computer; the assistant can read them back."),
+      cards.length ? h("div", { class: "stack" }, cards) : empty("Nothing pinned yet", "Ask the assistant for a score model or checklist, then press ☆ Pin on it."),
+      others.length ? h("div", { class: "card", style: "margin-top:16px" }, h("h2", null, "Other saved components"),
+        h("ul", { class: "list" }, others.map((c) => h("li", { class: "spread" }, h("div", null, h("span", { class: "strong" }, c.title), h("span", { class: "tiny muted" }, ` · ${{ score_model: "score model", checklist: "checklist", grade_projector: "grade projection", hours_tracker: "hours tracker" }[c.kind] || c.kind} · ${ago(c.updated_at)}`)),
+          h("div", { class: "row" }, h("button", { class: "sm", onclick: async () => { if (await guard(() => api(A(`/components/${c.id}`), { method: "PATCH", body: { pinned: true } }))) env.route(); } }, "☆ Pin"),
+            h("button", { class: "sm ghost", onclick: async () => { if (!confirm(`Delete “${c.title}”?`)) return; if (await guard(() => api(A(`/components/${c.id}`), { method: "DELETE" }))) env.route(); } }, "Delete")))))) : null);
+    afterRender();
+  }
+
+  return { componentView, openDrawer, closeDrawer, trackersView, countdown, copyText, download, evaluate, diffPair, remindButton, kanbanView, alertList,
+    writesSettingsCard, writesLog, filesCard, customHtmlCard, dashboardView };
+}

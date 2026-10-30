@@ -110,6 +110,8 @@ def test_mcp_agent_fulfils_request(hub, account, fixture_pkg):
                     return names, None
                 listed = json.loads((await s.call_tool("list_view_requests", {"status": "open"})).content[0].text)
                 rid = listed["requests"][0]["id"]
+                waited = json.loads((await s.call_tool("wait_for_view_requests", {"timeout_seconds": 5})).content[0].text)
+                assert waited["requests"][0]["request_id"] == rid
                 await s.call_tool("claim_view_request", {"request_id": rid, "agent_name": "Codex"})
                 r = await s.call_tool("submit_view_result", {"request_id": rid, "agent_name": "Codex",
                                                              "content": "Assignment 2 is due 22 Nov."})
@@ -118,6 +120,8 @@ def test_mcp_agent_fulfils_request(hub, account, fixture_pkg):
     assert "list_view_requests" in names and "claim_view_request" not in names and "show_timetable" not in names
     names, res = anyio.run(main, ["--allow-fulfil"])
     assert res["request"]["status"] == "done"
+    seen = HubAPI(hub).connected_agents()["agents"]
+    assert seen and seen[0]["can_fulfil"] and seen[0]["last_seen"]
     assert hub.requests.view(account["id"], req["id"])["claimed_by"] == "Codex"
 
 

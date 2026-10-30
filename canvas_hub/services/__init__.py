@@ -10,14 +10,22 @@ from ..db import Database
 from ..paths import AppPaths, get_paths
 from ..util import InvalidInput, NotFound
 from .annotations import AnnotationService
+from .components import ComponentService
+from .datefinder import DateFinder
+from .files import SavedFileService
+from .grading import GradingRules
 from .identity import IdentityService
 from .importer import Importer
 from .jobs import JobService
+from .notifications import NotificationService
 from .planner import PlannerService
 from .query import QueryService
+from .reminders import ReminderService
 from .requests import RequestService
 from .resources import ResourceService
 from .search import SearchService
+from .settings import AccountSettings
+from .writes import WriteService
 
 
 class Hub:
@@ -36,6 +44,14 @@ class Hub:
         self.importer = Importer(self.db, self.identity, self.jobs, self.search, self.resources)
         self.planner = PlannerService(self.db, self.query)
         self.requests = RequestService(self.db, self.identity, self.importer)
+        self.components = ComponentService(self.db, self.annotations)
+        self.settings = AccountSettings(self.db)
+        self.files = SavedFileService(self.db)
+        self.writes = WriteService(self.db, self.identity, self.query, self.files, self.settings)
+        self.notifications = NotificationService(self.db, self.settings)
+        self.datefinder = DateFinder(self.db, self.query, self.annotations, self.settings)
+        self.reminders = ReminderService(self.db)
+        self.grading = GradingRules(self.db)
 
     def close(self) -> None:
         self.db.close()
@@ -47,6 +63,24 @@ class Hub:
     # ---- maintenance ------------------------------------------------------
     def rebuild_search(self, account_id: int | None = None) -> int:
         return self.search.rebuild(account_id, extracted_text_for=self.resources.extracted_text_for)
+
+    def run_ocr(self, limit: int = 10, *, retry_failed: bool = False) -> dict:
+        """OCR stored photos and scanned PDFs (when switched on) and make the new text searchable."""
+        if not self.resources.ocr_settings()["enabled"]:
+            raise InvalidInput("OCR is off; switch it on first", code="ocr_off")
+        done = []
+        for sha in self.resources.ocr_pending_ids(max(1, min(int(limit), 50)), retry_failed=retry_failed):
+            rows = self.db.query("""SELECT ir.item_id, ir.filename, i.account_id, i.title FROM item_resources ir
+                                    JOIN items i ON i.id=ir.item_id WHERE ir.resource_id=?""", (sha,))
+            r = self.resources.extract(sha, rows[0]["filename"] if rows else None, force=True)
+            text = self.resources.extracted_text_for(sha)
+            if text:
+                with self.db.tx() as c:
+                    for x in rows:
+                        self.search.index_resource(c, x["account_id"], x["item_id"], sha, x["filename"] or x["title"] or "", text)
+            done.append({"resource_id": sha, "filename": rows[0]["filename"] if rows else None,
+                         "status": r["extraction_status"], "confidence": r["ocr_confidence"], "detail": r["extraction_detail"]})
+        return {"processed": done, "pending": self.resources.ocr_pending(), "failed": self.resources.ocr_failed()}
 
     def delete_account_data(self, account_id: int, *, confirm: str) -> dict:
         """Delete all stored course data and notes for one account. Requires

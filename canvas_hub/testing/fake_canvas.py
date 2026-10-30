@@ -326,6 +326,11 @@ class FakeCanvas:
         self.pending_mfa: dict[str, str] = {}
         self.requests: list[tuple[str, str]] = []
         self.writes: list[tuple[str, str]] = []
+        # Off by default, so every collector test proves nothing is written. Tests of
+        # the confirmed-write path switch it on; then a few documented POSTs work.
+        self.allow_writes = False
+        self.accepted_writes: list[dict] = []
+        self.csrf_tokens: dict[str, str] = {}
         self.page_size = page_size
         self.async_courses_ms = async_courses_ms
         self.fail_paths: dict[str, int] = {}   # path prefix -> HTTP status to force
@@ -428,6 +433,8 @@ class FakeCanvas:
         if method != "GET" and path not in ("/login", "/login/mfa"):
             with self.lock:
                 self.writes.append((method, h.path))
+            if self.allow_writes and method == "POST":
+                return self._write(h, path)
             return self._json(h, {"error": "fake canvas is read-only"}, 405)
         if path in ("/login", "/login/mfa"):
             return self._login(h, method, path, q)
@@ -449,6 +456,60 @@ class FakeCanvas:
         if not sess:
             return self._redirect(h, f"/login?return_to={quote(h.path)}")
         return self._html(h, path, q)
+
+    # ---- confirmed writes (only when allow_writes is on) ----------------------------------
+    def _write(self, h, path):
+        length = int(h.headers.get("Content-Length") or 0)
+        raw = h.rfile.read(length)
+        if path.startswith("/files_api/upload/"):            # stand-in for Canvas's file service (no session needed)
+            slot = self._upload_slots.pop(path.rsplit("/", 1)[1], None) if hasattr(self, "_upload_slots") else None
+            if not slot or b'name="file"' not in raw:
+                return self._json(h, {"errors": [{"message": "bad upload"}]}, 400)
+            start = raw.index(b"\r\n\r\n", raw.index(b'name="file"')) + 4
+            data = raw[start:raw.index(b"\r\n--", start)]
+            fid = str(90000 + len(self.accepted_writes))
+            self.accepted_writes.append({"kind": "upload", "file_id": fid, "name": slot["name"], "bytes": data})
+            return self._json(h, {"id": fid, "display_name": slot["name"], "size": len(data)}, 201)
+        sess = self._session(h)
+        if not sess:
+            return self._json(h, {"errors": [{"message": "user authorization required"}]}, 401)
+        if h.headers.get("X-CSRF-Token") != self.csrf_tokens.get(sess):
+            return self._json(h, {"errors": [{"message": "Invalid authenticity token"}]}, 422)
+        form = parse_qs(raw.decode())
+        p = path.removeprefix("/api/v1")
+        m = re.match(r"^/courses/(\d+)/assignments/(\d+)/submissions(/self/files)?$", p)
+        if m:
+            cid, aid, files = m.groups()
+            a = next((x for x in self.data["assignments"].get(cid, []) if x["id"] == aid), None)
+            if not a:
+                return self._json(h, {}, 404)
+            if files:
+                tok = secrets.token_hex(6)
+                if not hasattr(self, "_upload_slots"):
+                    self._upload_slots = {}
+                self._upload_slots[tok] = {"name": form.get("name", [""])[0]}
+                return self._json(h, {"upload_url": f"{self.origin}/files_api/upload/{tok}",
+                                      "upload_params": {"filename": form.get("name", [""])[0], "content_type": form.get("content_type", [""])[0]}})
+            stype = form.get("submission[submission_type]", [""])[0]
+            if stype not in a["submission_types"]:
+                return self._json(h, {"errors": [{"message": "Invalid submission type"}]}, 400)
+            sub = a.setdefault("submission", {"assignment_id": aid})
+            sub.update(workflow_state="submitted", submitted_at="2026-10-30T08:00:00Z", submission_type=stype,
+                       attempt=(sub.get("attempt") or 0) + 1)
+            rec = {"kind": stype, "course": cid, "assignment": aid, "body": form.get("submission[body]", [None])[0],
+                   "file_ids": form.get("submission[file_ids][]", []), "comment": form.get("comment[text_comment]", [None])[0]}
+            self.accepted_writes.append(rec)
+            return self._json(h, {"id": f"s{aid}", "attempt": sub["attempt"], "submitted_at": sub["submitted_at"],
+                                  "workflow_state": "submitted"})
+        m = re.match(r"^/courses/(\d+)/discussion_topics/(\d+)/entries$", p)
+        if m:
+            self.accepted_writes.append({"kind": "reply", "course": m.group(1), "topic": m.group(2), "message": form.get("message", [""])[0]})
+            return self._json(h, {"id": "e1", "created_at": "2026-10-30T08:00:00Z"}, 201)
+        if p == "/conversations":
+            self.accepted_writes.append({"kind": "message", "recipients": form.get("recipients[]", []), "subject": form.get("subject", [""])[0],
+                                         "body": form.get("body", [""])[0], "context": form.get("context_code", [""])[0]})
+            return self._json(h, [{"id": "c1"}], 201)
+        return self._json(h, {"error": "not a supported write"}, 405)
 
     def _login(self, h, method, path, q):
         if method == "GET" and path == "/login":
@@ -476,7 +537,16 @@ class FakeCanvas:
             sess = secrets.token_hex(16)
             with self.lock:
                 self.sessions.add(sess)
-            return self._redirect(h, rt if rt.startswith("/") else "/", cookie=f"fake_session={sess}; Path=/; HttpOnly")
+            csrf = secrets.token_urlsafe(16) + "+/="       # characters Canvas URL-encodes in the cookie
+            with self.lock:
+                self.csrf_tokens[sess] = csrf
+            h.send_response(302)
+            h.send_header("Location", rt if rt.startswith("/") else "/")
+            h.send_header("Set-Cookie", f"fake_session={sess}; Path=/; HttpOnly")
+            h.send_header("Set-Cookie", f"_csrf_token={quote(csrf, safe='')}; Path=/")
+            h.send_header("Content-Length", "0")
+            h.end_headers()
+            return None
         return self._send(h, 401, "<html><body><p id='error'>Invalid code</p></body></html>")
 
     def _html(self, h, path, q):

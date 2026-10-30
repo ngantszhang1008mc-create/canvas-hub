@@ -14,7 +14,7 @@ from starlette.concurrency import run_in_threadpool
 
 from ..boundary import HubAPI
 from ..util import HubError, InvalidInput
-from .security import COOKIE, CSP, allowed_hosts, token_ok
+from .security import COOKIE, CSP, SANDBOX_CSP, allowed_hosts, token_ok
 
 log = logging.getLogger("canvas_hub.web")
 mimetypes.add_type("font/woff2", ".woff2")
@@ -56,10 +56,11 @@ def create_app(api: HubAPI, *, token: str, port: int) -> FastAPI:
                 if request.headers.get("x-canvas-hub") != "1":
                     return JSONResponse({"error": "missing_header", "message": "X-Canvas-Hub header required"}, 403)
         resp = await call_next(request)
-        resp.headers["Content-Security-Policy"] = CSP
+        sandbox = path == "/sandbox"
+        resp.headers["Content-Security-Policy"] = SANDBOX_CSP if sandbox else CSP
         resp.headers["X-Content-Type-Options"] = "nosniff"
         resp.headers["Referrer-Policy"] = "no-referrer"
-        resp.headers["X-Frame-Options"] = "DENY"
+        resp.headers["X-Frame-Options"] = "SAMEORIGIN" if sandbox else "DENY"
         resp.headers["Cache-Control"] = "no-store"
         return resp
 
@@ -99,6 +100,11 @@ def create_app(api: HubAPI, *, token: str, port: int) -> FastAPI:
                             "<code>canvas-hub serve</code> (it contains a one-time local access token).</p>",
                             media_type="text/html", status_code=401)
         return FileResponse(STATIC / "index.html", media_type="text/html")
+
+    @app.get("/sandbox")
+    async def sandbox():
+        # A fixed shell: it waits for the HTML and data from the app page (see components.js htmlView).
+        return FileResponse(STATIC / "sandbox.html", media_type="text/html")
 
     @app.get("/static/{name}")
     async def static(name: str):
@@ -347,6 +353,188 @@ def create_app(api: HubAPI, *, token: str, port: int) -> FastAPI:
     @app.delete("/api/accounts/{aid}/planner/classes/{cid}")
     def planner_delete_class(aid: int, cid: int):
         return api.delete_class_time(aid, cid)
+
+    # ---- confirmed writes to Canvas ----------------------------------------------------
+    @app.get("/api/accounts/{aid}/write-settings")
+    def write_settings(aid: int):
+        return api.write_settings(aid)
+
+    @app.put("/api/accounts/{aid}/write-settings")
+    async def set_write_settings(aid: int, request: Request):
+        return api.set_write_settings(aid, await body(request))
+
+    @app.get("/api/accounts/{aid}/writes")
+    def writes_list(aid: int, status: str | None = None):
+        return api.list_writes(aid, status)
+
+    @app.post("/api/accounts/{aid}/writes")
+    async def writes_prepare(aid: int, request: Request):
+        return api.prepare_write(aid, await body(request), prepared_by="user")
+
+    @app.get("/api/accounts/{aid}/writes/{wid}")
+    def writes_get(aid: int, wid: int):
+        return api.get_write(aid, wid)
+
+    @app.post("/api/accounts/{aid}/writes/{wid}/cancel")
+    def writes_cancel(aid: int, wid: int):
+        return api.cancel_write(aid, wid)
+
+    @app.post("/api/accounts/{aid}/writes/{wid}/confirm")
+    async def writes_confirm(aid: int, wid: int, request: Request):
+        b = await body(request)
+        return await run_in_threadpool(api.confirm_write, aid, wid, str(b.get("preview_hash") or ""))
+
+    # ---- freshness ---------------------------------------------------------------------------
+    @app.get("/api/accounts/{aid}/refresh-settings")
+    def refresh_settings(aid: int):
+        return api.refresh_settings(aid)
+
+    @app.put("/api/accounts/{aid}/refresh-settings")
+    async def set_refresh_settings(aid: int, request: Request):
+        return api.set_refresh_settings(aid, await body(request))
+
+    @app.get("/api/accounts/{aid}/notifications")
+    def notifications(aid: int, limit: int = 30):
+        return api.notifications(aid, limit)
+
+    @app.post("/api/accounts/{aid}/notifications/seen")
+    async def notifications_seen(aid: int, request: Request):
+        return api.mark_notifications_seen(aid, (await body(request)).get("up_to"))
+
+    # ---- dates in course text, timetable import --------------------------------------------------
+    @app.get("/api/accounts/{aid}/date-candidates")
+    def date_candidates(aid: int, status: str | None = None):
+        return api.date_candidates(aid, status=status)
+
+    @app.post("/api/accounts/{aid}/date-candidates/scan")
+    def date_candidates_scan(aid: int):
+        return api.date_candidates(aid, scan=True)
+
+    @app.post("/api/accounts/{aid}/date-candidates/{cid}/confirm")
+    async def date_candidate_confirm(aid: int, cid: int, request: Request):
+        return api.confirm_date_candidate(aid, cid, await body(request))
+
+    @app.post("/api/accounts/{aid}/date-candidates/{cid}/dismiss")
+    def date_candidate_dismiss(aid: int, cid: int):
+        return api.dismiss_date_candidate(aid, cid)
+
+    @app.post("/api/accounts/{aid}/planner/import-ics")
+    async def planner_import_ics(aid: int, request: Request):
+        raw = await request.body()
+        if len(raw) > 2_000_000:
+            raise InvalidInput("calendar files are limited to 2 MB")
+        return api.import_timetable(aid, raw.decode("utf-8", errors="replace"))
+
+    # ---- reminders -------------------------------------------------------------------------------
+    @app.get("/api/accounts/{aid}/reminders")
+    def reminders_list(aid: int, status: str | None = "pending"):
+        return api.list_reminders(aid, status)
+
+    @app.post("/api/accounts/{aid}/reminders")
+    async def reminders_create(aid: int, request: Request):
+        return api.create_reminder(aid, await body(request))
+
+    @app.post("/api/accounts/{aid}/reminders/due")
+    def reminders_due(aid: int):
+        return api.due_reminders(aid)
+
+    @app.post("/api/accounts/{aid}/reminders/{rid}/dismiss")
+    def reminders_dismiss(aid: int, rid: int):
+        return api.dismiss_reminder(aid, rid)
+
+    # ---- saved files ------------------------------------------------------------------------
+    @app.get("/api/accounts/{aid}/files")
+    def files_list(aid: int):
+        return api.list_files(aid)
+
+    @app.post("/api/accounts/{aid}/files")
+    async def files_save(aid: int, request: Request):
+        ctype = request.headers.get("content-type", "")
+        # A raw upload names itself with X-Filename (whatever its type, a .json file included);
+        # without it, a JSON body is the {filename, content} save request.
+        if ctype.startswith("application/json") and "x-filename" not in request.headers:
+            b = await body(request)
+            return api.save_file(aid, filename=b.get("filename") or "", content=str(b.get("content") or ""),
+                                 title=b.get("title"), course_id=b.get("course_id"), created_by="user")
+        raw = await request.body()
+        from urllib.parse import unquote
+        return api.save_file(aid, filename=unquote(request.headers.get("x-filename", "")), content=raw,
+                             mime=ctype.split(";")[0] or None, title=unquote(request.headers.get("x-title", "")) or None,
+                             created_by="user")
+
+    @app.get("/api/accounts/{aid}/files/{fid}")
+    def files_get(aid: int, fid: int):
+        return api.get_file(aid, fid)
+
+    @app.get("/api/accounts/{aid}/files/{fid}/download")
+    def files_download(aid: int, fid: int):
+        f = api.get_file(aid, fid, with_content=True)
+        from urllib.parse import quote
+        # Always a download, never rendered in the app's origin (a saved .html must not run here).
+        return Response(f["content"], media_type="application/octet-stream",
+                        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(f['filename'])}",
+                                 "X-Content-Type-Options": "nosniff"})
+
+    @app.delete("/api/accounts/{aid}/files/{fid}")
+    def files_delete(aid: int, fid: int):
+        return api.delete_file(aid, fid)
+
+    @app.put("/api/accounts/{aid}/courses/{cid}/link")
+    async def course_link(aid: int, cid: str, request: Request):
+        return api.link_courses(aid, cid, await body(request))
+
+    @app.get("/api/ocr")
+    def ocr_get():
+        return api.ocr_status()
+
+    @app.put("/api/ocr")
+    async def ocr_put(request: Request):
+        return api.set_ocr(await body(request))
+
+    @app.post("/api/ocr/run")
+    async def ocr_run(request: Request):
+        data = await body(request)
+        return await run_in_threadpool(api.run_ocr, data)
+
+    @app.get("/api/accounts/{aid}/dashboard")
+    def dashboard(aid: int, days: int = 7):
+        return api.dashboard(aid, days)
+
+    @app.get("/api/accounts/{aid}/custom-html")
+    def custom_html_get(aid: int):
+        return api.custom_html_settings(aid)
+
+    @app.put("/api/accounts/{aid}/custom-html")
+    async def custom_html_put(aid: int, request: Request):
+        return api.set_custom_html_settings(aid, await body(request))
+
+    @app.get("/api/accounts/{aid}/courses/{cid}/grading")
+    def grading_get(aid: int, cid: str):
+        return api.get_grading_rules(aid, cid)
+
+    @app.put("/api/accounts/{aid}/courses/{cid}/grading")
+    async def grading_put(aid: int, cid: str, request: Request):
+        return api.set_grading_rules(aid, cid, await body(request))
+
+    @app.get("/api/agents")
+    def agents_seen():
+        return api.connected_agents()
+
+    @app.get("/api/accounts/{aid}/components")
+    def components_list(aid: int, pinned: str | None = None):
+        return api.list_components(aid, pinned)
+
+    @app.get("/api/accounts/{aid}/components/{cid}")
+    def component_get(aid: int, cid: int):
+        return api.get_component(aid, cid)
+
+    @app.patch("/api/accounts/{aid}/components/{cid}")
+    async def component_update(aid: int, cid: int, request: Request):
+        return api.update_component(aid, cid, await body(request))
+
+    @app.delete("/api/accounts/{aid}/components/{cid}")
+    def component_delete(aid: int, cid: int):
+        return api.delete_component(aid, cid)
 
     @app.get("/api/accounts/{aid}/planner.ics")
     def planner_ics(aid: int, weeks: int = 8):

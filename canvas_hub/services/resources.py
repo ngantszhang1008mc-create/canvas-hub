@@ -8,13 +8,16 @@ item_resources, and paths are never taken from callers.
 
 from __future__ import annotations
 
+import json
 import mimetypes
 import os
 import re
+import subprocess
 import tempfile
 import threading
 from pathlib import Path
 
+from .. import ocr
 from ..db import Database
 from ..paths import AppPaths
 from ..util import InvalidInput, NotFound, now_iso, sha256_bytes
@@ -28,6 +31,9 @@ _MEDIA_TYPES = {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm", ".mp3", ".m4a",
 _ARCHIVE_TYPES = {".zip", ".rar", ".7z", ".tar", ".gz"}
 
 _extract_lock = threading.Lock()
+OCR_FAILED_TOOL = "tesseract: failed"      # tried and failed; retried only on request, so it cannot block the queue
+OCR_PENDING = ("extraction_status IN ('image_only','needs_ocr') AND (extraction_tool IS NULL OR "
+               "extraction_tool NOT LIKE 'tesseract%')")
 
 
 def validate_resource_id(resource_id: str) -> str:
@@ -40,6 +46,52 @@ class ResourceService:
     def __init__(self, db: Database, paths: AppPaths):
         self.db = db
         self.paths = paths
+
+    # ---- OCR (optional, off by default; app-wide setting) ---------------------------------
+    def ocr_settings(self) -> dict:
+        row = self.db.one("SELECT value FROM app_settings WHERE key='ocr'")
+        return {"enabled": False, "lang": "eng", **(json.loads(row["value"]) if row else {})}
+
+    def set_ocr_settings(self, enabled: bool, lang: str = "eng") -> dict:
+        try:
+            ocr.valid_lang(lang)
+        except ValueError as e:
+            raise InvalidInput(str(e)) from e
+        with self.db.tx() as c:
+            c.execute("INSERT INTO app_settings(key, value) VALUES ('ocr', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                      (json.dumps({"enabled": bool(enabled), "lang": lang}),))
+        return self.ocr_settings()
+
+    def ocr_pending(self) -> int:
+        """Stored documents that OCR could read but has not yet."""
+        return self.db.one(f"SELECT COUNT(*) n FROM resources WHERE {OCR_PENDING}")["n"]
+
+    def ocr_failed(self) -> int:
+        return self.db.one("SELECT COUNT(*) n FROM resources WHERE extraction_tool=?", (OCR_FAILED_TOOL,))["n"]
+
+    def ocr_pending_ids(self, limit: int, *, retry_failed: bool = False) -> list[str]:
+        where, params = (("extraction_tool=?", (OCR_FAILED_TOOL,)) if retry_failed else (OCR_PENDING, ()))
+        return [r["id"] for r in self.db.query(f"SELECT id FROM resources WHERE {where} ORDER BY created_at LIMIT ?",
+                                               (*params, limit))]
+
+    def _try_ocr(self, path: Path, ext: str, fallback: tuple) -> tuple:
+        """(status, detail, text, tool, confidence): OCR when it is switched on and installed; otherwise, or when it
+        fails or reads less than the text layer, the non-OCR result (a tool name starting 'tesseract' marks it tried)."""
+        s = self.ocr_settings()
+        if not s["enabled"] or not ocr.tesseract_path():
+            why = "OCR is off" if not s["enabled"] else "OCR needs tesseract, which is not installed"
+            return (fallback[0], f"{fallback[1]}; {why}", *fallback[2:], None)
+        try:
+            r = ocr.ocr_file(path, ext, s["lang"])
+        except (RuntimeError, OSError, subprocess.SubprocessError, ValueError) as e:
+            return (fallback[0], f"{fallback[1]}; OCR failed: {str(e)[:200]}", fallback[2], OCR_FAILED_TOOL, None)
+        if not r.text.strip() or len(r.text.strip()) <= len(fallback[2] or ""):
+            return (fallback[0], f"{fallback[1]}; OCR found no more text", fallback[2], r.tool, None)
+        low = r.confidence is None or r.confidence < ocr.LOW_CONFIDENCE
+        detail = (f"OCR ({r.pages} page{'s' if r.pages != 1 else ''}), mean word confidence "
+                  f"{r.confidence:.0f}%" if r.confidence is not None else "OCR, no confidence reported")
+        return ("ocr_low_confidence" if low else "ocr", detail + ("; check it against the original" if low else ""),
+                r.text.strip(), r.tool, r.confidence)
 
     def _original_path(self, sha: str) -> Path:
         return self.paths.originals / sha[:2] / sha
@@ -78,6 +130,10 @@ class ResourceService:
         if not ext and row["content_type"]:
             ext = mimetypes.guess_extension(row["content_type"].split(";")[0].strip()) or ""
         status, detail, text, tool = self._run_extraction(self.paths.resources / row["stored_path"], ext, row["size"])
+        conf = None
+        if status in ("image_only", "needs_ocr"):
+            status, detail, text, tool, conf = self._try_ocr(self.paths.resources / row["stored_path"], ext,
+                                                             (status, detail, text, tool))
         extracted_path = None
         if text:
             out = self.paths.extracted / f"{sha}.md"
@@ -86,8 +142,9 @@ class ResourceService:
         with self.db.tx() as c:
             c.execute(
                 """UPDATE resources SET extraction_status=?, extraction_tool=?, extraction_detail=?,
-                   extracted_path=?, extracted_chars=?, extracted_at=? WHERE id=?""",
-                (status, tool, detail, extracted_path, len(text) if text else 0, now_iso(), sha),
+                   extracted_path=?, extracted_chars=?, extracted_at=?, ocr_confidence=? WHERE id=?""",
+                (status, tool, detail, extracted_path, len(text) if text else 0, now_iso(),
+                 None if conf is None else round(conf, 1), sha),
             )
         return dict(self.db.one("SELECT * FROM resources WHERE id=?", (sha,)))
 
@@ -95,7 +152,7 @@ class ResourceService:
         if ext in _MEDIA_TYPES:
             return "unsupported_media", "audio/video is stored but not transcribed", "", None
         if ext in _IMAGE_TYPES:
-            return "image_only", "image content; text not extracted (no OCR performed)", "", None
+            return "image_only", "image content, no text layer", "", None
         if ext in _ARCHIVE_TYPES:
             return "unsupported_type", "archive stored; contents not unpacked", "", None
         if ext and ext not in _TEXT_TYPES:
@@ -150,6 +207,8 @@ class ResourceService:
             "extraction": {
                 "status": r["extraction_status"], "tool": r["extraction_tool"], "detail": r["extraction_detail"],
                 "chars": r["extracted_chars"], "extracted_at": r["extracted_at"],
+                "ocr_confidence": r["ocr_confidence"],
+                "low_confidence": r["extraction_status"] == "ocr_low_confidence",
             },
             "items": [dict(x) for x in rows],
         }

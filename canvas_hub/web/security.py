@@ -22,7 +22,12 @@ TOKEN_FILE = "api-token"
 COOKIE = "canvas_hub_token"
 
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; "
-       "font-src 'self'; object-src 'none'; frame-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+       "font-src 'self'; object-src 'none'; frame-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+# The page that runs assistant-written HTML/JS (opt-in). It is framed with sandbox="allow-scripts" (an opaque
+# origin: no cookies, no access to the app or its API) and may not fetch, load or post anything.
+SANDBOX_CSP = ("default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; "
+               "font-src data:; media-src data: blob:; connect-src 'none'; worker-src 'none'; frame-src 'none'; "
+               "object-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'self'")
 
 
 def load_or_create_token(runtime_dir: Path) -> str:
