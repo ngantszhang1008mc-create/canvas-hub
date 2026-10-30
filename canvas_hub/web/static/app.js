@@ -384,7 +384,7 @@ async function route() {
 }
 window.addEventListener("hashchange", route);
 
-// Assistant focus mode: the window holds just the chat, its tabs and the composer (remembered in this browser).
+// Assistant focus mode: the window holds just the chat list, the chat, its tabs and the composer (remembered in this browser).
 // The page's toggle buttons are kept here, so Esc pressed while the page is still drawing updates them too.
 let focusButtons = [];
 function setChatFocus(on, buttons = focusButtons) {
@@ -1247,16 +1247,14 @@ VIEWS.assistant = async (main, parts, params) => {
   const cfg = await api("/api/assistant/config");
   const onSettings = parts[0] === "settings";
   const head = pageHead("Assistant", "Ask about your courses. Answers come from your Canvas Hub data; with permission it can check Canvas for updates and keep your notes.");
-  // Focus mode: the window holds just the chat, these tabs and the composer (remembered in this browser).
+  // Focus mode: the window holds just the chat list, the chat, these tabs and the composer (remembered in this browser).
   const focusBtn = h("button", { class: "sm ghost focus-toggle", title: "Show only the chat (Esc to leave)",
     onclick: () => setChatFocus(!document.body.classList.contains("chat-focus")) });
   const tabs = h("div", { class: "tabs" },
     h("button", { class: onSettings ? "" : "active", onclick: () => { location.hash = "#/assistant"; } }, "Chat"),
     h("button", { class: onSettings ? "active" : "", onclick: () => { location.hash = "#/assistant/settings"; } },
       "Settings", cfg.profiles.length ? h("span", { class: "tab-count" }, String(cfg.profiles.length)) : null),
-    h("span", { class: "grow" }),
-    onSettings ? null : h("a", { class: "btn sm focus-only", href: "#/assistant" }, "+ New chat"),
-    focusBtn);
+    h("span", { class: "grow" }), focusBtn);
   setChatFocus(store.get("chatFocus") === "1", [focusBtn]);
   if (onSettings) return assistantSettingsView(main, head, tabs, cfg, params);
   if (!cfg.configured) {
