@@ -1,0 +1,674 @@
+{
+  "$defs": {
+    "AbsenceInference": {
+      "additionalProperties": false,
+      "properties": {
+        "item_types": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Item Types",
+          "type": "array"
+        }
+      },
+      "required": [
+        "item_types"
+      ],
+      "title": "AbsenceInference",
+      "type": "object"
+    },
+    "Collector": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "version": {
+          "title": "Version",
+          "type": "string"
+        },
+        "method": {
+          "title": "Method",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "version",
+        "method"
+      ],
+      "title": "Collector",
+      "type": "object"
+    },
+    "CoverageObs": {
+      "additionalProperties": false,
+      "properties": {
+        "course_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Course Id"
+        },
+        "category": {
+          "title": "Category",
+          "type": "string"
+        },
+        "status": {
+          "title": "Status",
+          "type": "string"
+        },
+        "index_depth": {
+          "default": "not_checked",
+          "title": "Index Depth",
+          "type": "string"
+        },
+        "body_depth": {
+          "default": "not_checked",
+          "title": "Body Depth",
+          "type": "string"
+        },
+        "attachment_depth": {
+          "default": "not_checked",
+          "title": "Attachment Depth",
+          "type": "string"
+        },
+        "expected_count": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expected Count"
+        },
+        "collected_count": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Collected Count"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reason"
+        },
+        "detail": {
+          "additionalProperties": true,
+          "title": "Detail",
+          "type": "object"
+        },
+        "observed_at": {
+          "title": "Observed At",
+          "type": "string"
+        },
+        "absence_inference": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AbsenceInference"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "category",
+        "status",
+        "observed_at"
+      ],
+      "title": "CoverageObs",
+      "type": "object"
+    },
+    "Identity": {
+      "additionalProperties": false,
+      "properties": {
+        "origin": {
+          "title": "Origin",
+          "type": "string"
+        },
+        "canvas_user_id": {
+          "title": "Canvas User Id",
+          "type": "string"
+        },
+        "display_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Display Name"
+        },
+        "login_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Login Id"
+        },
+        "primary_email": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Primary Email"
+        },
+        "time_zone": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Time Zone"
+        },
+        "time_zone_source": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Time Zone Source"
+        },
+        "locale": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Locale"
+        }
+      },
+      "required": [
+        "origin",
+        "canvas_user_id"
+      ],
+      "title": "Identity",
+      "type": "object"
+    },
+    "ItemObs": {
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "title": "Type",
+          "type": "string"
+        },
+        "course_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Course Id"
+        },
+        "canvas_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Canvas Id"
+        },
+        "source_key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Key"
+        },
+        "url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Url"
+        },
+        "title": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Title"
+        },
+        "observed_at": {
+          "title": "Observed At",
+          "type": "string"
+        },
+        "observation_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Observation Id"
+        },
+        "method": {
+          "default": "unspecified",
+          "title": "Method",
+          "type": "string"
+        },
+        "depth": {
+          "default": "index",
+          "enum": [
+            "index",
+            "body",
+            "detail"
+          ],
+          "title": "Depth",
+          "type": "string"
+        },
+        "source_updated_at": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Updated At"
+        },
+        "fields": {
+          "additionalProperties": true,
+          "title": "Fields",
+          "type": "object"
+        },
+        "links": {
+          "items": {
+            "$ref": "#/$defs/LinkObs"
+          },
+          "title": "Links",
+          "type": "array"
+        },
+        "resources": {
+          "items": {
+            "$ref": "#/$defs/ResourceObs"
+          },
+          "title": "Resources",
+          "type": "array"
+        },
+        "replace_links": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Replace Links",
+          "type": "array"
+        }
+      },
+      "required": [
+        "type",
+        "observed_at"
+      ],
+      "title": "ItemObs",
+      "type": "object"
+    },
+    "ItemRef": {
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "title": "Type",
+          "type": "string"
+        },
+        "course_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Course Id"
+        },
+        "canvas_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Canvas Id"
+        },
+        "source_key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Key"
+        },
+        "url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Url"
+        },
+        "title": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Title"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "title": "ItemRef",
+      "type": "object"
+    },
+    "LinkObs": {
+      "additionalProperties": false,
+      "properties": {
+        "relation": {
+          "title": "Relation",
+          "type": "string"
+        },
+        "to": {
+          "$ref": "#/$defs/ItemRef"
+        },
+        "label": {
+          "default": "",
+          "title": "Label",
+          "type": "string"
+        },
+        "position": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Position"
+        },
+        "attrs": {
+          "additionalProperties": true,
+          "title": "Attrs",
+          "type": "object"
+        }
+      },
+      "required": [
+        "relation",
+        "to"
+      ],
+      "title": "LinkObs",
+      "type": "object"
+    },
+    "PresenceCheck": {
+      "additionalProperties": false,
+      "properties": {
+        "item": {
+          "$ref": "#/$defs/ItemRef"
+        },
+        "result": {
+          "enum": [
+            "available",
+            "not_found",
+            "forbidden",
+            "unknown"
+          ],
+          "title": "Result",
+          "type": "string"
+        },
+        "http_status": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Http Status"
+        },
+        "checked_at": {
+          "title": "Checked At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "item",
+        "result",
+        "checked_at"
+      ],
+      "title": "PresenceCheck",
+      "type": "object"
+    },
+    "ResourceObs": {
+      "additionalProperties": false,
+      "properties": {
+        "sha256": {
+          "title": "Sha256",
+          "type": "string"
+        },
+        "filename": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Filename"
+        }
+      },
+      "required": [
+        "sha256"
+      ],
+      "title": "ResourceObs",
+      "type": "object"
+    },
+    "Run": {
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "enum": [
+            "baseline",
+            "thorough",
+            "quick",
+            "import"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "scope": {
+          "additionalProperties": true,
+          "title": "Scope",
+          "type": "object"
+        },
+        "started_at": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Started At"
+        },
+        "finished_at": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Finished At"
+        }
+      },
+      "required": [
+        "mode"
+      ],
+      "title": "Run",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "format": {
+      "const": "canvas-hub.observations",
+      "title": "Format",
+      "type": "string"
+    },
+    "format_version": {
+      "title": "Format Version",
+      "type": "integer"
+    },
+    "package_id": {
+      "title": "Package Id",
+      "type": "string"
+    },
+    "generated_at": {
+      "title": "Generated At",
+      "type": "string"
+    },
+    "collector": {
+      "$ref": "#/$defs/Collector"
+    },
+    "identity": {
+      "$ref": "#/$defs/Identity"
+    },
+    "run": {
+      "$ref": "#/$defs/Run"
+    },
+    "items": {
+      "items": {
+        "$ref": "#/$defs/ItemObs"
+      },
+      "title": "Items",
+      "type": "array"
+    },
+    "coverage": {
+      "items": {
+        "$ref": "#/$defs/CoverageObs"
+      },
+      "title": "Coverage",
+      "type": "array"
+    },
+    "presence_checks": {
+      "items": {
+        "$ref": "#/$defs/PresenceCheck"
+      },
+      "title": "Presence Checks",
+      "type": "array"
+    }
+  },
+  "required": [
+    "format",
+    "format_version",
+    "package_id",
+    "generated_at",
+    "collector",
+    "identity",
+    "run"
+  ],
+  "title": "ObservationPackage",
+  "type": "object"
+}

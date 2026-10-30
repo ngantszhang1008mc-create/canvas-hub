@@ -143,6 +143,16 @@ def cmd_delete_data(args):
     return 0
 
 
+def cmd_schema(args):
+    from .observations import ObservationPackage
+    text = json.dumps(ObservationPackage.model_json_schema(), indent=2)
+    if args.output:
+        Path(args.output).write_text(text + "\n", encoding="utf-8")
+    else:
+        print(text)
+    return 0
+
+
 def cmd_fake_canvas(args):
     from .testing.fake_canvas import MFA_CODE, PASSWORD, FakeCanvas
     fc = FakeCanvas(port=args.port)
@@ -205,6 +215,10 @@ def main(argv=None) -> int:
     s.add_argument("--account", required=True)
     s.add_argument("--confirm", required=True, help="must be DELETE")
     s.set_defaults(fn=cmd_delete_data)
+
+    s = sub.add_parser("schema", help="print the observation package JSON Schema")
+    s.add_argument("--output")
+    s.set_defaults(fn=cmd_schema)
 
     s = sub.add_parser("fake-canvas", help="run the synthetic Canvas server (testing/demo)")
     s.add_argument("--port", type=int, default=8765)

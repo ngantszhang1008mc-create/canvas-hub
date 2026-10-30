@@ -192,7 +192,7 @@ function renderTopbar() {
   const sess = inst ? inst.session : null;
   const st = sess ? sess.status : "unknown";
   const label = { signed_in: "Signed in", login_open: "Waiting for sign-in", expired: "Session expired",
-    signed_out: "Not signed in", error: "Sign-in check failed", unknown: "Not checked" }[st] || st;
+    signed_out: "Not signed in", error: "Sign-in check failed", unknown: "Sign-in not checked" }[st] || st;
   const cls = { signed_in: "ok", login_open: "info", expired: "bad", signed_out: "muted", error: "bad" }[st] || "muted";
   const kids = [];
   if (inst) {
@@ -204,6 +204,7 @@ function renderTopbar() {
   kids.push(h("div", { class: "grow" }));
   if (inst && st !== "signed_in") {
     kids.push(h("span", { class: "muted small" }, "Showing stored data. New collection needs Canvas access."));
+    if (st === "unknown") kids.push(h("button", { class: "ghost", onclick: () => refreshSession(true, true) }, "Check sign-in"));
     kids.push(h("button", { class: "primary", onclick: () => openLogin(inst.id) }, st === "login_open" ? "Show sign-in window" : "Sign in"));
   }
   if (inst && st === "signed_in" && S.accountId)
@@ -247,11 +248,11 @@ async function loadIdentities() {
   renderAccountSwitch(); renderTopbar();
 }
 
-async function refreshSession(check = true) {
+async function refreshSession(check = true, launch = false) {
   const inst = currentInstance();
   if (!inst) return;
   try {
-    const s = await api(`/api/instances/${inst.id}/session${qs({ check })}`);
+    const s = await api(`/api/instances/${inst.id}/session${qs({ check, launch })}`);
     const before = inst.session && inst.session.status;
     inst.session = s;
     if (s.status === "signed_in" && before !== "signed_in") {
@@ -328,10 +329,10 @@ VIEWS.setup = async (main) => {
       h("div", { class: "row" }, input, addBtn),
       inst ? h("div", { class: "small", style: "margin-top:6px" }, "Canvas origin: ", h("code", null, inst.origin)) : null),
     h("li", { class: signedIn ? "done" : inst ? "current" : "" }, h("h3", null, "Sign in through your institution"),
-      h("p", { class: "muted small" }, "A separate browser window opens on your institution's normal login page (SSO and MFA work as usual). Type your credentials there; Canvas Hub never sees your password and needs no API token."),
+      h("p", { class: "muted small" }, "A separate browser window opens on your institution's normal login page (SSO and MFA work as usual). Type your credentials there; Canvas Hub never sees your password and needs no API token. Keep that window open (minimised is fine) while collecting: closing it can end your Canvas session."),
       inst ? h("div", { class: "row" },
         h("button", { class: signedIn ? "" : "primary", onclick: () => openLogin(inst.id) }, signedIn ? "Open browser window" : "Open sign-in window"),
-        h("button", { class: "ghost", onclick: () => refreshSession(true).then(route) }, "Check again"),
+        h("button", { class: "ghost", onclick: () => refreshSession(true, true).then(route) }, "Check again"),
         sess ? h("span", { class: "small muted" }, sess.message || "") : null) : null,
       signedIn ? h("div", { class: "banner ok", style: "margin-top:10px" }, h("div", { class: "b-body" },
         h("div", { class: "b-title" }, `Verified: ${sess.display_name || sess.canvas_user_id}`),

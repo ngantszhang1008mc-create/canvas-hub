@@ -599,9 +599,10 @@ class CollectionRun:
                                  "and was not opened") if ext else None)
         pkg.coverage("home", "complete", course_id=cid, index="complete", body="complete" if syllabus is not None else "not_applicable",
                      attachments="not_applicable", detail={"default_view": default_view, "navigation": [n["id"] for n in nav]})
-        # Categories the navigation does not expose.
+        # Categories the navigation does not expose, or that this run's scope excludes.
         for cat in ("announcements", "assignments", "quizzes", "discussions", "pages", "files", "grades", "modules"):
             if cat not in self.cats:
+                pkg.coverage(cat, "not_checked", course_id=cid, reason="Not in this run's scope")
                 continue
             exposed_here = cat in exposed or (cat == "assignments" and ({"grades", "syllabus"} & tab_ids))
             if not exposed_here:

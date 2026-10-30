@@ -286,3 +286,15 @@ def test_different_signed_in_account_is_never_mixed(env):
     assert j["state"] == "failed"
     assert env.hub.db.one("SELECT COUNT(*) n FROM items WHERE account_id=?", (a1,))["n"] == n1
     assert env.hub.db.one("SELECT COUNT(*) n FROM items WHERE account_id=?", (s["account_id"],))["n"] == 0
+
+
+def test_background_checks_do_not_open_browser_and_closed_window_is_not_signed_in(env):
+    iid = env.inst["id"]
+    env.login()
+    env.worker.call(env.worker.close_browser, iid)
+    polled = env.worker.call(lambda: env.worker.check_session(iid, launch=False))
+    assert polled["status"] != "signed_in" and iid not in env.worker._contexts   # nothing launched
+    # A real check starts a headless context from the saved profile; the fake
+    # Canvas uses a session-only cookie, so the sign-in has ended.
+    checked = env.worker.call(lambda: env.worker.check_session(iid, launch=True))
+    assert checked["status"] == "expired" and env.worker._modes[iid] == "headless"

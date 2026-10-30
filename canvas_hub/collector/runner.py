@@ -88,7 +88,7 @@ class JobRunner:
 
     def _run_one(self, job: dict) -> None:
         inst = job["instance_id"]
-        state = self.worker.call(self.worker.check_session, inst, timeout=120)
+        state = self.worker.call(lambda: self.worker.check_session(inst, launch=True), timeout=120)
         if state.get("status") != "signed_in":
             self.hub.jobs.set_state(job["id"], "needs_login",
                                     message="Sign in to Canvas to run this job; it starts automatically after sign-in.")

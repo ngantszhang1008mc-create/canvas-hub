@@ -127,12 +127,14 @@ def create_app(api: HubAPI, *, token: str, port: int) -> FastAPI:
         return w.call(w.open_login, iid, timeout=90)
 
     @app.get("/api/instances/{iid}/session")
-    def session(iid: int, check: bool = True):
+    def session(iid: int, check: bool = True, launch: bool = False):
+        """check=false: cached state. launch=true: may start a headless browser
+        from the saved profile to verify (never opens a visible window)."""
         w = _worker()
         api.hub.identity.get_instance(iid)
         if not check or w.busy_with:
             return w.session(iid)
-        return w.call(w.check_session, iid, timeout=60)
+        return w.call(lambda: w.check_session(iid, launch=launch), timeout=60)
 
     @app.post("/api/instances/{iid}/logout")
     async def logout(iid: int, request: Request):

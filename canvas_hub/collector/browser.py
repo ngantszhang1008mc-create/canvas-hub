@@ -43,6 +43,7 @@ class BrowserWorker:
         self._thread = threading.Thread(target=self._run, name="canvas-hub-browser", daemon=True)
         self._pw = None
         self._contexts: dict[int, Any] = {}
+        self._modes: dict[int, str] = {}
         self._lock = threading.Lock()
         self.sessions: dict[int, dict] = {}
         self.busy_with: str | None = None
@@ -104,15 +105,25 @@ class BrowserWorker:
             self._pw = sync_playwright().start()
         return self._pw
 
-    def _context(self, instance_id: int):
+    def _context(self, instance_id: int, *, visible: bool = False):
+        """Return the instance's browser context, launching it if needed.
+
+        A visible window is only opened for sign-in. Checks and collection
+        reuse whatever is open, or start a headless context from the saved
+        profile so no window pops up unexpectedly."""
         ctx = self._contexts.get(instance_id)
         if ctx is not None:
             try:
                 _ = ctx.pages  # raises if the context was closed
                 ctx.cookies()
-                return ctx
+                if visible and self._modes.get(instance_id) == "headless" and not self.headless:
+                    # Switch to a visible window for sign-in (cookies persist in the profile).
+                    self._close_context(instance_id)
+                else:
+                    return ctx
             except Exception:  # noqa: BLE001
                 self._contexts.pop(instance_id, None)
+        headless = self.headless or not visible
         profile = self.hub.paths.profile_dir(instance_id)
         profile.mkdir(parents=True, exist_ok=True)
         try:
@@ -120,17 +131,32 @@ class BrowserWorker:
         except OSError:
             pass
         kwargs: dict[str, Any] = {
-            "headless": self.headless,
-            "viewport": None if not self.headless else {"width": 1280, "height": 900},
+            "headless": headless,
+            "viewport": None if not headless else {"width": 1280, "height": 900},
             "accept_downloads": False,
         }
         exe = os.environ.get("CANVAS_HUB_CHROMIUM")
+        channel = os.environ.get("CANVAS_HUB_BROWSER_CHANNEL")   # e.g. "chrome" = installed Google Chrome
         if exe:
             kwargs["executable_path"] = exe
+        elif channel:
+            # Still an app-owned, isolated profile directory; nothing is read
+            # from the user's normal Chrome profiles.
+            kwargs["channel"] = channel
         ctx = self._playwright().chromium.launch_persistent_context(str(profile), **kwargs)
-        ctx.on("close", lambda *_: self._contexts.pop(instance_id, None))
+        ctx.on("close", lambda *_: self._on_context_closed(instance_id, ctx))
         self._contexts[instance_id] = ctx
+        self._modes[instance_id] = "headless" if headless else "headed"
         return ctx
+
+    def _on_context_closed(self, instance_id: int, ctx) -> None:
+        if self._contexts.get(instance_id) is ctx:
+            self._contexts.pop(instance_id, None)
+        if self.sessions.get(instance_id, {}).get("status") == "signed_in":
+            # Session-only cookies end with the browser; do not keep claiming "signed in".
+            self._set_session(instance_id, status="unknown",
+                              message="The Canvas browser window was closed. Your sign-in may have ended; "
+                                      "it is re-checked when you collect or click Sign in.")
 
     def _close_context(self, instance_id: int) -> None:
         ctx = self._contexts.pop(instance_id, None)
@@ -160,7 +186,7 @@ class BrowserWorker:
     # ---- operations (call through submit/call) ----------------------------
     def open_login(self, instance_id: int) -> dict:
         inst = self.hub.identity.get_instance(instance_id)
-        ctx = self._context(instance_id)
+        ctx = self._context(instance_id, visible=True)
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
         target = inst["entry_url"] or inst["origin"] + "/"
         try:
@@ -179,17 +205,26 @@ class BrowserWorker:
                         "This app never sees your password.")
         return state
 
-    def check_session(self, instance_id: int, quiet: bool = False) -> dict:
+    def check_session(self, instance_id: int, quiet: bool = False, launch: bool = True) -> dict:
+        """Verify the Canvas session. With launch=False (background polling)
+        no browser is started; the last known state is returned instead."""
         inst = self.hub.identity.get_instance(instance_id)
         if instance_id not in self._contexts and not self.hub.paths.profile_dir(instance_id).exists():
             return self._set_session(instance_id, status="signed_out", message="No saved browser session for this Canvas")
         prev = self.sessions.get(instance_id, {})
+        if instance_id not in self._contexts and not launch:
+            if prev.get("status") in (None, "unknown", "login_open"):
+                return self._set_session(instance_id, status="unknown",
+                                         message="Browser closed. Sign-in is checked when you collect or click Sign in.")
+            return self.session(instance_id)
         try:
             ctx = self._context(instance_id)
             client = CanvasClient(ctx, inst["origin"], min_interval=0.0, max_retries=1)
             user = client.api_get("/api/v1/users/self")
         except AuthRequired as e:
-            status = "expired" if prev.get("status") in ("signed_in", "expired") else (
+            was_signed_in = prev.get("status") in ("signed_in", "expired") or (
+                prev.get("status") == "unknown" and prev.get("account_id"))
+            status = "expired" if was_signed_in else (
                 "login_open" if prev.get("status") == "login_open" else "signed_out")
             msg = ("Your Canvas session has expired. Sign in again; paused jobs resume afterwards."
                    if status == "expired" else
