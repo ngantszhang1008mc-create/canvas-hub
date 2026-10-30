@@ -380,7 +380,7 @@ async function route() {
   // data arrives late it draws there instead of over the page the user has moved on to.
   const old = $("#main");
   const main = old.cloneNode(false);
-  if (!keep) main.classList.remove("fill");
+  if (!keep) main.classList.remove("fill", "wide");
   delete main.dataset.keepScroll;                    // the clone copies it from the page before
   const lists = keep ? [...old.querySelectorAll(".conv-scroll, .chat-scroll")].map((el) => [el, el.scrollTop]) : [];
   old.replaceWith(main);
@@ -1262,6 +1262,7 @@ VIEWS.assistant = async (main, parts, params) => {
   const cfg = await api("/api/assistant/config");
   const onSettings = parts[0] === "settings";
   if (onSettings || !cfg.configured) main.classList.remove("fill");       // only the chat itself fills the window
+  main.classList.add("wide");          // both tabs span the window, so the heading, tabs and Focus never move
   const head = pageHead("Assistant", "Ask about your courses. Answers come from your Canvas Hub data; with permission it can check Canvas for updates and keep your notes.");
   // Focus mode: the window holds just the chat list, the chat, these tabs and the composer (remembered in this browser).
   const focusBtn = h("button", { class: "sm ghost focus-toggle", title: "Show only the chat (Esc to leave)",

@@ -813,7 +813,8 @@ body.chat-focus .main { max-width: none; padding: 10px 24px 12px; }
 body.chat-focus .main > .tabs { margin-bottom: 10px; }
 body.chat-focus .chat-scroll { overscroll-behavior: contain; }     /* the page itself has nowhere to scroll */
 /* The chat page uses the whole width of the window; messages and the composer keep a readable width, centred. */
-.main.fill { max-width: none; }
+.main.fill, .main.wide { max-width: none; }
+.main.wide .settings-layout { max-width: 1400px; }      /* forms keep a readable width under the full-width tabs */
 .main.fill .chat-log, .main.fill .chat-status, .main.fill .chat-empty,
 .main.fill .composer > *, .main.fill .chat-foot { width: 100%; max-width: 920px; margin-left: auto; margin-right: auto; }
 .main.fill .chat-foot { box-sizing: border-box; max-width: 960px; }     /* its own 20px padding lines it up with the composer */

@@ -266,3 +266,25 @@ def test_wide_screens_use_the_width(hub, account):
         left, right = main["x"] - col["x"], col["x"] + col["width"] - main["x"] - main["width"]
         assert main["width"] > 1300 and abs(left - right) < 4
         b.close()
+
+
+@pytest.mark.parametrize("width", [2560, 1280])
+def test_chat_and_settings_tabs_line_up(hub, account, width):
+    # Switching between Chat and Settings leaves the heading, the tabs and the Focus button where they were.
+    from playwright.sync_api import expect, sync_playwright
+    with serve(hub, [], answer=ANSWER) as (base, tok, _), sync_playwright() as p:
+        b = p.chromium.launch()
+        pg = b.new_page(viewport={"width": width, "height": 1100})
+        pg.goto(f"{base}/?token={tok}")
+
+        def boxes(hash_, ready):
+            pg.goto(f"{base}/{hash_}")
+            expect(pg.locator(ready).first).to_be_visible()
+            return [pg.locator(sel).bounding_box() for sel in
+                    (".main > .page-head", ".main > .tabs", ".focus-toggle", ".main > .tabs button >> nth=0")]
+
+        chat = boxes("#/assistant", ".composer textarea")
+        settings = boxes("#/assistant/settings", ".settings-layout")
+        for a, c in zip(chat, settings):
+            assert all(abs(a[k] - c[k]) < 1 for k in ("x", "y", "width")), (a, c)
+        b.close()
