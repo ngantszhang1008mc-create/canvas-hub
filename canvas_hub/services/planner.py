@@ -152,7 +152,10 @@ class PlannerService:
             if when < end:
                 events.append(entry)
             if not done:
-                upcoming.append((when, entry))
+                # Dated linked to-dos (accepted study blocks, "start on Saturday")
+                # already plan time for this deadline.
+                planned = [t for t in (parse_iso(x["local_due"]) for x in d.get("local_tasks") or [] if x["local_due"]) if t]
+                upcoming.append((when, entry, planned))
 
         for t in self.db.query(
                 """SELECT a.id, a.title, a.body, a.task_state, a.local_due, a.item_id FROM annotations a
@@ -184,9 +187,11 @@ class PlannerService:
         now = datetime.now(timezone.utc).astimezone(tz)
         out = []
         block = timedelta(minutes=90)
-        for due, entry in sorted(upcoming, key=lambda x: x[0]):
+        for due, entry, planned in sorted(upcoming, key=lambda x: x[0]):
             need = max(1, math.ceil(study_hours * 60 / 90))
-            placed = 0
+            placed = len(planned)
+            used_days = {p.astimezone(tz).date() for p in planned}
+            busy += [(p.astimezone(tz), p.astimezone(tz) + block) for p in planned]
             due_local = due.astimezone(tz)
             # Start up to a week before the deadline (never in the past) and
             # spread blocks one per day, so work begins early rather than the night before.
@@ -200,6 +205,8 @@ class PlannerService:
             for d in candidates:
                 if placed >= need:
                     break
+                if d in used_days:
+                    continue
                 for t in _STUDY_STARTS:
                     s = datetime.combine(d, t, tz)
                     e = s + block

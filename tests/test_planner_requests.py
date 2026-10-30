@@ -175,3 +175,25 @@ def test_large_component_is_not_truncated():
     text, err, display = run_tool_display(None, "show_table", {"columns": cols, "rows": rows}, {"ui"})
     assert not err and display["component"] == "table" and len(display["rows"]) == 40
     assert len(text) <= MAX_RESULT_CHARS + 100 and "display" not in text
+
+
+def test_accepted_study_block_counts_towards_plan(hub, account, fixture_pkg):
+    pkg, _ = _future_fixture(fixture_pkg, days=5)
+    hub.importer.import_package(pkg)
+    aid = account["id"]
+    p = hub.planner
+
+    def suggestions():
+        weeks = {p.week(aid, suggestions=True, study_hours=4.5)["week_start"]: None}
+        nxt = (datetime.fromisoformat(next(iter(weeks))) + timedelta(days=7)).date().isoformat()
+        out = []
+        for w in (None, nxt):
+            out += [e for d in p.week(aid, week_of=w, suggestions=True, study_hours=4.5)["days"] for e in d["events"]
+                    if e["kind"] == "study" and e["title"] == "Study: Project proposal"]
+        return out
+    before = suggestions()
+    assert len(before) == 3                                     # 4.5 h = three 90-minute blocks
+    first = before[0]
+    hub.annotations.create(aid, kind="task", title=first["title"], item_id=first["for_item_id"], local_due=first["start"])
+    after = suggestions()
+    assert len(after) == 2 and first["start"][:10] not in {e["start"][:10] for e in after}
