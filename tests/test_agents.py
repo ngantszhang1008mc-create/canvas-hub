@@ -421,6 +421,20 @@ def test_endpoints_that_refuse_streaming_still_answer(seeded):
     assert [bool(q.get("stream")) for q in fake.requests] == [True, False, False]   # tried once, then asked plainly
 
 
+def test_a_reply_cut_off_mid_stream_is_not_kept(seeded):
+    hub, acct = seeded
+    fake = FakeLLM([("list_courses", {})], cut_stream=True)
+    try:
+        svc = _assistant(hub, fake, "custom")
+        r = svc.send(acct["id"], "Courses?")
+        svc.wait(r["conversation_id"], 30)
+        d = svc.get_conversation(acct["id"], r["conversation_id"])
+    finally:
+        fake.stop()
+    assert d["conversation"]["run_state"] == "error" and "cut off" in d["conversation"]["run_error"]
+    assert [m["role"] for m in d["messages"]] == ["user"] and "draft" not in d    # no half answer, no tool run
+
+
 def test_stop_keeps_the_text_written_so_far(seeded):
     import time
     hub, acct = seeded

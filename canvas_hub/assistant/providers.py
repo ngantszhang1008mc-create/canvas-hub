@@ -237,6 +237,8 @@ class OpenAICompatibleProvider:
                         slot["arguments"] += fn.arguments or ""
             if ch.finish_reason:
                 finish = ch.finish_reason
+        if finish is None:      # the connection ended mid-reply: never keep half an answer or run half a tool call
+            raise ProviderError("The provider's reply was cut off before it finished. Try again.", retryable=True)
         return text, reasoning, [calls[i] for i in sorted(calls)], finish, model, usage
 
     def complete(self, system: str, transcript: list[dict], tools: list[dict], on_text=None) -> Turn:

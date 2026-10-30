@@ -7,7 +7,8 @@ with text quoting the last tool result.
 
 Replies stream word by word when the client asks for it (``delay`` seconds
 between pieces, for watching it in a browser); ``openai_streaming=False``
-makes the Chat Completions stand-in refuse streaming, like some endpoints."""
+makes the Chat Completions stand-in refuse streaming, like some endpoints, and
+``cut_stream=True`` ends its streams early, without a finish reason."""
 
 from __future__ import annotations
 
@@ -20,11 +21,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 class FakeLLM:
     def __init__(self, plan: list[tuple[str, dict]], *, delay: float = 0.0, openai_streaming: bool = True,
-                 answer: str | None = None):
+                 answer: str | None = None, cut_stream: bool = False):
         self.plan = plan
         self.delay = delay
         self.openai_streaming = openai_streaming
         self.answer = answer             # fixed final text instead of quoting the last tool result
+        self.cut_stream = cut_stream
         self.requests: list[dict] = []
         self.headers: list[dict] = []
         srv = self
@@ -173,8 +175,9 @@ class FakeLLM:
             pieces.append(chunk({"tool_calls": [{"index": i, "id": tc["id"], "type": "function",
                                                  "function": {"name": tc["function"]["name"], "arguments": args[:mid]}}]}))
             pieces.append(chunk({"tool_calls": [{"index": i, "function": {"arguments": args[mid:]}}]}))
-        pieces.append(chunk({}, finish))
-        pieces.append("data: [DONE]\n\n")
+        if not self.cut_stream:
+            pieces.append(chunk({}, finish))
+            pieces.append("data: [DONE]\n\n")
         self._sse(h, pieces)
 
 
