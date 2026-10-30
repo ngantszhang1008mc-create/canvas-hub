@@ -133,7 +133,8 @@ def test_scrolling_the_page_grows_the_chat_under_the_tabs(hub, account, width, h
     assert not errors, errors
 
 
-def test_switching_chats_keeps_the_page_where_it_is(hub, account):
+def test_switching_chats_keeps_the_page_where_it_is(hub, account, monkeypatch):
+    from threading import Event
     from playwright.sync_api import expect, sync_playwright
     with serve(hub, [], answer=ANSWER) as (base, tok, api), sync_playwright() as p:
         for i in range(16):                                         # enough chats for the list to scroll
@@ -168,13 +169,26 @@ def test_switching_chats_keeps_the_page_where_it_is(hub, account):
         expect(pg.locator(".composer")).to_be_visible()
         assert pg.evaluate("window.scrollY") == y
         # While the next chat loads, the old one stays on screen but cannot be used: nothing goes to the old chat.
-        pg.route("**/api/assistant/config", lambda route: (time.sleep(1.0), route.continue_()))
-        pg.locator(".conv").filter(has=pg.get_by_text("Question 2", exact=True)).click()
-        pg.wait_for_timeout(300)
-        assert pg.locator(".composer textarea").evaluate("el => !!el.closest('[inert]')")
-        expect(pg.locator(".msg.user .bubble").first).to_have_text("Question 2")
-        assert not pg.locator(".composer textarea").evaluate("el => !!el.closest('[inert]')")
-        pg.unroute("**/api/assistant/config")
+        entered, release = Event(), Event()
+        original_config = api.assistant.public_config
+
+        def held_config():
+            entered.set()
+            assert release.wait(timeout=10)
+            return original_config()
+
+        # Hold the server response, not Playwright's synchronous route callback:
+        # sleeping in that callback can delay the assertion until loading ends.
+        with monkeypatch.context() as pending:
+            pending.setattr(api.assistant, "public_config", held_config)
+            try:
+                pg.locator(".conv").filter(has=pg.get_by_text("Question 2", exact=True)).click()
+                assert entered.wait(timeout=5)
+                assert pg.locator(".composer textarea").evaluate("el => !!el.closest('[inert]')")
+            finally:
+                release.set()
+            expect(pg.locator(".msg.user .bubble").first).to_have_text("Question 2")
+            assert not pg.locator(".composer textarea").evaluate("el => !!el.closest('[inert]')")
         # Another page, then back: an ordinary visit starts at the top again.
         pg.goto(f"{base}/#/deadlines")
         expect(pg.locator(".main > .page-head")).to_be_visible()
