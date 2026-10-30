@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import secrets
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -204,8 +205,12 @@ class AssistantService:
         if pid == "new" or (pid is None and profile_keys):
             if len(store["profiles"]) >= MAX_PROFILES:
                 raise InvalidInput(f"at most {MAX_PROFILES} assistant setups can be saved")
+            # Random, never-reused IDs: a stale chat or form that still names a
+            # deleted setup must fail, not reach a newer setup that took its place.
             used = {x["id"] for x in store["profiles"]}
-            pid = next(f"p{i}" for i in range(1, MAX_PROFILES + 2) if f"p{i}" not in used)
+            pid = "p" + secrets.token_hex(6)
+            while pid in used:
+                pid = "p" + secrets.token_hex(6)
             store["profiles"].append({**self._profile({"id": pid}), "name": ""})
         prof = next((x for x in store["profiles"] if x["id"] == pid), None)
         if prof is None and profile_keys:

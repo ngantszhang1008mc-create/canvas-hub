@@ -230,7 +230,7 @@ def test_thinking_off_and_other_providers():
 
 
 def test_assistant_setups(seeded):
-    hub, _ = seeded
+    hub, acct = seeded
     from canvas_hub.util import NotFound
     p = hub.paths.runtime / "assistant.json"
     # a single setup saved by the previous version becomes the first saved setup
@@ -244,22 +244,29 @@ def test_assistant_setups(seeded):
     assert pub["permissions"]["collect"] is False and pub["profiles"][0]["api_key_hint"].endswith("1111")
     # add a second setup; the first stays in use until switched
     pub = svc.update_config({"profile_id": "new", "name": "Claude", "preset": "anthropic", "api_key": "sk-ant-new-2222"})
-    assert pub["saved_profile"] == "p2" and pub["active_profile"] == "p1" and len(pub["profiles"]) == 2
+    p2 = pub["saved_profile"]
+    assert p2 != "p1" and pub["active_profile"] == "p1" and len(pub["profiles"]) == 2
     assert "sk-ds-old-1111" not in json.dumps(pub) and "sk-ant-new-2222" not in json.dumps(pub)
     assert svc._load()["provider"] == "openai_compatible"
-    pub = svc.activate_profile("p2")
-    assert pub["active_profile"] == "p2" and pub["provider"] == "anthropic" and svc._load()["api_key"] == "sk-ant-new-2222"
+    pub = svc.activate_profile(p2)
+    assert pub["active_profile"] == p2 and pub["provider"] == "anthropic" and svc._load()["api_key"] == "sk-ant-new-2222"
     # editing one setup leaves the other untouched; permissions are shared
     svc.update_config({"profile_id": "p1", "thinking": "high", "permissions": {"collect": True}})
-    assert svc._load("p1")["thinking"] == "high" and svc._load("p2")["thinking"] == ""
-    assert svc._load("p2")["permissions"]["collect"] is True
+    assert svc._load("p1")["thinking"] == "high" and svc._load(p2)["thinking"] == ""
+    assert svc._load(p2)["permissions"]["collect"] is True
     # deleting the setup in use falls back to the remaining one
-    pub = svc.delete_profile("p2")
+    pub = svc.delete_profile(p2)
     assert pub["active_profile"] == "p1" and [x["id"] for x in pub["profiles"]] == ["p1"]
     with pytest.raises(NotFound):
-        svc.test("p2")
+        svc.test(p2)
     with pytest.raises(NotFound):
-        svc.update_config({"profile_id": "p2", "model": "x"})
+        svc.update_config({"profile_id": p2, "model": "x"})
+    # a deleted setup's ID is never handed to a new one, so stale references keep failing
+    svc.delete_profile("p1")
+    fresh = svc.update_config({"profile_id": "new", "preset": "deepseek"})["saved_profile"]
+    assert fresh not in ("p1", p2)
+    with pytest.raises(NotFound):
+        svc.send(acct["id"], "hello", profile_id="p1")
     assert stat.S_IMODE(os.stat(p).st_mode) == 0o600
 
 
@@ -322,14 +329,16 @@ def test_message_uses_the_setup_named_by_the_chat(seeded):
     try:
         svc = AssistantService(hub, HubAPI(hub))
         svc.update_config({"preset": "custom", "name": "A", "base_url": first.url + "/v1", "model": "a"})
-        svc.update_config({"profile_id": "new", "preset": "custom", "name": "B", "base_url": second.url + "/v1", "model": "b"})
-        assert svc.public_config()["active_profile"] == "p1"
+        b = svc.update_config({"profile_id": "new", "preset": "custom", "name": "B", "base_url": second.url + "/v1",
+                               "model": "b"})["saved_profile"]
+        a = svc.public_config()["active_profile"]
+        assert a != b
         # the chat picked B but activation has not landed yet: the message still goes to B
-        r = svc.send(acct["id"], "hello", profile_id="p2")
+        r = svc.send(acct["id"], "hello", profile_id=b)
         svc.wait(r["conversation_id"], 30)
         assert second.requests and not first.requests
         with pytest.raises(NotFound):          # never falls back to another provider
-            svc.send(acct["id"], "hello", profile_id="p9")
+            svc.send(acct["id"], "hello", profile_id="p-unknown")
     finally:
         first.stop()
         second.stop()
