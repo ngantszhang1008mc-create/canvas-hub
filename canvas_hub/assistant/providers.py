@@ -1,15 +1,16 @@
 """Model providers for the in-app assistant.
 
 * ``anthropic``         - Claude through the official Anthropic SDK (streamed).
+* ``codex``             - the locally installed Codex app-server and its own login.
 * ``openai_compatible`` - any Chat Completions-compatible endpoint through the
   official OpenAI SDK with a configurable base URL (OpenAI, Google Gemini's
   OpenAI endpoint, OpenRouter, DeepSeek, local Ollama/LM Studio, ...).
 
-Both take a provider-neutral transcript and return a ``Turn``. Claude's own
+All providers take a provider-neutral transcript and return a ``Turn``. Claude's own
 content blocks (including reasoning blocks) are kept verbatim and replayed
 unchanged on later requests; history is append-only.
 
-With ``on_text`` both stream: it is called with the reply's text so far as it
+With ``on_text`` replies stream: it is called with the reply's text so far as it
 arrives (the whole text each time, so a retried request simply starts over).
 The callback may raise ``Stopped`` to end the request early.
 """
@@ -331,5 +332,6 @@ def make_provider(cfg: dict):
     if kind == "openai_compatible":
         return OpenAICompatibleProvider(cfg)
     if kind == "codex":
-        raise ProviderError("The direct Codex connection is reserved for the Codex integration and is not implemented yet.")
+        from .codex import CodexProvider
+        return CodexProvider(cfg)
     raise ProviderError("Choose a provider in Assistant settings.")

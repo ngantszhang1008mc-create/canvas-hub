@@ -426,7 +426,7 @@ The user later asked for two things beyond the original brief. Both are now buil
 1. **A generic local MCP server**, `canvas_hub/mcp_server.py`, started with `canvas-hub mcp`. It runs over stdio and works with any MCP client.
 2. **An in-app assistant** that uses the user's own API key, in `canvas_hub/assistant/`.
 
-The direct Codex connection is still reserved for Codex.
+The in-app assistant supports Codex through a local app-server in addition to API providers. The adapter is in `canvas_hub/assistant/codex.py` and uses the Codex CLI's own authentication.
 
 ### Shared tool registry (`canvas_hub/agent_tools.py`)
 
@@ -621,12 +621,14 @@ canvas-hub mcp --allow-settings     # + scope changes
   - **Data & settings → Text from scans and photos** runs it on stored documents, 10 at a time, and re-indexes search. `get_item` adds a caution to OCR'd documents.
   - Install on the Mac: `brew install tesseract poppler`.
 
-### Still left for Codex
+### Codex integration and remaining client setup
 
 1. **Codex-side configuration.** Register `canvas-hub mcp` (with whatever flags the user chooses) in Codex's MCP configuration. Re-check [MCP tools for Codex](https://learn.chatgpt.com/docs/extend/mcp).
-2. **The direct Codex connection**, if requested. This means embedding a Codex agent via the [Codex SDK](https://learn.chatgpt.com/docs/codex-sdk) or [app-server](https://learn.chatgpt.com/docs/app-server), with its own authentication. Attach point: the reserved provider id `codex` in `canvas_hub/assistant/providers.py` (`make_provider`), shown as reserved in the settings dropdown.
-   - It could reuse `agent_tools.run_tool` and the assistant's conversation store and UI.
-   - Canvas Hub stores no OpenAI or Codex credentials for this and must not require them.
+2. **Direct Codex connection is implemented.** `make_provider` selects `CodexProvider`, targeting the v2 app-server protocol in Codex CLI 0.163.0. Install/sign in with Codex outside the app, then select its setup in the assistant; Canvas Hub stores no Codex credentials. `CANVAS_HUB_CODEX` can select an executable that is not on the app's PATH.
+   - The stdio client initializes an experimental-capable connection and creates an ephemeral thread with the permission-filtered dynamic tools. Environment access, inherited MCP servers, shell, web search, apps/plugins and multi-agent features are disabled. Unsupported server requests (including execution approvals and token refresh) are rejected.
+   - `item/tool/call` is returned to the existing assistant loop; its validated result is sent back to Codex before continuing. Display payloads stay in the UI. Conversation history replays across runs and provider changes without retaining a native Codex thread.
+   - Agent-message deltas use the existing streamed draft UI. Cancellation is checked even while the server sends no text; exit, error, timeout and cancellation paths close the process and remove its temporary workspace.
+   - `tests/test_codex.py` drives a real subprocess protocol peer and the full assistant/browser flow, including permissions, account isolation, history, errors and cancellation. Live account/provider connectivity remains a separate environment-dependent check.
 3. **Fulfilling external-site requests** (for example the COMP1023 website through Chrome profile `ngan`): run the MCP server with `--allow-fulfil`, poll `list_view_requests`, and use `claim_view_request` / `submit_view_result`.
 4. **Adapting the existing Canvas Reader skill.** It can call the MCP tools, or produce observation packages and submit them with `import_observations` (validated, idempotent and identity-checked).
 

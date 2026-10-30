@@ -1274,7 +1274,7 @@ VIEWS.assistant = async (main, parts, params) => {
   setChatFocus(store.get("chatFocus") === "1", [focusBtn]);
   if (onSettings) return assistantSettingsView(main, head, tabs, cfg, params);
   if (!cfg.configured) {
-    mount(main, head, tabs, empty("Set up the assistant first", "Add a provider and your API key. You can save several setups and switch between them.",
+    mount(main, head, tabs, empty("Set up the assistant first", "Add an API provider or connect your Codex CLI login. You can save several setups and switch between them.",
       h("a", { class: "btn primary", href: "#/assistant/settings" }, "Open settings")));
     return;
   }
@@ -1465,7 +1465,7 @@ function assistantSettingsView(main, head, tabs, cfg, params) {
         h("span", { class: "strong" }, x.name), h("span", { class: "tiny muted" }, [x.model || "default model", x.api_key_saved ? "key saved" : null].filter(Boolean).join(" · "))),
       x.id === cfg.active_profile ? pill("ok", "In use") : h("button", { class: "sm ghost", disabled: x.configured ? null : true, onclick: async () => {
         if (await guard(() => api(`/api/assistant/profiles/${encodeURIComponent(x.id)}/activate`, { method: "POST" }))) { toast(`Now using ${x.name}`); route(); }
-      } }, "Use"))) : h("p", { class: "muted small" }, "No setups yet. Add one with your provider and API key."));
+      } }, "Use"))) : h("p", { class: "muted small" }, "No setups yet. Add an API provider or connect your Codex CLI login."));
   mount(main, head, tabs, h("div", { class: "settings-layout" }, list,
     h("div", { class: "stack" }, assistantSettingsCard(cfg, prof), assistantPermissionsCard(cfg))));
 }
@@ -1491,11 +1491,12 @@ function assistantSettingsCard(cfg, prof) {
   const cur = prof || { id: "new", name: "", preset: null, provider: null, base_url: "", model: "", extra_params: {} };
   const isNew = !prof;
   const name = h("input", { type: "text", value: cur.name || "", placeholder: "e.g. DeepSeek max, Claude for long questions", maxlength: 60 });
-  const presetSel = h("select", null, h("option", { value: "" }, "Choose a provider…"),
+  const presetSel = h("select", { "aria-label": "Provider" }, h("option", { value: "" }, "Choose a provider…"),
     cfg.presets.map((p) => h("option", { value: p.id, disabled: p.disabled ? true : null, selected: p.id === cur.preset ? true : null }, p.label)));
   const base = h("input", { type: "url", value: cur.base_url || "", placeholder: "https://…/v1" });
   const model = h("input", { type: "text", value: cur.model || "", placeholder: "model name" });
   const key = h("input", { type: "password", autocomplete: "off", placeholder: cur.api_key_saved ? `saved (${cur.api_key_hint}) — type to replace` : "paste your API key" });
+  const keyField = h("label", { class: "field" }, h("span", null, "API key"), key);
   const baseField = h("label", { class: "field" }, h("span", null, "Base URL"), base);
   const extra = h("textarea", { rows: 2, class: "mono", placeholder: "optional, e.g. {\"temperature\": 0.3}" });
   extra.value = cur.extra_params && Object.keys(cur.extra_params).length ? JSON.stringify(cur.extra_params) : "";
@@ -1505,22 +1506,25 @@ function assistantSettingsCard(cfg, prof) {
   const sync = () => {
     const p = cfg.presets.find((x) => x.id === presetSel.value);
     const isAnthropic = p && p.provider === "anthropic";
-    extraField.hidden = !p || isAnthropic;
+    const isCodex = p && p.provider === "codex";
+    extraField.hidden = !p || isAnthropic || isCodex;
+    baseField.hidden = keyField.hidden = !!isCodex;
+    model.placeholder = isCodex ? "Codex default (optional)" : "model name";
     baseField.querySelector("span").textContent = isAnthropic ? "Base URL (leave empty for the Claude API)" : "Base URL";
     if (p && presetSel.value !== cur.preset) { base.value = p.base_url; if (p.model) model.value = p.model; else if (cur.provider !== p.provider) model.value = ""; }
-    mount(hint, p ? (isAnthropic ? "Without a pasted key, ANTHROPIC_API_KEY or an `ant auth login` profile is used." : p.id === "ollama" ? "Runs on your own computer; no key and nothing leaves it." : `Key format: ${p.key_hint || "provider API key"}. For OpenAI-compatible providers OPENAI_API_KEY is used if no key is saved.`) : "");
+    mount(hint, p ? (isCodex ? "Install Codex CLI 0.163.0 or newer and run `codex login` on this computer, then Save & test. Canvas Hub uses that login without storing its credentials. Leave Model empty to use your Codex default. Questions and selected course data are sent to Codex." : isAnthropic ? "Without a pasted key, ANTHROPIC_API_KEY or an `ant auth login` profile is used." : p.id === "ollama" ? "Runs on your own computer; no key and nothing leaves it." : `Key format: ${p.key_hint || "provider API key"}. For OpenAI-compatible providers OPENAI_API_KEY is used if no key is saved.`) : "");
   };
   presetSel.addEventListener("change", sync); sync();
   const result = h("div", { class: "small" });
   const save = async () => {
     if (!presetSel.value) { toast("Choose a provider first", true); return null; }
     let extraParams = {};
-    if (extra.value.trim()) {
+    const isCodex = presetSel.value === "codex";
+    if (!isCodex && extra.value.trim()) {
       try { extraParams = JSON.parse(extra.value); } catch { toast("Extra request settings must be valid JSON", true); return null; }
     }
-    const body = { profile_id: cur.id, name: name.value, preset: presetSel.value, base_url: base.value, model: model.value,
-      extra_params: extraParams };
-    if (key.value) body.api_key = key.value;
+    const body = { profile_id: cur.id, name: name.value, preset: presetSel.value, model: model.value };
+    if (!isCodex) Object.assign(body, { base_url: base.value, extra_params: extraParams, ...(key.value ? { api_key: key.value } : {}) });
     const r = await guard(() => api("/api/assistant/config", { method: "PUT", body }));
     if (r) { key.value = ""; cur.id = r.saved_profile; toast("Setup saved"); return r; }   // later saves edit this setup
     return null;
@@ -1546,11 +1550,11 @@ function assistantSettingsCard(cfg, prof) {
   const goTo = (pid) => { const h2 = `#/assistant/settings?p=${encodeURIComponent(pid)}`; if (location.hash === h2) route(); else location.hash = h2; };
   const card = h("div", { class: "card" },
     h("div", { class: "card-head" }, h("h2", null, isNew ? "New setup" : cur.name),
-      !isNew && cur.id === cfg.active_profile ? pill("ok", "In use") : h("span", { class: "sub" }, "your own API key · stored only on this computer")),
+      !isNew && cur.id === cfg.active_profile ? pill("ok", "In use") : h("span", { class: "sub" }, "provider settings stored only on this computer")),
     h("div", { class: "banner info" }, h("div", { class: "b-body small" }, cfg.privacy, " Keys are kept in a private file outside your course data, so they are never included in backups or exports.")),
     h("div", { class: "grid cols-2" }, h("label", { class: "field", style: "grid-column:1/-1" }, h("span", null, "Name"), name),
       h("label", { class: "field" }, h("span", null, "Provider"), presetSel), h("label", { class: "field" }, h("span", null, "Model"), model),
-      baseField, h("label", { class: "field" }, h("span", null, "API key"), key), extraField),
+      baseField, keyField, extraField),
     hint,
     h("div", { class: "tiny muted" }, "Reasoning effort is not part of a setup: choose it next to the message box for each message."),
     h("div", { class: "row", style: "margin-top:14px" },

@@ -24,7 +24,7 @@ Implementation brief: [docs/CLAUDE_BRIEF.md](docs/CLAUDE_BRIEF.md). Integration 
 
 ## Status
 
-The main application is built and tested against a synthetic Canvas, both with automated tests and with real Chromium end-to-end runs. Verification against real HKUST Canvas needs your sign-in and is still pending: see [docs/REAL_CANVAS_ACCEPTANCE.md](docs/REAL_CANVAS_ACCEPTANCE.md). The Codex integration is intentionally not implemented; it's left for Codex.
+The main application is built and tested against a synthetic Canvas, both with automated tests and with real Chromium end-to-end runs. Verification against real HKUST Canvas needs your sign-in and is still pending: see [docs/REAL_CANVAS_ACCEPTANCE.md](docs/REAL_CANVAS_ACCEPTANCE.md).
 
 ## Install and run (macOS)
 
@@ -106,7 +106,23 @@ In another terminal, run `uv run canvas-hub --home /tmp/canvas-hub-demo serve`, 
 - **Text from scans and photos (optional):** with [tesseract](https://tesseract-ocr.github.io/) installed (`brew install tesseract poppler`), Canvas Hub can read photographed forms and scanned PDFs. Each document shows a confidence score, and low-confidence text is flagged.
 - **Planner page:** add your class times, see your week with deadlines and to-dos, get suggested study blocks, and export to Apple Calendar (`.ics`). It's a local plan only.
 - **Agent requests page:** for sites outside Canvas (like a separate course website), leave a request that a connected agent with its own browser access can fulfil. Run the MCP server with `--allow-fulfil` for that agent. The text it sends back is stored, searchable, and labelled as agent-provided.
-- **Direct Codex connection:** reserved for Codex to build (see `CODEX_HANDOFF.md` §6). Codex can already use the MCP server.
+- **Direct Codex connection:** the assistant can use your locally installed Codex CLI and its existing login, with the same Canvas Hub tools and permissions. No Codex credentials are saved in Canvas Hub.
+
+### Use Codex in the assistant
+
+1. Install Codex CLI **0.163.0 or newer** on the computer running Canvas Hub, then sign in there:
+
+   ```bash
+   npm install -g @openai/codex
+   codex login
+   codex login status
+   ```
+
+2. Under **Assistant → Settings → Add setup**, choose **Codex (your Codex CLI login)**. Leave **Model** empty to use your Codex default, or enter a model your Codex account supports. Choose **Save & test**, then **Use this setup** or select it beside the chat message box. Reasoning effort is chosen per message.
+
+Codex runs through its local app-server. Questions and the course data it reads are sent to the configured Codex backend. Each assistant run uses an ephemeral Codex thread; Canvas Hub retains the chat in its own history. The adapter disables environment access, inherited MCP servers, shell tools, web search, and other agent features, and routes Canvas Hub tool calls through the existing account and permission checks. Writes to Canvas still require the user's confirmation in the app. **Stop** terminates the active Codex process, including while it is reasoning.
+
+If the app cannot find `codex`, restart it after installing the CLI or set `CANVAS_HUB_CODEX` to the executable's full path before starting Canvas Hub. Sign-in and credentials remain managed by Codex; do not paste Codex tokens into Canvas Hub or chat. Connection errors are shown in Assistant settings.
 
 ## Where your data lives
 
