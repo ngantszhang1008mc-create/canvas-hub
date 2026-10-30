@@ -19,6 +19,7 @@ Hours tracker
 
 from __future__ import annotations
 
+import math
 import re
 from datetime import datetime, timezone
 
@@ -86,10 +87,11 @@ def project(spec: dict, state: dict | None = None) -> dict:
             s = it["score"] if it["score"] is not None else hyp.get(it["id"])
             if s is None and fill is not None:
                 s = it["max"] * fill / 100
-            if s is not None and it["max"] > 0:
-                pts.append((min(s, it["max"] * 2), it["max"]))
+            # a 0-point bonus adds to what was earned without adding to what was possible
+            if s is not None and (it["max"] > 0 or s > 0):
+                pts.append((min(s, it["max"] * 2) if it["max"] > 0 else s, it["max"]))
         if c["drop_lowest"] and len(pts) > c["drop_lowest"]:
-            pts = sorted(pts, key=lambda p: p[0] / p[1])[c["drop_lowest"]:]
+            pts = sorted(pts, key=lambda p: p[0] / p[1] if p[1] else math.inf)[c["drop_lowest"]:]
         got, mx = sum(p[0] for p in pts), sum(p[1] for p in pts)
         return (100 * got / mx if mx else None), got, mx
 

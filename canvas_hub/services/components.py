@@ -293,7 +293,8 @@ class ComponentService:
         before = {r["id"]: r for s in (previous or {}).get("sections", []) for r in s["rows"]}
         for s in spec["sections"]:
             for r in s["rows"]:
-                want = "done" if st["done"].get(r["id"]) else "open"
+                ticked = bool(st["done"].get(r["id"]))
+                want = "done" if ticked else "open"
                 aid = links.get(r["id"])
                 if aid:
                     try:
@@ -301,7 +302,9 @@ class ComponentService:
                     except NotFound:
                         aid = None
                     else:
-                        changes = {"task_state": want} if cur["task_state"] != want else {}
+                        # Unticked keeps the to-do's own "in progress" / "blocked"; only done <-> not done is synced.
+                        in_step = cur["task_state"] == want or (not ticked and cur["task_state"] != "done")
+                        changes = {} if in_step else {"task_state": want}
                         old = before.get(r["id"])
                         if old is not None and old["label"] != r["label"]:
                             changes["title"] = r["label"]

@@ -550,6 +550,7 @@ footer{margin-top:24px;font-size:12px;color:#8b8170}</style></head><body><h1>${h
     let v = view, timer = null, saving = Promise.resolve(), isFull = false, edits = 0;
     let seen = view.state;                 // the last state the server confirmed: sent as `base` so it can merge
     let acked = 0;                         // edits the server has confirmed; fewer than `edits` = local changes pending
+    let userEdits = 0;                     // changes the user made (undo replies are not counted here)
     const el = h("div", { class: "saved-cmp" });
     const status = h("span", { class: "tiny muted save-state", "aria-live": "polite" });
     const redraw = () => { mount(el, render(v, api_)); };
@@ -596,11 +597,19 @@ footer{margin-top:24px;font-size:12px;color:#8b8170}</style></head><body><h1>${h
     };
     const flush = () => { clearTimeout(timer); const run = pending; pending = null; if (run) run(); };
     const api_ = {
-      setState: (fn) => { edits += 1; v = { ...v, state: fn(structuredClone(v.state)) }; redraw(); persist(); },
-      undo: () => { flush(); return queue(async () => {
-        const r = await guard(() => api(A(`/components/${v.id}`), { method: "PATCH", body: { undo: true } }));
-        if (r) { edits += 1; acked = edits; v = r; seen = r.state; redraw(); status.textContent = "Undone"; }
-      }); },
+      setState: (fn) => { edits += 1; userEdits += 1; v = { ...v, state: fn(structuredClone(v.state)) }; redraw(); persist(); },
+      undo: () => {
+        flush();
+        const at = userEdits, atState = v.state;      // edits made after pressing Undo are kept on top of its answer
+        return queue(async () => {
+          const r = await guard(() => api(A(`/components/${v.id}`), { method: "PATCH", body: { undo: true } }));
+          if (!r) return;
+          seen = r.state;
+          if (userEdits === at) { edits += 1; acked = edits; v = r; }
+          else v = { ...r, state: rebase(atState, v.state, r.state) };   // the pending save sends the newer edits
+          redraw(); status.textContent = "Undone";
+        });
+      },
       pin: () => queue(async () => {
         const r = await guard(() => api(A(`/components/${v.id}`), { method: "PATCH", body: { pinned: !v.pinned } }));
         if (r) { v = { ...r, state: v.state }; redraw(); toast(r.pinned ? "Pinned to Trackers" : "Unpinned"); }
@@ -655,13 +664,16 @@ footer{margin-top:24px;font-size:12px;color:#8b8170}</style></head><body><h1>${h
         const box = h("input", { type: "checkbox", checked: x.included && b.status !== "locked" ? true : null, disabled: pending ? null : true,
           "aria-label": `Include ${b.label}`, onchange: (e) => ctl.setState((s) => ({ ...s, scenario: null, include: { ...(s.include || {}), [b.id]: e.target.checked } })) });
         const setVal = (n) => ctl.setState((s) => { const vals = { ...(s.values || {}) }; if (n == null || Number.isNaN(n)) delete vals[b.id]; else vals[b.id] = n; return { ...s, scenario: null, values: vals }; });
-        const top = b.unit === "hours" ? Math.max(b.full_at || b.max, (x.value || 0)) : b.max;
+        // A formula line takes a raw value (hours, attendances...), whose full range is full_at, not the points.
+        const raw = b.unit === "hours" || !!b.formula;
+        const top = raw ? Math.max(b.full_at || b.max, (x.value || 0)) : b.max;
+        const what = b.unit === "hours" ? "Hours" : b.formula ? "Value" : "Points";
         const input = pending && x.included ? h("div", { class: "num-pair" },
-          h("input", { type: "range", class: "num-slider", min: 0, max: top, step: b.unit === "hours" ? 0.5 : (b.max <= 10 ? 0.5 : 1), value: x.value ?? top,
-            "aria-label": `${b.unit === "hours" ? "Hours" : "Points"} for ${b.label} (slider)`,
+          h("input", { type: "range", class: "num-slider", min: 0, max: top, step: b.unit === "hours" ? 0.5 : (top <= 10 ? 0.5 : 1), value: x.value ?? top,
+            "aria-label": `${what} for ${b.label} (slider)`,
             oninput: (e) => { const n = e.target.nextSibling; if (n) n.value = e.target.value; }, onchange: (e) => setVal(Number(e.target.value)) }),
-          h("input", { type: "number", class: "num-in", min: 0, step: b.unit === "hours" ? 0.5 : 1, max: b.unit === "hours" ? null : b.max,
-            value: x.value ?? "", "aria-label": `${b.unit === "hours" ? "Hours" : "Points"} for ${b.label}`,
+          h("input", { type: "number", class: "num-in", min: 0, step: b.unit === "hours" ? 0.5 : 1, max: raw ? null : b.max,
+            value: x.value ?? "", "aria-label": `${what} for ${b.label}`,
             onchange: (e) => setVal(e.target.value === "" ? null : Number(e.target.value)) })) : null;
         return h("tr", { class: (x.included ? "" : "off ") + (x.gated ? "gated" : "") },
           h("td", null, box),
@@ -858,9 +870,11 @@ ${pv.body || ""}`, json: w })));
       for (const it of c.items) {
         let sc = it.score != null ? it.score : hyp[it.id];
         if (sc == null && fill != null) sc = it.max * fill / 100;
-        if (sc != null && it.max > 0) pts.push([Math.min(sc, it.max * 2), it.max]);
+        // a 0-point bonus adds to what was earned without adding to what was possible (as projections.py)
+        if (sc != null && (it.max > 0 || sc > 0)) pts.push([it.max > 0 ? Math.min(sc, it.max * 2) : sc, it.max]);
       }
-      if (c.drop_lowest && pts.length > c.drop_lowest) pts = pts.sort((a, b) => a[0] / a[1] - b[0] / b[1]).slice(c.drop_lowest);
+      const ratio = (p) => (p[1] ? p[0] / p[1] : Infinity);
+      if (c.drop_lowest && pts.length > c.drop_lowest) pts = pts.sort((a, b) => (ratio(a) === ratio(b) ? 0 : ratio(a) < ratio(b) ? -1 : 1)).slice(c.drop_lowest);
       const got = pts.reduce((s, p) => s + p[0], 0), mx = pts.reduce((s, p) => s + p[1], 0);
       return [mx ? 100 * got / mx : null, got, mx];
     };

@@ -57,8 +57,8 @@ def test_formula_lines_compute_the_same_in_the_page(hub, account):
         expect(score.locator(".sl-big .num")).to_have_text("39")
         score.get_by_label("Hours for SDE hours", exact=True).fill("8.5")
         score.get_by_label("Hours for SDE hours", exact=True).dispatch_event("change")
-        score.get_by_label("Points for Attendance", exact=True).fill("9")
-        score.get_by_label("Points for Attendance", exact=True).dispatch_event("change")
+        score.get_by_label("Value for Attendance", exact=True).fill("9")
+        score.get_by_label("Value for Attendance", exact=True).dispatch_event("change")
         expect(score.locator(".sl-big .num")).to_have_text("16.5")
         expect(score.locator(".save-state")).to_contain_text("Saved", timeout=10000)
         assert score.locator(".formula-text", has_text="hours >= 10").count() == 1
@@ -342,3 +342,45 @@ def test_documents_ocr_cannot_read_do_not_block_the_rest(hub, ocr_stubs):
     retry = hub.run_ocr(limit=50, retry_failed=True)                  # failures are retried only on request
     assert {x["resource_id"] for x in retry["processed"]} == set(bad) and retry["failed"] == 11
     assert "OCR failed" in retry["processed"][0]["detail"]
+
+
+# ---- follow-ups from review ------------------------------------------------------------------
+@pytest.mark.browser
+def test_formula_inputs_cover_the_raw_range_and_bonus_points_count_in_the_page(hub, account):
+    from playwright.sync_api import expect, sync_playwright
+
+    from canvas_hub import projections
+    aid = account["id"]
+    v = hub.components.create(aid, "score_model", MODEL)
+    hub.components.pin(aid, v["id"], True)
+    bonus = {"title": "With bonus", "categories": [{"name": "All", "items": [
+        {"id": "exam", "label": "Exam", "max": 100, "score": 80}, {"id": "extra", "label": "Bonus", "max": 0, "score": 5}]}]}
+    assert projections.project(projections.normalize_projector(bonus), {})["percent"] == 85      # not 80
+    p = hub.components.create(aid, "grade_projector", bonus)
+    hub.components.pin(aid, p["id"], True)
+    with serve(hub, []) as (base, tok, _), sync_playwright() as pw:
+        b = pw.chromium.launch()
+        pg = b.new_page(viewport={"width": 1280, "height": 900})
+        pg.goto(f"{base}/?token={tok}")
+        pg.goto(f"{base}/#/trackers")
+        score = pg.locator(".cmp-score")
+        slider = score.get_by_label("Value for Attendance (slider)", exact=True)
+        assert slider.get_attribute("max") == "12"                   # attendances, not the 10 points
+        expect(score.locator(".sl-big .num")).to_have_text("39")
+        expect(pg.locator(".cmp-projector .sl-big")).to_contain_text("85")
+        b.close()
+
+
+def test_checklist_sync_keeps_in_progress_and_blocked_todos(hub, account):
+    aid = account["id"]
+    svc = hub.components
+    v = svc.create(aid, "checklist", {"title": "T", "sync_todos": True, "sections": [
+        {"id": "s", "rows": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}, {"id": "c", "label": "C"}]}]})
+    links = v["state"]["links"]
+    hub.annotations.update(aid, links["a"], task_state="in_progress")         # moved on the board
+    hub.annotations.update(aid, links["c"], task_state="blocked")
+    v = svc.set_state(aid, v["id"], {**svc.get(aid, v["id"])["state"], "done": {"b": True}})
+    states = {k: hub.annotations.get(aid, i)["task_state"] for k, i in links.items()}
+    assert states == {"a": "in_progress", "b": "done", "c": "blocked"}
+    svc.set_state(aid, v["id"], {**v["state"], "done": {"b": True, "c": True}})     # ticking still completes it
+    assert hub.annotations.get(aid, links["c"])["task_state"] == "done"
