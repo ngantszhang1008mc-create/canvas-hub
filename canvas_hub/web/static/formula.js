@@ -4,6 +4,7 @@
 
 export const MAX_LEN = 500;
 const MAX_NODES = 200;
+const MAX_DEPTH = 32;
 export const FUNCS = { min: [1, 50], max: [1, 50], round: [1, 2], floor: [1, 1], ceil: [1, 1], abs: [1, 1],
   sqrt: [1, 1], clamp: [3, 3], if: [3, 3] };
 const TOKEN = /\s*(?:(\d+(?:\.\d+)?|\.\d+)|([A-Za-z_][A-Za-z0-9_]*)|(\*\*|<=|>=|==|!=|[-+*/%^()<>,]))/y;
@@ -14,11 +15,13 @@ export class FormulaError extends Error {}
 function tokens(text) {
   const out = [];
   text = text.replace(/\s+$/, "");
-  let pos = 0;
+  let pos = 0, depth = 0;
   while (pos < text.length) {
     TOKEN.lastIndex = pos;
     const m = TOKEN.exec(text);
     if (!m || TOKEN.lastIndex === pos) throw new FormulaError(`formula: unexpected character at ${pos + 1}: '${text.slice(pos, pos + 10)}'`);
+    if (m[3] === "(" && ++depth > MAX_DEPTH) throw new FormulaError(`formula nesting is too deep (at most ${MAX_DEPTH} levels)`);
+    if (m[3] === ")") depth--;
     out.push(m[1] ? ["num", m[1]] : m[2] ? ["name", m[2]] : ["op", m[3]]);
     pos = TOKEN.lastIndex;
   }

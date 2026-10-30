@@ -142,6 +142,8 @@ uv run pytest -q                    # all tests, including real-Chromium end-to-
 uv run pytest -q -m "not browser"   # fast tests (~2 s)
 ```
 
+To use an existing Chromium installation for both collection and browser tests, set `CANVAS_HUB_CHROMIUM` to its executable path before running these commands.
+
 Code map:
 
 | Path | Contents |

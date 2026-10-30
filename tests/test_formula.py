@@ -11,6 +11,11 @@ from canvas_hub import formula
 from canvas_hub.util import InvalidInput
 
 VECTORS = json.loads((Path(__file__).parent / "fixtures" / "formula_vectors.json").read_text())["cases"]
+VECTORS += [
+    {"f": "(" * 32 + "1" + ")" * 32, "out": 1},
+    {"f": "(" * 150 + "1" + ")" * 150, "error": "nesting"},
+    {"f": "abs(" * 33 + "1" + ")" * 33, "error": "nesting"},
+]
 JS = Path(__file__).parents[1] / "canvas_hub" / "web" / "static" / "formula.js"
 
 

@@ -13,6 +13,22 @@ from canvas_hub.services import Hub  # noqa: E402
 FIXTURE = Path(__file__).parent / "fixtures" / "observation_package_v1.json"
 
 
+@pytest.fixture(autouse=True)
+def configured_browser_executable(request, monkeypatch):
+    """Use the app's browser override for UI tests as well as the collector."""
+    executable = os.environ.get("CANVAS_HUB_CHROMIUM")
+    if executable and request.node.get_closest_marker("browser"):
+        from playwright.sync_api import BrowserType
+        launch = BrowserType.launch
+
+        def configured_launch(browser_type, *args, **kwargs):
+            if browser_type.name == "chromium" and not kwargs.get("executable_path") and not kwargs.get("channel"):
+                kwargs["executable_path"] = executable
+            return launch(browser_type, *args, **kwargs)
+
+        monkeypatch.setattr(BrowserType, "launch", configured_launch)
+
+
 @pytest.fixture
 def hub(tmp_path):
     h = Hub(get_paths(tmp_path / "home"))

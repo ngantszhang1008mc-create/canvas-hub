@@ -33,6 +33,7 @@ from .util import InvalidInput
 
 MAX_LEN = 500
 MAX_NODES = 200
+MAX_DEPTH = 32
 FUNCS = {"min": (1, 50), "max": (1, 50), "round": (1, 2), "floor": (1, 1), "ceil": (1, 1), "abs": (1, 1),
          "sqrt": (1, 1), "clamp": (3, 3), "if": (3, 3)}
 _TOKEN = re.compile(r"\s*(?:(\d+(?:\.\d+)?|\.\d+)|([A-Za-z_][A-Za-z0-9_]*)|(\*\*|<=|>=|==|!=|[-+*/%^()<>,]))")
@@ -40,13 +41,19 @@ _CMP = ("<", "<=", ">", ">=", "==", "!=")
 
 
 def _tokens(text: str) -> list[tuple[str, str]]:
-    out, pos = [], 0
+    out, pos, depth = [], 0, 0
     text = text.rstrip()
     while pos < len(text):
         m = _TOKEN.match(text, pos)
         if not m or m.end() == pos:
             raise InvalidInput(f"formula: unexpected character at {pos + 1}: {text[pos:pos + 10]!r}")
         num, name, op = m.groups()
+        if op == "(":
+            depth += 1
+            if depth > MAX_DEPTH:
+                raise InvalidInput(f"formula nesting is too deep (at most {MAX_DEPTH} levels)")
+        elif op == ")":
+            depth -= 1
         out.append(("num", num) if num else ("name", name) if name else ("op", op))
         pos = m.end()
     return out

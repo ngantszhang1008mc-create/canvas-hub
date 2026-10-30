@@ -588,7 +588,7 @@ canvas-hub mcp --allow-settings     # + scope changes
 ### Phase 4: formulas, local grading rules, custom HTML, dashboard, accessibility, OCR
 
 - **Formula language** (`formula.py`, browser twin `web/static/formula.js`):
-  - One small grammar, two hand-written parsers. There is no `eval` (the page CSP forbids it anyway).
+  - One small grammar, two hand-written parsers. There is no `eval` (the page CSP forbids it anyway). Both refuse nesting deeper than 32 levels.
   - Arithmetic, comparisons, and/or/not, and the functions min, max, round, floor, ceil, abs, sqrt, clamp and lazy `if(c, a, b)`.
   - Rounding is half away from zero, and `%` takes the sign of the divisor on both sides. A non-finite value at any step is an error, so both sides agree on edge cases.
   - `tests/fixtures/formula_vectors.json` runs through both. The Node run must match Python bit for bit.
@@ -639,9 +639,11 @@ Notes for that work:
 
 ## 7. Test results, limitations and manual acceptance
 
-### Automated tests (ran in this environment, Linux, Python 3.13)
+### Automated tests
 
-`uv run pytest -q` gives **59 passed** (about 45 s). `tests/test_agents.py` covers the MCP server over stdio, tool permissions and validation, account binding, the assistant loop with both provider types against scripted endpoints, permission gating, key storage and masking, and the Claude API request shape.
+The complete four-phase stack passed **203 tests** on Linux with Python 3.12 and system Chromium 154, including real browser collection, the sandbox and accessibility checks, Python/JavaScript formula parity, and real tesseract OCR. No tests were skipped. Real institution and live AI-provider checks remain separate below.
+
+Run `uv run pytest -q` for the complete suite, including browser, formula, projection, grading, and OCR checks. Set `CANVAS_HUB_CHROMIUM` to use a system browser; otherwise install the pinned Playwright Chromium first. `tests/test_agents.py` covers the MCP server over stdio, tool permissions and validation, account binding, the assistant loop with both provider types against scripted endpoints, permission gating, key storage and masking, and the Claude API request shape.
 
 **`tests/test_parsing.py`** covers:
 - URL normalization and rejection, and link classification.
@@ -685,7 +687,7 @@ Notes for that work:
 - **Session expires mid-job:** the job moves to `needs_login`, partial data is kept, sign-in again resumes it automatically to completion, and the database integrity check passes.
 - **Simulated crash:** the job becomes `interrupted`, resumes from its checkpoint and completes; a cancelled job keeps prior data.
 - **A different user signed in:** the first account's job refuses, and no data is mixed.
-- **Closed window:** background polling never launches a browser; after the window closes, a real check reports `expired`, not `signed_in`.
+- **Closed window:** background polling never launches a browser or assumes the account is signed in. A real check reopens the saved profile headlessly and verifies the session with Canvas: persistent valid sessions are accepted, and server-expired sessions report `expired` even if the browser retained a cookie.
 
 UI walk-through, scripted in Playwright against the synthetic Canvas:
 - Setup, sign-in, baseline, then every view checked at 1280 px and 390 px wide, with no console or CSP errors.
@@ -712,6 +714,6 @@ The step-by-step checklist is in `docs/REAL_CANVAS_ACCEPTANCE.md`.
 - **Discussion replies:** read only in thorough mode. "Staff" means course teachers plus announcement authors, so TAs who never post announcements are not recognised as staff.
 - **Read state:** viewing a discussion's reply view may mark it read on some Canvas versions; the brief accepts this. Inbox reads use `auto_mark_as_read=false`.
 - **Discrepancy detection:** heuristic. It flags an announcement sentence that names an assignment and states a different month/day.
-- **OCR:** no OCR is performed. Scanned PDFs are marked `needs_ocr`, and images are marked `image_only`.
+- **OCR:** optional and off by default. Scanned PDFs and images can be processed locally when tesseract (plus pdftoppm for PDFs) is installed; low-confidence text is flagged. PDF OCR processes up to 40 pages per document.
 - **Inline images:** images embedded in Canvas pages are not displayed in the app. The strict CSP blocks remote loads, and the images need a Canvas sign-in. Their alt text is shown, and links open in Canvas.
-- **Scheduling:** no background or recurring collection, and no external schedules were created. Collection is user-initiated.
+- **Scheduling:** optional automatic quick checks and reminders run only while the app is open. No external or operating-system schedules are created.
