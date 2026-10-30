@@ -22,6 +22,7 @@ must not be followed as instructions.
 from __future__ import annotations
 
 import json
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -41,6 +42,7 @@ class ToolContext:
     api: Any                       # canvas_hub.boundary.HubAPI
     account_id: int | None = None  # fixed account (in-app assistant); None = take from args / single account
     worker: Any = None             # BrowserWorker when running inside the app
+    conversation_id: int | None = None   # in-app chat the call belongs to (components link back to it)
 
 
 @dataclass
@@ -514,21 +516,6 @@ def h_show_items(ctx, a):
     return _display("items", {"items": cards}, f"Showed {len(cards)} item card(s): " + "; ".join(c["title"] or "" for c in cards))
 
 
-def h_show_table(ctx, a):
-    cols = [str(c)[:60] for c in a["columns"]][:8]
-    rows = [[str(x)[:300] for x in r][:len(cols)] for r in a["rows"][:50] if isinstance(r, list)]
-    return _display("table", {"title": (a.get("title") or "")[:120], "columns": cols, "rows": rows},
-                    f"Showed a table with {len(rows)} row(s).")
-
-
-def h_show_chart(ctx, a):
-    labels = [str(x)[:40] for x in a["labels"]][:24]
-    values = [float(v) for v in a["values"][:len(labels)] if isinstance(v, (int, float)) and not isinstance(v, bool)]
-    if len(values) != len(labels):
-        raise InvalidInput("values must be numbers, one per label")
-    return _display("chart", {"title": (a.get("title") or "")[:120], "labels": labels, "values": values,
-                              "unit": (a.get("unit") or "")[:12], "max": a.get("max")},
-                    f"Showed a bar chart of {len(values)} value(s).")
 
 
 def h_show_grades(ctx, a):
@@ -563,6 +550,203 @@ def h_show_choices(ctx, a):
     opts = [str(o)[:120] for o in a["options"]][:6]
     return _display("choices", {"question": a["question"][:300], "options": opts},
                     "Showed buttons; the user's click arrives as their next message.")
+
+
+# ---- stateful components, artifacts and viewers ------------------------------------
+def _component_display(ctx, view: dict, verb: str) -> dict:
+    desc = ctx.api.hub.components.describe(view_account(ctx, view), view["id"])
+    t = desc["totals"]
+    if view["kind"] == "score_model":
+        head = (f"{verb} score model #{view['id']} '{view['title']}': booked {t['booked']:g}, projected {t['projected']:g}, "
+                f"ceiling {t['ceiling']:g}, lost {t['lost']:g}")
+        if t.get("threshold") is not None:
+            head += f", threshold {t['threshold']:g} ({'pass' if t['passes'] else 'below'}, margin {t['margin']:g})"
+    else:
+        head = (f"{verb} checklist #{view['id']} '{view['title']}': {t['done_count']}/{t['count']} done"
+                + (f", {t['done_points']:g}/{t['points']:g} points" if t["points"] else ""))
+    return {"display": {"component": view["kind"], "component_id": view["id"], "view": view},
+            "summary": head + ". The user can change it in place; read it back with get_component.",
+            "component_id": view["id"]}
+
+
+def view_account(ctx, view: dict) -> int:
+    return ctx.account_id if ctx.account_id is not None else ctx.api.hub.db.one(
+        "SELECT account_id FROM components WHERE id=?", (view["id"],))["account_id"]
+
+
+def h_show_score_model(ctx, a):
+    aid = _account(ctx, a)
+    spec = {k: a[k] for k in ("title", "threshold", "unit_label", "buckets", "scenarios") if a.get(k) is not None}
+    v = ctx.api.hub.components.create(aid, "score_model", spec, conversation_id=ctx.conversation_id)
+    if a.get("pin"):
+        v = ctx.api.hub.components.pin(aid, v["id"], True)
+    return _component_display(ctx, v, "Created")
+
+
+def h_show_checklist(ctx, a):
+    aid = _account(ctx, a)
+    spec = {k: a[k] for k in ("title", "sections", "sync_todos") if a.get(k) is not None}
+    v = ctx.api.hub.components.create(aid, "checklist", spec, conversation_id=ctx.conversation_id)
+    if a.get("pin"):
+        v = ctx.api.hub.components.pin(aid, v["id"], True)
+    return _component_display(ctx, v, "Created")
+
+
+def h_get_component(ctx, a):
+    return ctx.api.hub.components.describe(_account(ctx, a), a["component_id"])
+
+
+def h_list_components(ctx, a):
+    aid = _account(ctx, a)
+    rows = ctx.api.hub.components.list(aid, pinned=a.get("pinned"), limit=50)
+    return {"components": [{"component_id": v["id"], "kind": v["kind"], "title": v["title"], "pinned": v["pinned"],
+                            "updated_at": v["updated_at"]} for v in rows]}
+
+
+def h_update_component(ctx, a):
+    aid = _account(ctx, a)
+    svc = ctx.api.hub.components
+    if a.get("spec") is None and a.get("state") is None and a.get("pin") is None:
+        raise InvalidInput("give spec, state or pin")
+    v = svc.get(aid, a["component_id"])
+    if a.get("spec") is not None:
+        v = svc.update_spec(aid, v["id"], a["spec"], by="assistant")
+    if a.get("state") is not None:
+        v = svc.set_state(aid, v["id"], a["state"], by="assistant")
+    if a.get("pin") is not None:
+        v = svc.pin(aid, v["id"], a["pin"])
+    return _component_display(ctx, v, "Updated")
+
+
+def h_course_score_lines(ctx, a):
+    """Draft score-model buckets from a course's assignments and submission states."""
+    aid = _account(ctx, a)
+    hub = ctx.api.hub
+    now = datetime.now(timezone.utc)
+    lines, groups = [], {}
+    for r in hub.db.query("""SELECT id, canvas_id, title FROM items WHERE account_id=? AND item_type='assignment'
+                             AND course_canvas_id=? AND current_revision>0 ORDER BY id""", (aid, str(a["course_id"]))):
+        f = hub.query._fields(r["id"])
+        pts = f.get("points_possible")
+        if not pts or f.get("omit_from_final_grade"):
+            continue
+        sub = hub.query._submission(aid, r["canvas_id"]) or {}
+        due = dates.instant(f.get("due_at")) if f.get("due_at") else None
+        line = {"id": f"a{r['canvas_id']}", "label": (r["title"] or "")[:120], "max": float(pts), "item_id": r["id"],
+                "group": f.get("assignment_group")}
+        if due:
+            line["due"] = due.isoformat()
+        if sub.get("excused"):
+            line["status"] = "excused"
+        elif sub.get("score") is not None and sub.get("workflow_state") == "graded":
+            line.update(status="earned", earned=float(sub["score"]))
+        elif sub.get("missing") or (due and due < now and not sub.get("submitted_at")):
+            line.update(status="lost", earned=0.0)
+        elif f.get("locked_for_user") and (not due or due < now):
+            line["status"] = "locked"
+        else:
+            line["status"] = "pending"
+        if f.get("assignment_group_weight"):
+            groups[f.get("assignment_group")] = f.get("assignment_group_weight")
+        lines.append(line)
+    return {"course_id": str(a["course_id"]), "buckets": lines, "group_weights": groups,
+            "note": "Drafted from Canvas points and submission states. Gating rules (all-or-nothing, minimum hours) and "
+                    "pass thresholds are not in Canvas data: ask the user or read the syllabus, then pass the buckets to "
+                    "show_score_model. Graded = earned; missing or past due without a submission = lost."}
+
+
+def _num_or_text(v):
+    return v if isinstance(v, (int, float)) and not isinstance(v, bool) else str(v)[:300]
+
+
+def h_show_table_v2(ctx, a):
+    cols = [str(c)[:60] for c in a["columns"]][:12]
+    rows = [[_num_or_text(x) for x in r][:len(cols)] for r in a["rows"][:200] if isinstance(r, list)]
+    types = [t if t in ("text", "number", "date") else "text" for t in (a.get("column_types") or [])][:len(cols)]
+    totals = [c for c in (a.get("totals") or []) if c in cols]
+    group_by = a.get("group_by") if a.get("group_by") in cols else None
+    details = [str(d)[:4000] for d in (a.get("details") or [])][:len(rows)]
+    item_ids = [int(x) if isinstance(x, int) else None for x in (a.get("item_ids") or [])][:len(rows)]
+    return _display("table", {"title": (a.get("title") or "")[:120], "columns": cols, "rows": rows, "column_types": types,
+                              "totals": totals, "group_by": group_by, "details": details, "item_ids": item_ids},
+                    f"Showed a table with {len(rows)} row(s) (sortable, filterable"
+                    + (f", totals of {', '.join(totals)}" if totals else "") + (f", grouped by {group_by}" if group_by else "") + ").")
+
+
+def h_show_chart_v2(ctx, a):
+    kind = a.get("kind") or "bar"
+    labels = [str(x)[:40] for x in a["labels"]][:24]
+    series = []
+    if a.get("series"):
+        for s_ in a["series"][:6]:
+            if not isinstance(s_, dict) or not isinstance(s_.get("values"), list):
+                raise InvalidInput("each series needs a name and values")
+            vals = [float(v) for v in s_["values"][:len(labels)] if isinstance(v, (int, float)) and not isinstance(v, bool)]
+            if len(vals) != len(labels):
+                raise InvalidInput(f"series {s_.get('name')!r}: one number per label")
+            series.append({"name": str(s_.get("name") or f"Series {len(series) + 1}")[:40], "values": vals})
+    else:
+        vals = [float(v) for v in (a.get("values") or [])[:len(labels)] if isinstance(v, (int, float)) and not isinstance(v, bool)]
+        if len(vals) != len(labels):
+            raise InvalidInput("values must be numbers, one per label")
+        series = [{"name": a.get("series_name") or "Value", "values": vals}]
+    if kind == "bar" and len(series) > 1:
+        kind = "grouped"
+    return _display("chart", {"title": (a.get("title") or "")[:120], "kind": kind, "labels": labels, "series": series,
+                              "values": series[0]["values"], "unit": (a.get("unit") or "")[:12], "max": a.get("max"),
+                              "threshold": a.get("threshold")},
+                    f"Showed a {kind} chart of {len(labels)} categor{'y' if len(labels) == 1 else 'ies'}"
+                    + (f" with a threshold at {a['threshold']:g}" if a.get("threshold") is not None else "") + ".")
+
+
+def h_show_gauge(ctx, a):
+    segs = []
+    for s_ in a["segments"][:8]:
+        if not isinstance(s_, dict) or not isinstance(s_.get("value"), (int, float)) or isinstance(s_.get("value"), bool):
+            raise InvalidInput("each segment needs a label and a numeric value")
+        segs.append({"label": str(s_.get("label") or "")[:40], "value": float(s_["value"])})
+    total = sum(x["value"] for x in segs)
+    mx = float(a.get("max") or total or 1)
+    thr = a.get("threshold")
+    return _display("gauge", {"title": (a.get("title") or "")[:120], "segments": segs, "max": mx, "threshold": thr,
+                              "unit": (a.get("unit") or "")[:12], "style": a.get("style") or "bar"},
+                    f"Showed a progress gauge: {total:g} of {mx:g}" + (f", threshold {thr:g} ({'reached' if total >= thr else f'{thr - total:g} to go'})"
+                                                                     if thr is not None else "") + ".")
+
+
+def h_show_artifact(ctx, a):
+    content = a["content"]
+    if len(content) > 200_000:
+        raise InvalidInput("content is limited to 200,000 characters")
+    name = re.sub(r"[^\w.\- ]", "_", a.get("filename") or "")[:80] or None
+    lang = (a.get("language") or "text")[:20]
+    return _display("artifact", {"title": (a.get("title") or "Artifact")[:120], "content": content, "language": lang,
+                                 "filename": name},
+                    f"Showed an artifact block ({len(content):,} characters, {len(content.split()):,} words) with Copy and "
+                    "Download buttons. The user can copy or save it; do not repeat its text.")
+
+
+def h_show_json(ctx, a):
+    data = a["data"]
+    if len(json.dumps(data, default=str)) > 200_000:
+        raise InvalidInput("data is limited to 200,000 characters as JSON")
+    return _display("json", {"title": (a.get("title") or "")[:120], "data": data}, "Showed a collapsible JSON tree.")
+
+
+def h_show_diff(ctx, a):
+    if a.get("item_id") is not None:
+        aid = _account(ctx, a)
+        h = ctx.api.item_history(aid, a["item_id"])
+        changes = [{"field": e["field"], "old": e["old"], "new": e["new"], "when": e["observed_at"]}
+                   for e in h["events"] if e["kind"] == "field_changed"][:40]
+        title = a.get("title") or f"Changes to {h['title']}"
+    elif a.get("before") is not None and a.get("after") is not None:
+        changes = [{"field": a.get("label") or "text", "old": a["before"], "new": a["after"], "when": None}]
+        title = a.get("title") or "Comparison"
+    else:
+        raise InvalidInput("give item_id, or before and after")
+    return _display("diff", {"title": str(title)[:160], "changes": changes},
+                    f"Showed {len(changes)} change(s) side by side" + ("" if changes else " (no recorded edits)") + ".")
 
 
 _CATS = [c for c in CATEGORIES if c != "courses"]
@@ -685,6 +869,15 @@ TOOLS += [
     AgentTool("decline_view_request", "Decline a request you cannot fulfil (no access, login failed, ...), with a reason.",
               "fulfil", {"request_id": {"type": "integer"}, "agent_name": {"type": "string"}, "reason": {"type": "string"}},
               ["request_id", "agent_name", "reason"], h_decline_request),
+    # ---- saved components (readable from any agent)
+    AgentTool("get_component", "Read back a saved score model or checklist: which lines are ticked or skipped, values the "
+              "user entered, and the computed totals.", "read", {"component_id": {"type": "integer"}}, ["component_id"],
+              h_get_component),
+    AgentTool("list_components", "List saved interactive components (score models, checklists).", "read",
+              {"pinned": {"type": "boolean"}}, [], h_list_components),
+    AgentTool("course_score_lines", "Draft score-model buckets for a course from its assignments: points, due dates, "
+              "assignment groups and status from the submission state.", "read", {"course_id": {"type": "string"}},
+              ["course_id"], h_course_score_lines),
     # ---- interactive components (in-app chat)
     AgentTool("show_deadlines", "Show deadlines to the user as interactive cards (open, add to-do, open in Canvas).", "ui",
               {"days_ahead": {"type": "integer", "minimum": 1, "maximum": 120}, "course_id": {"type": "string"}}, [],
@@ -695,14 +888,82 @@ TOOLS += [
               [], h_show_timetable),
     AgentTool("show_items", "Show stored items (announcements, assignments, pages, files...) as cards.", "ui",
               {"item_ids": {"type": "array", "items": {"type": "integer"}}}, ["item_ids"], h_show_items),
-    AgentTool("show_table", "Show a small table (max 8 columns, 50 rows) of text you prepared from the data.", "ui",
+    AgentTool("show_table", "Show a table (max 12 columns, 200 rows) the user can sort, filter, total, group and export. "
+              "Optional per-row detail text expands in place; item_ids open the full item in a side panel.", "ui",
               {"title": {"type": "string"}, "columns": {"type": "array", "items": {"type": "string"}},
-               "rows": {"type": "array", "items": {"type": "array", "items": {"type": "string"}}}},
-              ["columns", "rows"], h_show_table),
-    AgentTool("show_chart", "Show a bar chart (max 24 bars) of numbers you computed from the data.", "ui",
-              {"title": {"type": "string"}, "labels": {"type": "array", "items": {"type": "string"}},
-               "values": {"type": "array", "items": {"type": "number"}}, "unit": {"type": "string"},
-               "max": {"type": "number"}}, ["labels", "values"], h_show_chart),
+               "rows": {"type": "array", "items": {"type": "array", "items": {"type": "string"}},
+                        "description": "cell values; numbers may be given as text"},
+               "column_types": {"type": "array", "items": {"type": "string", "enum": ["text", "number", "date"]}},
+               "totals": {"type": "array", "items": {"type": "string"}, "description": "column names to sum"},
+               "group_by": {"type": "string", "description": "a column name"},
+               "details": {"type": "array", "items": {"type": "string"}, "description": "one expandable text per row"},
+               "item_ids": {"type": "array", "items": {"type": "integer"}, "description": "one Canvas Hub item id per row"}},
+              ["columns", "rows"], h_show_table_v2),
+    AgentTool("show_chart", "Show a chart of numbers you computed: bar (one series), grouped or stacked (several series, "
+              "e.g. earned vs remaining vs lost per category), or waterfall (running total). Optional threshold line.", "ui",
+              {"title": {"type": "string"}, "kind": {"type": "string", "enum": ["bar", "grouped", "stacked", "waterfall"]},
+               "labels": {"type": "array", "items": {"type": "string"}},
+               "values": {"type": "array", "items": {"type": "number"}, "description": "single series"},
+               "series": {"type": "array", "items": {"type": "object", "properties": {
+                   "name": {"type": "string"}, "values": {"type": "array", "items": {"type": "number"}}},
+                   "required": ["name", "values"]}},
+               "unit": {"type": "string"}, "max": {"type": "number"}, "threshold": {"type": "number"}},
+              ["labels"], h_show_chart_v2),
+    AgentTool("show_gauge", "Show a progress gauge (bar or donut) split into segments, with an optional pass threshold and "
+              "the distance to it.", "ui",
+              {"title": {"type": "string"}, "segments": {"type": "array", "items": {"type": "object", "properties": {
+                  "label": {"type": "string"}, "value": {"type": "number"}}, "required": ["label", "value"]}},
+               "max": {"type": "number"}, "threshold": {"type": "number"}, "unit": {"type": "string"},
+               "style": {"type": "string", "enum": ["bar", "donut"]}}, ["segments"], h_show_gauge),
+    AgentTool("show_artifact", "Hand a finished text artefact to the user (a spec, prompt, report, essay draft, JSON, CSV, "
+              "code) in a block with line numbers, Copy and Download buttons. Use this instead of pasting long text.", "ui",
+              {"title": {"type": "string"}, "content": {"type": "string"},
+               "language": {"type": "string", "description": "markdown, json, csv, python, text, ..."},
+               "filename": {"type": "string", "description": "suggested download name, e.g. study-plan.md"}},
+              ["content"], h_show_artifact),
+    AgentTool("show_json", "Show nested data (e.g. a model's buckets and lines) as a collapsible tree.", "ui",
+              {"title": {"type": "string"}, "data": {"type": "object"}}, ["data"], h_show_json),
+    AgentTool("show_diff", "Show edits side by side in red/green: the recorded changes of a Canvas item (item_id), or two "
+              "texts you compare (before/after).", "ui",
+              {"item_id": {"type": "integer"}, "before": {"type": "string"}, "after": {"type": "string"},
+               "label": {"type": "string"}, "title": {"type": "string"}}, [], h_show_diff),
+    AgentTool("show_score_model", "Create an interactive score model (saved): one bucket per assessed line with max, earned, "
+              "status (earned/pending/lost/locked/excused), gating (none/all_or_nothing/min_threshold with min_value), "
+              "unit (points or hours, with full_at hours for full marks). The user ticks lines to include or skip and edits "
+              "expected values; totals (booked, projected, ceiling, lost, margin to threshold, skip budget) update live. "
+              "Draft buckets from Canvas with course_score_lines. Scenarios are named presets (e.g. conservative/target/max).",
+              "ui",
+              {"title": {"type": "string"}, "threshold": {"type": "number", "description": "pass mark, same unit as the totals"},
+               "unit_label": {"type": "string", "description": "e.g. pts"},
+               "buckets": {"type": "array", "items": {"type": "object", "properties": {
+                   "id": {"type": "string"}, "label": {"type": "string"}, "max": {"type": "number"},
+                   "earned": {"type": "number"}, "status": {"type": "string", "enum": ["earned", "pending", "lost", "locked", "excused"]},
+                   "gating": {"type": "string", "enum": ["none", "all_or_nothing", "min_threshold"]},
+                   "min_value": {"type": "number"}, "unit": {"type": "string", "enum": ["points", "hours"]},
+                   "full_at": {"type": "number"}, "group": {"type": "string"}, "due": {"type": "string"},
+                   "item_id": {"type": "integer"}, "note": {"type": "string"}}, "required": ["label", "max"]}},
+               "scenarios": {"type": "array", "items": {"type": "object", "properties": {
+                   "id": {"type": "string"}, "label": {"type": "string"},
+                   "include": {"type": "object", "description": "bucket id -> true/false"},
+                   "values": {"type": "object", "description": "bucket id -> expected points or hours"}},
+                   "required": ["id"]}},
+               "pin": {"type": "boolean", "description": "also pin it to the Trackers page"}},
+              ["buckets"], h_show_score_model),
+    AgentTool("show_checklist", "Create an interactive checklist (saved): sections of rows with optional points, due date "
+              "and linked item; ticks persist, sections show subtotals and progress. sync_todos links each row to a local "
+              "to-do (ticking one ticks the other).", "ui",
+              {"title": {"type": "string"}, "sync_todos": {"type": "boolean"}, "pin": {"type": "boolean"},
+               "sections": {"type": "array", "items": {"type": "object", "properties": {
+                   "id": {"type": "string"}, "title": {"type": "string"},
+                   "rows": {"type": "array", "items": {"type": "object", "properties": {
+                       "id": {"type": "string"}, "label": {"type": "string"}, "points": {"type": "number"},
+                       "due": {"type": "string"}, "item_id": {"type": "integer"}, "note": {"type": "string"},
+                       "done": {"type": "boolean"}}, "required": ["label"]}}}, "required": ["rows"]}}},
+              ["sections"], h_show_checklist),
+    AgentTool("update_component", "Change a saved score model or checklist: replace its definition (spec, same shape as "
+              "when created), set its state, or pin it to Trackers.", "ui",
+              {"component_id": {"type": "integer"}, "spec": {"type": "object"}, "state": {"type": "object"},
+               "pin": {"type": "boolean"}}, ["component_id"], h_update_component),
     AgentTool("show_grades", "Show visible assignment scores as a chart (% of points); hidden grades are listed, not zero.",
               "ui", {"course_id": {"type": "string"}}, [], h_show_grades),
     AgentTool("show_choices", "Offer the user up to 6 quick-reply buttons; their click is sent as their next message.", "ui",

@@ -108,3 +108,14 @@ Don't paste your key into chat; enter it only in the app.
 | 9.4 | Ask the assistant "Plan my study time this week" | It answers with an interactive timetable and buttons, not just text |
 | 9.5 | **Agent requests**: leave one for the COMP1023 website with the note "Use Chrome profile ngan" | Status *Waiting for an agent* |
 | 9.6 | In Codex or Claude Code (MCP started with `--allow-fulfil`), ask it to fulfil open Canvas Hub requests | Status becomes *Done*; the content is searchable and labelled as agent-provided |
+
+## 10. Score models, checklists and artifacts
+
+| # | Step | Expected |
+| --- | --- | --- |
+| 10.1 | Ask "Build a score model for HMAW1905B with the pass mark from the syllabus" | It shows all assessed lines. Booked and ceiling match your own count (e.g. 15 booked, 95 ceiling), and lost lines (e.g. Community Meeting 1, 0/10) are marked *Lost* |
+| 10.2 | Untick a line you plan to skip (e.g. Nest Posts), then another (e.g. FYES) | The total and margin update immediately (e.g. 85, then exactly 80 with +0 margin against an 80 pass mark) |
+| 10.3 | Reload the page, open **Trackers** after pinning it, then ask "Which lines am I skipping?" | The ticks are kept, and the assistant names the unticked lines |
+| 10.4 | Ask for a checklist of this week's tasks linked to your to-dos; tick one; then mark another done under **Notes & tasks** | Both stay in step; nothing changes in Canvas |
+| 10.5 | Ask the assistant to write something long for you (a plan or a spec) | It appears in an artifact block; **Copy** puts the full text on the clipboard and **Download** saves the file |
+| 10.6 | On any table or chart, use **Copy ▾ → Copy as CSV**, paste into Numbers or Excel | The rows paste as columns |

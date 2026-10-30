@@ -10,6 +10,7 @@ from ..db import Database
 from ..paths import AppPaths, get_paths
 from ..util import InvalidInput, NotFound
 from .annotations import AnnotationService
+from .components import ComponentService
 from .identity import IdentityService
 from .importer import Importer
 from .jobs import JobService
@@ -36,6 +37,7 @@ class Hub:
         self.importer = Importer(self.db, self.identity, self.jobs, self.search, self.resources)
         self.planner = PlannerService(self.db, self.query)
         self.requests = RequestService(self.db, self.identity, self.importer)
+        self.components = ComponentService(self.db, self.annotations)
 
     def close(self) -> None:
         self.db.close()

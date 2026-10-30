@@ -348,6 +348,22 @@ def create_app(api: HubAPI, *, token: str, port: int) -> FastAPI:
     def planner_delete_class(aid: int, cid: int):
         return api.delete_class_time(aid, cid)
 
+    @app.get("/api/accounts/{aid}/components")
+    def components_list(aid: int, pinned: str | None = None):
+        return api.list_components(aid, pinned)
+
+    @app.get("/api/accounts/{aid}/components/{cid}")
+    def component_get(aid: int, cid: int):
+        return api.get_component(aid, cid)
+
+    @app.patch("/api/accounts/{aid}/components/{cid}")
+    async def component_update(aid: int, cid: int, request: Request):
+        return api.update_component(aid, cid, await body(request))
+
+    @app.delete("/api/accounts/{aid}/components/{cid}")
+    def component_delete(aid: int, cid: int):
+        return api.delete_component(aid, cid)
+
     @app.get("/api/accounts/{aid}/planner.ics")
     def planner_ics(aid: int, weeks: int = 8):
         return Response(api.planner_ics(aid, weeks), media_type="text/calendar; charset=utf-8",

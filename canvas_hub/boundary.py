@@ -203,6 +203,32 @@ class HubAPI:
         return self.hub.planner.ics(self._acct(account_id)["id"], int(weeks or 8))
 
     # ---- external-site requests ---------------------------------------------------
+    # ---- interactive components ----------------------------------------------------
+    def list_components(self, account_id, pinned=None) -> dict:
+        pin = None if pinned in (None, "") else self._bool(pinned)
+        return {"components": self.hub.components.list(self._acct(account_id)["id"], pinned=pin)}
+
+    def get_component(self, account_id, component_id) -> dict:
+        return self.hub.components.get(self._acct(account_id)["id"], component_id)
+
+    def update_component(self, account_id, component_id, data: dict) -> dict:
+        aid = self._acct(account_id)["id"]
+        allowed = {"state", "expected_version", "pinned", "undo"}
+        if set(data) - allowed:
+            raise InvalidInput(f"unknown fields {sorted(set(data) - allowed)}")
+        if data.get("undo"):
+            return self.hub.components.undo(aid, component_id)
+        out = None
+        if "pinned" in data:
+            out = self.hub.components.pin(aid, component_id, self._bool(data["pinned"]))
+        if "state" in data:
+            out = self.hub.components.set_state(aid, component_id, data["state"],
+                                                expected_version=data.get("expected_version"), by="user")
+        return out or self.hub.components.get(aid, component_id)
+
+    def delete_component(self, account_id, component_id) -> dict:
+        return self.hub.components.delete(self._acct(account_id)["id"], component_id)
+
     def list_view_requests(self, account_id, status=None) -> dict:
         return {"requests": self.hub.requests.list(self._acct(account_id)["id"], status)}
 

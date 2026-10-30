@@ -477,10 +477,33 @@ canvas-hub mcp --allow-settings     # + scope changes
 
 ### Interactive answers, planner and external-site requests
 
-- **Interactive answers:** `show_*` tools return a `display` payload for one of a fixed set of components (deadline cards with *+ To-do* / *Open in Canvas*, a week timetable whose suggested study blocks can be added in one click, item cards, tables, bar charts, quick-reply buttons).
+- **Interactive answers:** `show_*` tools return a `display` payload for one of a fixed set of components, rendered by `static/components.js`:
+  - deadline cards with live countdowns, *+ To-do* and *Open in Canvas*;
+  - a week timetable whose suggested study blocks can be added in one click;
+  - item cards;
+  - tables that sort, filter, total, group and expand detail rows;
+  - bar, grouped, stacked and waterfall charts with an optional threshold line;
+  - progress gauges (bar or donut);
+  - an artifact block (line numbers, Copy, Download, expand);
+  - a collapsible JSON tree;
+  - a word-level diff (side by side or inline);
+  - quick-reply buttons.
+
+  Every component has a toolbar to copy as Markdown, CSV or JSON, download as a file, and go full screen. When copying is blocked, the text is shown selected instead. Item links open a side panel with the full item.
   - The UI renders them with DOM APIs; the model never supplies HTML.
   - The payload is stored with the tool result in `assistant_messages`; the model receives only a compact summary (`shown_to_user: true`).
   - The `ui` permission is always on in the app and is never offered over MCP.
+- **Saved components (score models, checklists):** `canvas_hub/services/components.py`; migration `0004_components.sql` adds tables `components` and `component_versions`.
+  - The assistant creates them with `show_score_model` / `show_checklist`, and changes them with `update_component`. Any agent, MCP included, reads them back with `get_component` and `list_components`.
+  - The user's state (included or skipped lines, entered values, ticks) is saved through `PATCH /api/accounts/{id}/components/{cid}`. A stale page gets a 409 `version_conflict`. Every change keeps the previous version (up to 50) for `{"undo": true}`.
+  - Pinned components appear on the **Trackers** page.
+  - Score rules live in `canvas_hub/scoring.py`, mirrored in `components.js` for live updates:
+    - statuses: earned, pending, lost, locked, excused;
+    - gating: none, all_or_nothing, min_threshold;
+    - hour-based lines score `max × min(1, hours ÷ full_at)`.
+    - Totals are booked, projected, ceiling, lost, margin to threshold and skip budget.
+  - `course_score_lines` drafts score lines from a course's assignments and submission states. Gating rules and thresholds still come from the user or the syllabus.
+  - A checklist with `sync_todos` links each row to a local to-do, in both directions. Nothing here is sent to Canvas.
 - **Planner:** `canvas_hub/services/planner.py` (migration `0003_planner_requests.sql`, table `class_times`).
   - It combines local weekly class times, Canvas calendar events, deadlines with submission state, and dated to-dos.
   - It can suggest 90-minute study blocks for unfinished deadlines: one per day, starting up to a week before the deadline, avoiding busy times. Suggestions are not stored until accepted as a to-do.

@@ -1,3 +1,4 @@
+import { makeComponents } from "./components.js";
 // Canvas Hub UI. Vanilla JS, no build step.
 // Safety: everything is rendered with textContent except item HTML fields,
 // which the server has already sanitized (and the CSP blocks scripts).
@@ -440,7 +441,7 @@ VIEWS.deadlines = async (main, _p, params) => {
     h("div", { class: "day-items" }, list.map((d) => {
       const doneLocal = d.done_locally;
       return h("div", { class: "deadline" + (doneLocal ? " done-local" : "") },
-        h("div", { class: "time" }, fmtTime(d.date.iso)),
+        h("div", { class: "time" }, fmtTime(d.date.iso), h("div", null, C.countdown(d.date.iso))),
         h("div", null, h("div", { class: "row" }, h("a", { class: "strong", href: `#/item/${d.item_id}` }, d.title),
           d.item_type !== "assignment" ? pill("muted plain", TYPE_LABEL[d.item_type]) : null, d.presence !== "observed" ? pill("bad", "no longer listed") : null),
           h("div", { class: "li-meta" }, h("span", null, d.course_title || ""), d.points_possible != null ? h("span", null, `${d.points_possible} pts`) : null,
@@ -622,7 +623,7 @@ function historyCard(hist) {
     evs.length ? h("div", { class: "timeline" }, evs.map((e) => h("div", { class: "tl-item" },
       h("div", { class: "row" }, pill(EVENT_CLASS[e.kind] || "muted", EVENT_LABEL[e.kind] || e.kind), e.field ? h("span", { class: "strong" }, e.field) : null,
         h("span", { class: "muted small" }, fmtDate(e.observed_at)), e.baseline ? pill("muted plain", "baseline") : null),
-      e.kind === "field_changed" ? h("div", { class: "diff" }, h("div", { class: "old" }, summarizeLong(e.old)), h("div", { class: "new" }, summarizeLong(e.new))) : null,
+      e.kind === "field_changed" ? C.diffPair(summarizeLong(e.old), summarizeLong(e.new)) : null,
       e.kind === "field_added" ? h("div", { class: "small muted" }, "This field was read for the first time; it is not an edit.") : null,
       e.kind === "first_observed" ? h("div", { class: "small muted" }, "First time Canvas Hub saw this item. That is not necessarily when it was published.") : null))) : h("p", { class: "muted" }, "No history yet."));
 }
@@ -993,7 +994,7 @@ function renderMessages(list, msgs, ctx = {}) {
       if (m.text) parts.push(renderMarkdown(m.text));
       const plain = (m.tool_calls || []).filter((c) => !(results[c.id] && results[c.id].display));
       if (plain.length) parts.push(h("div", { class: "steps" }, plain.map((c) => stepRow(c, results[c.id]))));
-      for (const c of m.tool_calls || []) if (results[c.id] && results[c.id].display) parts.push(componentView(results[c.id].display, ctx));
+      for (const c of m.tool_calls || []) if (results[c.id] && results[c.id].display) parts.push(componentView(results[c.id].display, ctx, c.id));
       if (m.stop === "refusal") parts.push(h("div", { class: "small muted" }, "The model declined to continue."));
       if (parts.length) out.push(h("div", { class: "msg assistant" }, parts));
     }
@@ -1364,37 +1365,11 @@ VIEWS.requests = async (main) => {
         r.status === "declined" && r.result_note ? h("div", { class: "small", style: "margin-top:4px;color:var(--bad)" }, r.result_note) : null))) : empty("No requests yet", "Requests you or the assistant leave appear here.")));
 };
 
-// ---------- assistant components ----------
-function componentView(d, ctx) {
-  if (!d) return null;
-  if (d.component === "deadlines") return h("div", { class: "cmp cmp-deadlines" }, d.deadlines.length ? d.deadlines.map((x) => h("div", { class: "cmp-card" },
-    h("div", { class: "spread" }, h("div", null, h("div", { class: "cmp-when" }, fmtDate(x.due_local, { weekday: true }), " · ", until(x.due_local)),
-      h("a", { class: "cmp-title", href: `#/item/${x.item_id}` }, x.title), h("div", { class: "tiny muted" }, x.course || "")),
-      submissionPill(x.submission ? { ...x.submission, state: x.submission.state } : null)),
-    h("div", { class: "row", style: "margin-top:8px" },
-      h("button", { class: "sm", onclick: async (ev) => { const r = await guard(() => api(A("/annotations"), { method: "POST", body: { kind: "task", item_id: x.item_id, title: x.title } })); if (r) { ev.target.textContent = "✓ Added"; ev.target.disabled = true; } } }, "+ To-do"),
-      x.source_url ? h("a", { class: "btn sm", href: x.source_url, target: "_blank", rel: "noopener noreferrer" }, "Open in Canvas") : null))) : h("div", { class: "muted small" }, "No deadlines in that range."));
-  if (d.component === "timetable") return h("div", { class: "cmp" }, renderTimetable(d.week));
-  if (d.component === "items") return h("div", { class: "cmp cmp-deadlines" }, d.items.map((x) => h("div", { class: "cmp-card" },
-    h("div", { class: "tiny muted" }, TYPE_LABEL[x.type] || x.type, x.course ? " · " + x.course : "", x.due ? " · due " + x.due : ""),
-    h("a", { class: "cmp-title", href: `#/item/${x.item_id}` }, x.title || "(untitled)"),
-    x.excerpt ? h("div", { class: "small", style: "margin-top:4px" }, x.excerpt) : null,
-    x.source_url ? h("div", { style: "margin-top:6px" }, h("a", { class: "small", href: x.source_url, target: "_blank", rel: "noopener noreferrer" }, "Open in Canvas")) : null)));
-  if (d.component === "table") return h("div", { class: "cmp" }, d.title ? h("div", { class: "cmp-head" }, d.title) : null,
-    h("div", { class: "table-wrap" }, h("table", { class: "t" }, h("thead", null, h("tr", null, d.columns.map((c) => h("th", null, c)))),
-      h("tbody", null, d.rows.map((r) => h("tr", null, r.map((c) => h("td", null, c))))))));
-  if (d.component === "chart") {
-    const max = d.max || Math.max(1, ...d.values);
-    return h("div", { class: "cmp" }, d.title ? h("div", { class: "cmp-head" }, d.title) : null,
-      d.labels.length ? h("div", { class: "bars" }, d.labels.map((l, i) => h("div", { class: "bar-row" }, h("div", { class: "bar-label" }, l),
-        h("div", { class: "bar-track" }, h("span", { style: `width:${Math.max(0, Math.min(100, d.values[i] / max * 100))}%` })),
-        h("div", { class: "bar-val num" }, `${d.values[i]}${d.unit || ""}`)))) : h("div", { class: "muted small" }, "No values to show."),
-      (d.notes || []).length ? h("div", { class: "tiny muted", style: "margin-top:6px" }, d.notes.join(" · ")) : null);
-  }
-  if (d.component === "choices") return h("div", { class: "cmp cmp-choices" }, h("div", { class: "small" }, d.question),
-    h("div", { class: "chips", style: "margin-top:6px" }, d.options.map((o) => h("button", { class: "chip", onclick: () => ctx.send && ctx.send(o) }, o))));
-  return null;
-}
+// ---------- assistant components (components.js) ----------
+const C = makeComponents({ h, mount, api, A, toast, guard, fmtDate, until, ago, pill, submissionPill, TYPE_LABEL, renderTimetable,
+  fieldValue, store, route: () => route() });
+const componentView = (d, ctx, key) => C.componentView(d, ctx, key);
+VIEWS.trackers = (main) => C.trackersView(main, pageHead, empty);
 
 // ---------- boot ----------
 async function boot() {

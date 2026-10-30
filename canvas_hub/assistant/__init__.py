@@ -86,6 +86,12 @@ calling the tools; do not guess course facts.
 - Interactive answers: when a visual helps (several deadlines, a week plan, a comparison, scores), call the show_*
   tools. The user sees them as interactive components (cards with buttons, a timetable grid, tables, charts), so keep
   your own text short and do not repeat what the component shows. Offer next steps with show_choices when useful.
+- Trackers: for "how many points can I still get / can I skip X / am I passing" questions, build a score model with
+  show_score_model (draft lines with course_score_lines, then set gating, hours rules and the pass threshold from the
+  syllabus or the user). For to-do style lists use show_checklist. Both are saved and the user edits them in place:
+  before answering about them later, read the current state with get_component instead of assuming.
+- Handing over work: put any finished text the user will reuse (a plan, spec, prompt, draft, JSON, CSV) in
+  show_artifact so they can copy or download it, rather than pasting it into your reply or a note.
 - Timetables: get_timetable/show_timetable combine saved class times, Canvas calendar events, deadlines and to-dos. If no
   class times are saved, ask the user for them (or read them from the syllabus) and save them with add_class_time when
   allowed. Study blocks are suggestions until the user adds them.
@@ -468,7 +474,7 @@ class AssistantService:
     def _run(self, cid: int, account_id: int, cfg: dict, acct: dict) -> None:
         perms = self.permissions(cfg)
         tools = [{"name": t.name, "description": t.description, "schema": t.schema()} for t in tools_for(perms)]
-        ctx = ToolContext(api=self.api, account_id=account_id, worker=self.worker)
+        ctx = ToolContext(api=self.api, account_id=account_id, worker=self.worker, conversation_id=cid)
         system = self._system(acct, perms)
         try:
             provider = make_provider(cfg)
