@@ -311,13 +311,17 @@ async function route() {
   let view = parts[0] || "overview";
   if (!S.accountId && !["setup", "settings"].includes(view)) view = "setup";
   setActiveNav(view === "course" ? "courses" : view === "item" ? "" : view);
-  const main = $("#main");
+  // Each page gets a fresh #main. A page still loading from before keeps the old, detached element, so when its
+  // data arrives late it draws there instead of over the page the user has moved on to.
+  const old = $("#main");
+  const main = old.cloneNode(false);
   main.classList.remove("fill");
+  old.replaceWith(main);
   mount(main, h("div", { class: "muted" }, "Loading…"));
   const fn = VIEWS[view] || VIEWS.overview;
   try { await fn(main, parts.slice(1), params); }
   catch (e) { mount(main, errorBox(e)); }
-  main.focus({ preventScroll: true });
+  if (main.isConnected) main.focus({ preventScroll: true });
 }
 window.addEventListener("hashchange", route);
 
