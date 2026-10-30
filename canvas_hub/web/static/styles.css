@@ -404,14 +404,18 @@ details.raw summary { cursor: pointer; color: var(--text-3); font-size: 12.5px; 
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
 
 /* ---- assistant ---- */
-.assistant-layout { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 20px; align-items: start; }
-.conv-list { display: flex; flex-direction: column; gap: 2px; position: sticky; top: 70px; }
-.conv-list .btn { justify-content: center; margin-bottom: 8px; }
+.main.fill { padding-bottom: 16px; }
+/* The chat fills the window (height set by app.js); only the message list scrolls. */
+.assistant-layout { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 20px; height: 75vh; min-height: 0; }
+.conv-list { display: flex; flex-direction: column; gap: 2px; min-height: 0; }
+.conv-list .btn { justify-content: center; margin-bottom: 8px; flex: none; }
+.conv-scroll { display: flex; flex-direction: column; gap: 2px; overflow-y: auto; min-height: 0; flex: 1; }
 .conv { display: flex; flex-direction: column; padding: 7px 10px; border-left: 2px solid transparent; color: var(--text-2); border-radius: 0 4px 4px 0; }
 .conv:hover { background: var(--surface-2); text-decoration: none; }
 .conv.on { border-left-color: var(--mark); background: var(--paper); color: var(--ink); }
 .conv-title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 13.5px; }
-.chat { background: var(--paper); border: 1px solid var(--rule); border-radius: var(--radius); padding: 18px 20px; display: flex; flex-direction: column; gap: 12px; min-height: 60vh; }
+.chat { background: var(--paper); border: 1px solid var(--rule); border-radius: var(--radius); padding: 0; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+.chat-scroll { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 18px 20px; display: flex; flex-direction: column; gap: 12px; }
 .chat-log { display: flex; flex-direction: column; gap: 14px; }
 .chat-log:empty { display: none; }
 .msg.user { align-self: flex-end; max-width: 78%; }
@@ -433,14 +437,27 @@ details.raw summary { cursor: pointer; color: var(--text-3); font-size: 12.5px; 
 .chat-empty { text-align: center; padding: 30px 0 10px; }
 .chat-empty .e-title { font-family: var(--serif); font-size: 22px; margin-bottom: 14px; }
 .chips.suggest { justify-content: center; }
-.composer { display: flex; gap: 10px; align-items: flex-end; border-top: 1px solid var(--rule); padding-top: 12px; margin-top: auto; }
+.composer { display: flex; gap: 10px; align-items: flex-end; border-top: 1px solid var(--rule); padding: 12px 20px 8px; flex: none; }
 .composer textarea { flex: 1; min-height: 46px; max-height: 200px; }
+.chat-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; padding: 0 20px 12px; flex: none; }
+.setup-select { font-size: 12px; padding: 3px 8px; max-width: 260px; }
+.tab-count { margin-left: 6px; font-size: 11px; color: var(--text-3); }
+.settings-layout { display: grid; grid-template-columns: 260px minmax(0, 1fr); gap: 20px; align-items: start; }
+.setup-list .card-head { gap: 8px; }
+.setup-row { display: flex; align-items: center; gap: 8px; padding: 8px 10px; margin: 0 -10px; border-left: 2px solid transparent; border-radius: 0 4px 4px 0; }
+.setup-row.on { border-left-color: var(--mark); background: var(--surface-2); }
+.setup-main { flex: 1; min-width: 0; display: flex; flex-direction: column; color: var(--ink); }
+.setup-main:hover { text-decoration: none; }
+.setup-main > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 @media (max-width: 860px) {
-  .assistant-layout { grid-template-columns: 1fr; }
-  .conv-list { position: static; flex-direction: row; overflow-x: auto; gap: 6px; }
+  .assistant-layout { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); gap: 10px; }
+  .conv-list, .conv-scroll { flex-direction: row; overflow-x: auto; overflow-y: hidden; gap: 6px; }
   .conv-list .btn { margin: 0; flex: none; }
+  .settings-layout { grid-template-columns: 1fr; }
   .conv { flex: none; max-width: 180px; border-left: 0; border: 1px solid var(--rule); border-radius: 4px; }
-  .chat { padding: 14px; min-height: 50vh; }
+  .chat-scroll { padding: 14px; }
+  .composer { padding: 10px 14px 6px; }
+  .chat-foot { padding: 0 14px 10px; }
   .msg.user { max-width: 92%; }
 }
 

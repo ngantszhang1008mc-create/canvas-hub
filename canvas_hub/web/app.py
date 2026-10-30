@@ -10,6 +10,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
+from starlette.concurrency import run_in_threadpool
 
 from ..boundary import HubAPI
 from ..util import HubError, InvalidInput
@@ -380,8 +381,18 @@ def create_app(api: HubAPI, *, token: str, port: int) -> FastAPI:
         return _assistant().update_config(await body(request))
 
     @app.post("/api/assistant/test")
-    def assistant_test():
-        return _assistant().test()
+    async def assistant_test(request: Request):
+        # The provider call can take minutes; keep it off the event loop.
+        pid = (await body(request)).get("profile_id")
+        return await run_in_threadpool(_assistant().test, pid)
+
+    @app.post("/api/assistant/profiles/{pid}/activate")
+    def assistant_activate(pid: str):
+        return _assistant().activate_profile(pid)
+
+    @app.delete("/api/assistant/profiles/{pid}")
+    def assistant_delete_profile(pid: str):
+        return _assistant().delete_profile(pid)
 
     @app.get("/api/accounts/{aid}/assistant/conversations")
     def assistant_conversations(aid: int):
@@ -393,7 +404,8 @@ def create_app(api: HubAPI, *, token: str, port: int) -> FastAPI:
         b = await body(request)
         api.get_account(aid)
         cid = b.get("conversation_id")
-        return _assistant().send(aid, b.get("text", ""), int(cid) if cid else None)
+        pid = b.get("profile_id")
+        return _assistant().send(aid, b.get("text", ""), int(cid) if cid else None, str(pid) if pid else None)
 
     @app.get("/api/accounts/{aid}/assistant/conversations/{cid}")
     def assistant_conversation(aid: int, cid: int, after: int = 0):

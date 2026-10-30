@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import secrets
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -49,6 +50,8 @@ PRESETS = [
     {"id": "codex", "label": "Codex (direct connection — reserved, not implemented yet)", "provider": "codex",
      "base_url": "", "model": "", "key_hint": "", "disabled": True},
 ]
+MAX_PROFILES = 20
+PROFILE_FIELDS = {"id", "name", "preset", "provider", "base_url", "model", "api_key", "effort", "thinking", "extra_params"}
 DEFAULT_CONFIG = {
     "preset": None, "provider": None, "base_url": "", "model": "", "api_key": "", "effort": "",
     "thinking": "", "extra_params": {},
@@ -92,6 +95,7 @@ class AssistantService:
         self.api = api
         self.worker = worker
         self._lock = threading.Lock()
+        self._cfg_lock = threading.RLock()     # serialises read-modify-write of the settings file
         self._threads: dict[int, threading.Thread] = {}
         self._cancel: set[int] = set()
         with self.hub.db.tx() as c:   # runs interrupted by an app restart
@@ -103,33 +107,73 @@ class AssistantService:
     def _path(self) -> Path:
         return self.hub.paths.runtime / CONFIG_FILE
 
-    def _load(self) -> dict:
-        cfg = json.loads(json.dumps(DEFAULT_CONFIG))
+    # Stored as {"profiles": [...], "active": id, "permissions": {...}}: several
+    # named provider setups, one of them active. Permissions are shared.
+    def _load_store(self) -> dict:
         try:
             data = json.loads(self._path.read_text())
-            cfg.update({k: v for k, v in data.items() if k in cfg})
-            cfg["permissions"] = {**DEFAULT_CONFIG["permissions"], **(data.get("permissions") or {})}
         except (OSError, ValueError):
-            pass
+            data = {}
+        perms = {**DEFAULT_CONFIG["permissions"], **(data.get("permissions") or {})}
+        if "profiles" in data:
+            profiles = [self._profile(x) for x in data["profiles"] if isinstance(x, dict) and x.get("id")]
+            active = data.get("active") if any(x["id"] == data.get("active") for x in profiles) else None
+        elif data.get("provider"):     # single setup saved by an earlier version
+            profiles = [self._profile({**data, "id": "p1"})]
+            active = "p1"
+        else:
+            profiles, active = [], None
+        if active is None and profiles:
+            active = profiles[0]["id"]
+        return {"profiles": profiles, "active": active, "permissions": perms}
+
+    @staticmethod
+    def _profile(data: dict) -> dict:
+        prof = {k: v for k, v in json.loads(json.dumps(DEFAULT_CONFIG)).items() if k in PROFILE_FIELDS}
+        prof.update({k: v for k, v in data.items() if k in PROFILE_FIELDS})
+        if not prof.get("name"):
+            preset = next((x for x in PRESETS if x["id"] == prof.get("preset")), None)
+            prof["name"] = preset["label"].split(" (")[0] if preset else "Setup"
+        return prof
+
+    def _load(self, profile_id: str | None = None) -> dict:
+        """The effective settings of one setup (the active one by default)."""
+        store = self._load_store()
+        pid = profile_id or store["active"]
+        prof = next((x for x in store["profiles"] if x["id"] == pid), None)
+        if profile_id and prof is None:
+            raise NotFound("that assistant setup no longer exists", code="assistant_profile_not_found")
+        cfg = json.loads(json.dumps(DEFAULT_CONFIG))
+        cfg.update(prof or {"id": None, "name": ""})
+        cfg["permissions"] = store["permissions"]
         return cfg
 
-    def _save(self, cfg: dict) -> None:
+    def _save_store(self, store: dict) -> None:
         tmp = self._path.with_suffix(".tmp")
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w") as fh:
-            json.dump(cfg, fh)
+            json.dump(store, fh)
         os.replace(tmp, self._path)
 
-    def public_config(self) -> dict:
-        cfg = self._load()
-        env_key = bool(os.environ.get("ANTHROPIC_API_KEY") if cfg["provider"] == "anthropic"
-                       else os.environ.get("OPENAI_API_KEY") if cfg["provider"] == "openai_compatible" else False)
+    def _public_profile(self, prof: dict) -> dict:
+        env_key = bool(os.environ.get("ANTHROPIC_API_KEY") if prof["provider"] == "anthropic"
+                       else os.environ.get("OPENAI_API_KEY") if prof["provider"] == "openai_compatible" else False)
         return {
-            "configured": self.configured(cfg),
-            "preset": cfg["preset"], "provider": cfg["provider"], "base_url": cfg["base_url"], "model": cfg["model"],
-            "effort": cfg["effort"], "thinking": cfg["thinking"], "extra_params": cfg["extra_params"],
-            "permissions": cfg["permissions"],
-            "api_key_saved": bool(cfg["api_key"]), "api_key_hint": _mask(cfg["api_key"]), "api_key_from_env": env_key,
+            "id": prof["id"], "name": prof["name"], "configured": self.configured(prof),
+            "preset": prof["preset"], "provider": prof["provider"], "base_url": prof["base_url"], "model": prof["model"],
+            "effort": prof["effort"], "thinking": prof["thinking"], "extra_params": prof["extra_params"],
+            "api_key_saved": bool(prof["api_key"]), "api_key_hint": _mask(prof["api_key"]), "api_key_from_env": env_key,
+        }
+
+    def public_config(self) -> dict:
+        store = self._load_store()
+        profiles = [self._public_profile(x) for x in store["profiles"]]
+        active = next((x for x in profiles if x["id"] == store["active"]), None)
+        base = active or self._public_profile({**self._profile(DEFAULT_CONFIG), "id": None, "name": ""})
+        return {
+            **base, "configured": bool(active and active["configured"]),
+            "active_profile": store["active"], "profiles": profiles,
+            "permissions": store["permissions"],
             "presets": PRESETS,
             "privacy": "Your questions, and the course data the assistant reads to answer them, are sent to the provider "
                        "you choose. Nothing is sent until you configure a provider and ask something.",
@@ -144,12 +188,56 @@ class AssistantService:
         return False
 
     def update_config(self, data: dict) -> dict:
-        cfg = self._load()
-        allowed = {"preset", "provider", "base_url", "model", "api_key", "effort", "thinking", "extra_params",
-                   "permissions", "clear_key"}
+        with self._cfg_lock:
+            return self._update_config(data)
+
+    def _update_config(self, data: dict) -> dict:
+        """Edit a setup: `profile_id` picks which ("new" adds one; default: the
+        active setup, created if there is none). Permissions are shared."""
+        store = self._load_store()
+        allowed = {"profile_id", "name", "activate", "preset", "provider", "base_url", "model", "api_key", "effort",
+                   "thinking", "extra_params", "permissions", "clear_key"}
         bad = set(data) - allowed
         if bad:
             raise InvalidInput(f"unknown settings {sorted(bad)}")
+        pid = data.get("profile_id") or store["active"]
+        profile_keys = set(data) - {"profile_id", "permissions", "activate"}
+        if pid == "new" or (pid is None and profile_keys):
+            if len(store["profiles"]) >= MAX_PROFILES:
+                raise InvalidInput(f"at most {MAX_PROFILES} assistant setups can be saved")
+            # Random, never-reused IDs: a stale chat or form that still names a
+            # deleted setup must fail, not reach a newer setup that took its place.
+            used = {x["id"] for x in store["profiles"]}
+            pid = "p" + secrets.token_hex(6)
+            while pid in used:
+                pid = "p" + secrets.token_hex(6)
+            store["profiles"].append({**self._profile({"id": pid}), "name": ""})
+        prof = next((x for x in store["profiles"] if x["id"] == pid), None)
+        if prof is None and profile_keys:
+            raise NotFound("that assistant setup no longer exists", code="assistant_profile_not_found")
+        if prof is not None:
+            self._apply(prof, data)
+            if not prof["name"]:
+                prof["name"] = self._profile({k: v for k, v in prof.items() if k != "name"})["name"]
+                names = [x["name"] for x in store["profiles"] if x is not prof]
+                if prof["name"] in names:
+                    prof["name"] += f" {sum(n.startswith(prof['name']) for n in names) + 1}"
+            if data.get("activate") or store["active"] is None:
+                store["active"] = pid
+        if "permissions" in data:
+            p = data["permissions"]
+            if not isinstance(p, dict) or not all(k in ("notes", "collect", "settings") and isinstance(v, bool) for k, v in p.items()):
+                raise InvalidInput("permissions must map notes/collect/settings to true or false")
+            store["permissions"].update(p)
+        self._save_store(store)
+        return {**self.public_config(), "saved_profile": pid}
+
+    def _apply(self, cfg: dict, data: dict) -> None:
+        if "name" in data:
+            name = str(data["name"] or "").strip()
+            if len(name) > 60:
+                raise InvalidInput("name too long (60 characters at most)")
+            cfg["name"] = name
         if "preset" in data:
             p = next((x for x in PRESETS if x["id"] == data["preset"]), None)
             if p is None or p.get("disabled"):
@@ -192,19 +280,38 @@ class AssistantService:
             if len(key) > 500 or any(ch.isspace() for ch in key):
                 raise InvalidInput("that does not look like an API key")
             cfg["api_key"] = key
-        if "permissions" in data:
-            p = data["permissions"]
-            if not isinstance(p, dict) or not all(k in ("notes", "collect", "settings") and isinstance(v, bool) for k, v in p.items()):
-                raise InvalidInput("permissions must map notes/collect/settings to true or false")
-            cfg["permissions"].update(p)
-        self._save(cfg)
+
+    def activate_profile(self, profile_id: str) -> dict:
+        with self._cfg_lock:
+            return self._activate_profile(profile_id)
+
+    def _activate_profile(self, profile_id: str) -> dict:
+        store = self._load_store()
+        if not any(x["id"] == profile_id for x in store["profiles"]):
+            raise NotFound("that assistant setup no longer exists", code="assistant_profile_not_found")
+        store["active"] = profile_id
+        self._save_store(store)
+        return self.public_config()
+
+    def delete_profile(self, profile_id: str) -> dict:
+        with self._cfg_lock:
+            return self._delete_profile(profile_id)
+
+    def _delete_profile(self, profile_id: str) -> dict:
+        store = self._load_store()
+        if not any(x["id"] == profile_id for x in store["profiles"]):
+            raise NotFound("that assistant setup no longer exists", code="assistant_profile_not_found")
+        store["profiles"] = [x for x in store["profiles"] if x["id"] != profile_id]
+        if store["active"] == profile_id:
+            store["active"] = store["profiles"][0]["id"] if store["profiles"] else None
+        self._save_store(store)
         return self.public_config()
 
     def permissions(self, cfg: dict) -> set[str]:
         return {"read", "ui"} | {k for k, v in cfg["permissions"].items() if v}
 
-    def test(self) -> dict:
-        cfg = self._load()
+    def test(self, profile_id: str | None = None) -> dict:
+        cfg = self._load(profile_id)
         if not self.configured(cfg):
             raise InvalidInput("Choose a provider (and model) first", code="assistant_not_configured")
         try:
@@ -291,8 +398,10 @@ class AssistantService:
             c.execute("UPDATE assistant_conversations SET run_state=?, run_error=?, updated_at=? WHERE id=?",
                       (state, error, now_iso(), cid))
 
-    def send(self, account_id: int, text: str, conversation_id: int | None = None) -> dict:
-        cfg = self._load()
+    def send(self, account_id: int, text: str, conversation_id: int | None = None, profile_id: str | None = None) -> dict:
+        # The chat names the setup it shows, so a message never goes to a
+        # different provider than the one the user picked.
+        cfg = self._load(profile_id)
         if not self.configured(cfg):
             raise InvalidInput("Set up the assistant first (provider, model and API key).", code="assistant_not_configured")
         text = (text or "").strip()

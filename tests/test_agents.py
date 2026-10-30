@@ -227,3 +227,118 @@ def test_thinking_off_and_other_providers():
     assert thinking_params("deepseek", "") == {}
     assert thinking_params("openai", "high") == {"reasoning_effort": "high"}
     assert thinking_params("openai", "off") == {}
+
+
+def test_assistant_setups(seeded):
+    hub, acct = seeded
+    from canvas_hub.util import NotFound
+    p = hub.paths.runtime / "assistant.json"
+    # a single setup saved by the previous version becomes the first saved setup
+    p.write_text(json.dumps({"preset": "deepseek", "provider": "openai_compatible", "base_url": "https://api.deepseek.com/v1",
+                             "model": "deepseek-flash", "api_key": "sk-ds-old-1111", "thinking": "max",
+                             "permissions": {"collect": False}}))
+    svc = AssistantService(hub, HubAPI(hub))
+    pub = svc.public_config()
+    assert [(x["id"], x["name"]) for x in pub["profiles"]] == [("p1", "DeepSeek")]
+    assert pub["active_profile"] == "p1" and pub["configured"] and pub["thinking"] == "max"
+    assert pub["permissions"]["collect"] is False and pub["profiles"][0]["api_key_hint"].endswith("1111")
+    # add a second setup; the first stays in use until switched
+    pub = svc.update_config({"profile_id": "new", "name": "Claude", "preset": "anthropic", "api_key": "sk-ant-new-2222"})
+    p2 = pub["saved_profile"]
+    assert p2 != "p1" and pub["active_profile"] == "p1" and len(pub["profiles"]) == 2
+    assert "sk-ds-old-1111" not in json.dumps(pub) and "sk-ant-new-2222" not in json.dumps(pub)
+    assert svc._load()["provider"] == "openai_compatible"
+    pub = svc.activate_profile(p2)
+    assert pub["active_profile"] == p2 and pub["provider"] == "anthropic" and svc._load()["api_key"] == "sk-ant-new-2222"
+    # editing one setup leaves the other untouched; permissions are shared
+    svc.update_config({"profile_id": "p1", "thinking": "high", "permissions": {"collect": True}})
+    assert svc._load("p1")["thinking"] == "high" and svc._load(p2)["thinking"] == ""
+    assert svc._load(p2)["permissions"]["collect"] is True
+    # deleting the setup in use falls back to the remaining one
+    pub = svc.delete_profile(p2)
+    assert pub["active_profile"] == "p1" and [x["id"] for x in pub["profiles"]] == ["p1"]
+    with pytest.raises(NotFound):
+        svc.test(p2)
+    with pytest.raises(NotFound):
+        svc.update_config({"profile_id": p2, "model": "x"})
+    # a deleted setup's ID is never handed to a new one, so stale references keep failing
+    svc.delete_profile("p1")
+    fresh = svc.update_config({"profile_id": "new", "preset": "deepseek"})["saved_profile"]
+    assert fresh not in ("p1", p2)
+    with pytest.raises(NotFound):
+        svc.send(acct["id"], "hello", profile_id="p1")
+    assert stat.S_IMODE(os.stat(p).st_mode) == 0o600
+
+
+def test_assistant_setup_changes_are_serialised(seeded):
+    import threading
+    hub, _ = seeded
+    svc = AssistantService(hub, HubAPI(hub))
+    threads = [threading.Thread(target=svc.update_config, args=({"profile_id": "new", "preset": "deepseek", "name": f"s{i}"},))
+               for i in range(12)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert sorted(x["name"] for x in svc.public_config()["profiles"]) == sorted(f"s{i}" for i in range(12))
+
+
+def test_connection_test_does_not_block_the_server(seeded):
+    import socket
+    import threading
+    import time
+
+    import httpx
+    import uvicorn
+
+    from canvas_hub.web.app import create_app
+    hub, _ = seeded
+    hang = socket.socket()
+    hang.bind(("127.0.0.1", 0))
+    hang.listen()              # accepts connections, never answers: a provider that hangs
+    api = HubAPI(hub)
+    api.assistant = AssistantService(hub, api)
+    api.assistant.update_config({"preset": "custom", "base_url": f"http://127.0.0.1:{hang.getsockname()[1]}/v1", "model": "m"})
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    tok = "t" * 40
+    srv = uvicorn.Server(uvicorn.Config(create_app(api, token=tok, port=port), host="127.0.0.1", port=port, log_level="warning"))
+    threading.Thread(target=srv.run, daemon=True).start()
+    base, hdr = f"http://127.0.0.1:{port}", {"Authorization": "Bearer " + tok, "X-Canvas-Hub": "1"}
+    try:
+        for _ in range(50):
+            if srv.started:
+                break
+            time.sleep(0.1)
+        threading.Thread(target=lambda: httpx.post(base + "/api/assistant/test", json={}, headers=hdr, timeout=30),
+                         daemon=True).start()
+        time.sleep(0.5)
+        t0 = time.monotonic()
+        r = httpx.get(base + "/api/assistant/config", headers=hdr, timeout=10)
+        assert r.status_code == 200 and time.monotonic() - t0 < 2
+    finally:
+        srv.should_exit = True
+        hang.close()
+
+
+def test_message_uses_the_setup_named_by_the_chat(seeded):
+    from canvas_hub.util import NotFound
+    hub, acct = seeded
+    first, second = FakeLLM([]), FakeLLM([])
+    try:
+        svc = AssistantService(hub, HubAPI(hub))
+        svc.update_config({"preset": "custom", "name": "A", "base_url": first.url + "/v1", "model": "a"})
+        b = svc.update_config({"profile_id": "new", "preset": "custom", "name": "B", "base_url": second.url + "/v1",
+                               "model": "b"})["saved_profile"]
+        a = svc.public_config()["active_profile"]
+        assert a != b
+        # the chat picked B but activation has not landed yet: the message still goes to B
+        r = svc.send(acct["id"], "hello", profile_id=b)
+        svc.wait(r["conversation_id"], 30)
+        assert second.requests and not first.requests
+        with pytest.raises(NotFound):          # never falls back to another provider
+            svc.send(acct["id"], "hello", profile_id="p-unknown")
+    finally:
+        first.stop()
+        second.stop()

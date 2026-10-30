@@ -311,6 +311,7 @@ async function route() {
   if (!S.accountId && !["setup", "settings"].includes(view)) view = "setup";
   setActiveNav(view === "course" ? "courses" : view === "item" ? "" : view);
   const main = $("#main");
+  main.classList.remove("fill");
   mount(main, h("div", { class: "muted" }, "Loading…"));
   const fn = VIEWS[view] || VIEWS.overview;
   try { await fn(main, parts.slice(1), params); }
@@ -905,7 +906,12 @@ VIEWS.settings = async (main) => {
       } }, "Delete data"))));
   }
   const acfg = await api("/api/assistant/config").catch(() => null);
-  if (acfg) cards.push(assistantSettingsCard(acfg));
+  if (acfg) {
+    const active = acfg.profiles.find((x) => x.id === acfg.active_profile);
+    cards.push(h("div", { class: "card" }, h("div", { class: "card-head" }, h("h2", null, "Assistant")),
+      h("p", { class: "muted small" }, acfg.profiles.length ? `${acfg.profiles.length} saved setup${acfg.profiles.length > 1 ? "s" : ""}; in use: ${active ? `${active.name} · ${active.model || "default model"}` : "none"}.` : "Not set up yet."),
+      h("a", { class: "btn sm", href: "#/assistant/settings" }, "Open assistant settings")));
+  }
   cards.push(mcpCard(info));
   cards.push(h("div", { class: "card" }, h("h2", null, "About"), h("div", { class: "kv" },
     [["Version", info.version], ["Data folder", info.data_home], ["Collector", info.collection_available ? "available in this process" : "not available"],
@@ -995,32 +1001,46 @@ function renderMessages(list, msgs, ctx = {}) {
 }
 
 let assistantPoll = null;
-VIEWS.assistant = async (main, parts) => {
+VIEWS.assistant = async (main, parts, params) => {
   clearInterval(assistantPoll);
   const cfg = await api("/api/assistant/config");
+  const onSettings = parts[0] === "settings";
+  const head = pageHead("Assistant", "Ask about your courses. Answers come from your Canvas Hub data; with permission it can check Canvas for updates and keep your notes.");
+  const tabs = h("div", { class: "tabs" },
+    h("button", { class: onSettings ? "" : "active", onclick: () => { location.hash = "#/assistant"; } }, "Chat"),
+    h("button", { class: onSettings ? "active" : "", onclick: () => { location.hash = "#/assistant/settings"; } },
+      "Settings", cfg.profiles.length ? h("span", { class: "tab-count" }, String(cfg.profiles.length)) : null));
+  if (onSettings) return assistantSettingsView(main, head, tabs, cfg, params);
+  if (!cfg.configured) {
+    mount(main, head, tabs, empty("Set up the assistant first", "Add a provider and your API key. You can save several setups and switch between them.",
+      h("a", { class: "btn primary", href: "#/assistant/settings" }, "Open settings")));
+    return;
+  }
   const convId = parts[0] ? Number(parts[0]) : null;
   const convs = (await api(A("/assistant/conversations"))).conversations;
-  const preset = cfg.presets.find((p) => p.id === cfg.preset);
-  const head = pageHead("Assistant", "Ask about your courses. Answers come from your Canvas Hub data; with permission it can check Canvas for updates and keep your notes.",
-    h("button", { class: "ghost", onclick: () => { const c = $("#assistant-settings"); c.hidden = !c.hidden; } }, "Settings"));
-  const settings = h("div", { id: "assistant-settings", hidden: cfg.configured ? true : null }, assistantSettingsCard(cfg));
-  if (!cfg.configured) { mount(main, head, settings); return; }
 
+  const convBox = h("div", { class: "conv-scroll" });
+  const showConvs = (list) => mount(convBox, list.map((c) => h("a", { class: "conv" + (c.id === current ? " on" : ""), href: `#/assistant/${c.id}` },
+    h("span", { class: "conv-title" }, c.title || "Untitled"), h("span", { class: "tiny muted" }, ago(c.updated_at)))));
+  const reloadConvs = async () => { const d = await api(A("/assistant/conversations")).catch(() => null); if (d) showConvs(d.conversations); };
   const sideList = h("div", { class: "conv-list" },
-    h("a", { class: "btn sm" + (convId ? "" : " primary"), href: "#/assistant" }, "+ New chat"),
-    convs.map((c) => h("a", { class: "conv" + (c.id === convId ? " on" : ""), href: `#/assistant/${c.id}` },
-      h("span", { class: "conv-title" }, c.title || "Untitled"), h("span", { class: "tiny muted" }, ago(c.updated_at)))));
+    h("a", { class: "btn sm" + (convId ? "" : " primary"), href: "#/assistant" }, "+ New chat"), convBox);
   const log = h("div", { class: "chat-log" });
   const status = h("div", { class: "chat-status" });
+  const scroller = h("div", { class: "chat-scroll" });
   const input = h("textarea", { rows: 2, placeholder: "Ask about deadlines, announcements, materials, grades…  (Enter to send, Shift+Enter for a new line)" });
   const sendBtn = h("button", { class: "primary" }, "Send");
   const stopBtn = h("button", { class: "danger", hidden: true }, "Stop");
-  let current = convId; let lastSeq = 0; let all = [];
+  let current = convId; let lastSeq = 0; let all = []; let stick = true; let wasBusy = false;
+  showConvs(convs);
 
   const refresh = async () => {
     if (!current) return;
     const d = await api(A(`/assistant/conversations/${current}`) + qs({ after: 0 })).catch(() => null);
     if (!d) return;
+    // Follow new output only while the reader is at the bottom of the chat.
+    const atBottom = stick || scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 60;
+    const prevTop = scroller.scrollTop;
     all = d.messages;
     renderMessages(log, all, { send });
     const st = d.conversation.run_state;
@@ -1028,19 +1048,24 @@ VIEWS.assistant = async (main, parts) => {
     sendBtn.disabled = busy; stopBtn.hidden = !busy;
     mount(status, busy ? h("span", { class: "working" }, st === "cancelling" ? "Stopping…" : "Working…")
       : st === "error" ? h("div", { class: "banner bad", style: "margin:0" }, h("div", { class: "b-body" }, h("div", { class: "b-title" }, "The assistant stopped"), h("div", { class: "small" }, d.conversation.run_error || ""))) : null);
-    if (all.length && all[all.length - 1].seq !== lastSeq) { lastSeq = all[all.length - 1].seq; input.scrollIntoView({ block: "end", behavior: "smooth" }); }
+    const seq = all.length ? all[all.length - 1].seq : 0;
+    scroller.scrollTop = atBottom && (seq !== lastSeq || stick || busy) ? scroller.scrollHeight : prevTop;
+    lastSeq = seq; stick = false;
+    if (wasBusy && !busy) reloadConvs();
+    wasBusy = busy;
     if (!busy) clearInterval(assistantPoll);
   };
   const send = async (text) => {
     const t = (text ?? input.value).trim();
     if (!t) return;
     sendBtn.disabled = true;
-    const r = await guard(() => api(A("/assistant/messages"), { method: "POST", body: { text: t, conversation_id: current } }));
+    const r = await guard(() => api(A("/assistant/messages"), { method: "POST", body: { text: t, conversation_id: current, profile_id: setupSel.value || cfg.active_profile } }));
     if (!r) { sendBtn.disabled = false; return; }
     input.value = "";
     const emptyEl = document.getElementById("chat-empty");
     if (emptyEl) emptyEl.remove();
-    if (current !== r.conversation_id) { current = r.conversation_id; history.replaceState(null, "", `#/assistant/${current}`); }
+    if (current !== r.conversation_id) { current = r.conversation_id; history.replaceState(null, "", `#/assistant/${current}`); reloadConvs(); }
+    stick = true;
     clearInterval(assistantPoll);
     assistantPoll = setInterval(refresh, 1000);
     refresh();
@@ -1051,40 +1076,91 @@ VIEWS.assistant = async (main, parts) => {
 
   const suggestions = h("div", { class: "chips suggest" }, ["What's due in the next 7 days?", "Plan my study time this week",
     "Anything new since yesterday?", "Check Canvas for new announcements", "Show my scores"].map((s) => h("button", { class: "chip", onclick: () => send(s) }, s)));
+  const usable = cfg.profiles.filter((x) => x.configured);
+  const setupSel = h("select", { class: "setup-select", title: "Assistant setup used for the next message" },
+    usable.map((x) => h("option", { value: x.id, selected: x.id === cfg.active_profile ? true : null }, `${x.name} · ${x.model || "default model"}`)));
+  setupSel.addEventListener("change", async () => {
+    const r = await guard(() => api(`/api/assistant/profiles/${encodeURIComponent(setupSel.value)}/activate`, { method: "POST" }));
+    if (r) toast(`Now using ${r.name}`);
+  });
   const perms = cfg.permissions;
-  const footer = h("div", { class: "tiny muted" }, `${preset ? preset.label : cfg.provider} · ${cfg.model || "default model"} · can ${["read your data", perms.notes ? "edit your notes" : null, perms.collect ? "check Canvas" : null, perms.settings ? "change scope" : null].filter(Boolean).join(", ")}. Questions and the data it reads are sent to this provider.`);
-  const chat = h("div", { class: "chat" }, log, status,
-    current ? null : h("div", { class: "chat-empty", id: "chat-empty" }, h("div", { class: "e-title" }, "What would you like to know?"), suggestions),
+  const footer = h("div", { class: "chat-foot tiny muted" }, usable.length > 1 ? setupSel : h("span", null, `${cfg.name} · ${cfg.model || "default model"}`),
+    h("span", null, `Can ${["read your data", perms.notes ? "edit your notes" : null, perms.collect ? "check Canvas" : null, perms.settings ? "change scope" : null].filter(Boolean).join(", ")}. Questions and the data it reads go to this provider.`));
+  scroller.append(log, status);
+  if (!current) scroller.append(h("div", { class: "chat-empty", id: "chat-empty" }, h("div", { class: "e-title" }, "What would you like to know?"), suggestions));
+  const chat = h("div", { class: "chat" }, scroller,
     h("div", { class: "composer" }, input, h("div", { class: "row" }, stopBtn, sendBtn)), footer);
-  mount(main, head, settings, h("div", { class: "assistant-layout" }, sideList, chat));
+  const layout = h("div", { class: "assistant-layout" }, sideList, chat);
+  main.classList.add("fill");
+  mount(main, head, tabs, layout);
+  // The chat gets the rest of the window; only its message list scrolls.
+  const fit = () => {
+    if (!layout.isConnected) { window.removeEventListener("resize", fit); return; }
+    const top = layout.getBoundingClientRect().top + window.scrollY;
+    layout.style.height = `${Math.max(380, window.innerHeight - top - 16)}px`;
+  };
+  fit();
+  window.addEventListener("resize", fit);
   if (current) { await refresh(); assistantPoll = setInterval(refresh, 1000); }
-  input.focus();
+  input.focus({ preventScroll: true });
 };
 
-function assistantSettingsCard(cfg) {
-  const presetSel = h("select", null, h("option", { value: "" }, "Choose a provider…"),
-    cfg.presets.map((p) => h("option", { value: p.id, disabled: p.disabled ? true : null, selected: p.id === cfg.preset ? true : null }, p.label)));
-  const base = h("input", { type: "url", value: cfg.base_url || "", placeholder: "https://…/v1" });
-  const model = h("input", { type: "text", value: cfg.model || "", placeholder: "model name" });
-  const key = h("input", { type: "password", autocomplete: "off", placeholder: cfg.api_key_saved ? `saved (${cfg.api_key_hint}) — type to replace` : "paste your API key" });
-  const effort = h("select", null, ["", "low", "medium", "high", "xhigh", "max"].map((e) => h("option", { value: e, selected: e === (cfg.effort || "") ? true : null }, e || "model default")));
+function assistantSettingsView(main, head, tabs, cfg, params) {
+  const sel = params.get("p") || cfg.active_profile || "new";
+  const prof = cfg.profiles.find((x) => x.id === sel) || null;
+  const list = h("div", { class: "card setup-list" },
+    h("div", { class: "card-head" }, h("h2", null, "Saved setups"), h("a", { class: "btn sm", href: "#/assistant/settings?p=new" }, "+ Add setup")),
+    cfg.profiles.length ? cfg.profiles.map((x) => h("div", { class: "setup-row" + (x.id === sel ? " on" : "") },
+      h("a", { class: "setup-main", href: `#/assistant/settings?p=${encodeURIComponent(x.id)}` },
+        h("span", { class: "strong" }, x.name), h("span", { class: "tiny muted" }, [x.model || "default model", x.thinking ? `thinking ${x.thinking}` : null, x.api_key_saved ? "key saved" : null].filter(Boolean).join(" · "))),
+      x.id === cfg.active_profile ? pill("ok", "In use") : h("button", { class: "sm ghost", disabled: x.configured ? null : true, onclick: async () => {
+        if (await guard(() => api(`/api/assistant/profiles/${encodeURIComponent(x.id)}/activate`, { method: "POST" }))) { toast(`Now using ${x.name}`); route(); }
+      } }, "Use"))) : h("p", { class: "muted small" }, "No setups yet. Add one with your provider and API key."));
+  mount(main, head, tabs, h("div", { class: "settings-layout" }, list,
+    h("div", { class: "stack" }, assistantSettingsCard(cfg, prof), assistantPermissionsCard(cfg))));
+}
+
+function assistantPermissionsCard(cfg) {
   const pNotes = h("input", { type: "checkbox", checked: cfg.permissions.notes ? true : null });
   const pCollect = h("input", { type: "checkbox", checked: cfg.permissions.collect ? true : null });
   const pSettings = h("input", { type: "checkbox", checked: cfg.permissions.settings ? true : null });
+  return h("div", { class: "card" },
+    h("div", { class: "card-head" }, h("h2", null, "The assistant may"), h("span", { class: "sub" }, "applies to every setup")),
+    h("div", { class: "perm-list" },
+      h("label", { class: "check" }, h("input", { type: "checkbox", checked: true, disabled: true }), "Read your stored Canvas data (always)"),
+      h("label", { class: "check" }, pNotes, "Create and edit your local notes and to-dos (never sent to Canvas)"),
+      h("label", { class: "check" }, pCollect, "Check Canvas for updates using the app's signed-in browser (read-only; same safety rules as Quick check)"),
+      h("label", { class: "check" }, pSettings, "Change which courses and sections are collected")),
+    h("div", { class: "row", style: "margin-top:14px" }, h("button", { class: "primary", onclick: async () => {
+      const r = await guard(() => api("/api/assistant/config", { method: "PUT", body: { permissions: { notes: pNotes.checked, collect: pCollect.checked, settings: pSettings.checked } } }));
+      if (r) toast("Permissions saved");
+    } }, "Save permissions")));
+}
+
+function assistantSettingsCard(cfg, prof) {
+  const cur = prof || { id: "new", name: "", preset: null, provider: null, base_url: "", model: "", effort: "", thinking: "", extra_params: {} };
+  const isNew = !prof;
+  const name = h("input", { type: "text", value: cur.name || "", placeholder: "e.g. DeepSeek max, Claude for long questions", maxlength: 60 });
+  const presetSel = h("select", null, h("option", { value: "" }, "Choose a provider…"),
+    cfg.presets.map((p) => h("option", { value: p.id, disabled: p.disabled ? true : null, selected: p.id === cur.preset ? true : null }, p.label)));
+  const base = h("input", { type: "url", value: cur.base_url || "", placeholder: "https://…/v1" });
+  const model = h("input", { type: "text", value: cur.model || "", placeholder: "model name" });
+  const key = h("input", { type: "password", autocomplete: "off", placeholder: cur.api_key_saved ? `saved (${cur.api_key_hint}) — type to replace` : "paste your API key" });
+  const effort = h("select", null, ["", "low", "medium", "high", "xhigh", "max"].map((e) => h("option", { value: e, selected: e === (cur.effort || "") ? true : null }, e || "model default")));
   const baseField = h("label", { class: "field" }, h("span", null, "Base URL"), base);
   const effortField = h("label", { class: "field" }, h("span", null, "Effort (Claude)"), effort);
   const thinking = h("select");
   const thinkingField = h("label", { class: "field" }, h("span", null, "Thinking"), thinking);
-  const extra = h("textarea", { rows: 2, class: "mono", placeholder: '{"reasoning_effort": "max"}' });
-  extra.value = cfg.extra_params && Object.keys(cfg.extra_params).length ? JSON.stringify(cfg.extra_params) : "";
+  const extra = h("textarea", { rows: 2, class: "mono", placeholder: "optional, e.g. {\"temperature\": 0.3}" });
+  extra.value = cur.extra_params && Object.keys(cur.extra_params).length ? JSON.stringify(cur.extra_params) : "";
   const extraField = h("label", { class: "field", style: "grid-column:1/-1" },
     h("span", null, "Extra request settings (JSON, optional — sent as-is to the provider)"), extra);
   const fillThinking = (presetId) => {
     const opts = presetId === "deepseek"
       ? [["", "provider default"], ["off", "off"], ["low", "low"], ["high", "high"], ["max", "max"]]
       : [["", "provider default"], ["low", "low"], ["medium", "medium"], ["high", "high"]];
-    const cur = thinking.value || cfg.thinking || "";
-    mount(thinking, opts.map(([v, l]) => h("option", { value: v, selected: v === cur ? true : null }, l)));
+    const v = thinking.value || cur.thinking || "";
+    mount(thinking, opts.map(([o, l]) => h("option", { value: o, selected: o === v ? true : null }, l)));
   };
   const hint = h("div", { class: "tiny muted" });
   const sync = () => {
@@ -1095,43 +1171,68 @@ function assistantSettingsCard(cfg) {
     extraField.hidden = !p || isAnthropic;
     fillThinking(p ? p.id : "");
     baseField.querySelector("span").textContent = isAnthropic ? "Base URL (leave empty for the Claude API)" : "Base URL";
-    if (p && presetSel.value !== cfg.preset) { base.value = p.base_url; if (p.model) model.value = p.model; else if (cfg.provider !== p.provider) model.value = ""; }
+    if (p && presetSel.value !== cur.preset) { base.value = p.base_url; if (p.model) model.value = p.model; else if (cur.provider !== p.provider) model.value = ""; }
     mount(hint, p ? (isAnthropic ? "Without a pasted key, ANTHROPIC_API_KEY or an `ant auth login` profile is used." : p.id === "ollama" ? "Runs on your own computer; no key and nothing leaves it." : p.id === "deepseek" ? "Thinking sends thinking:{type} and reasoning_effort, as in DeepSeek's docs; Save & test shows whether your chosen level is accepted." : `Key format: ${p.key_hint || "provider API key"}. For OpenAI-compatible providers OPENAI_API_KEY is used if no key is saved.`) : "");
   };
   presetSel.addEventListener("change", sync); sync();
   const result = h("div", { class: "small" });
   const save = async () => {
+    if (!presetSel.value) { toast("Choose a provider first", true); return null; }
     let extraParams = {};
     if (extra.value.trim()) {
       try { extraParams = JSON.parse(extra.value); } catch { toast("Extra request settings must be valid JSON", true); return null; }
     }
-    const body = { base_url: base.value, model: model.value, effort: effort.value, thinking: thinking.value, extra_params: extraParams,
-      permissions: { notes: pNotes.checked, collect: pCollect.checked, settings: pSettings.checked } };
-    if (presetSel.value) body.preset = presetSel.value;
+    const body = { profile_id: cur.id, name: name.value, preset: presetSel.value, base_url: base.value, model: model.value,
+      effort: effort.value, thinking: thinking.value, extra_params: extraParams };
     if (key.value) body.api_key = key.value;
     const r = await guard(() => api("/api/assistant/config", { method: "PUT", body }));
-    if (r) { key.value = ""; toast("Assistant settings saved"); return r; }
+    if (r) { key.value = ""; cur.id = r.saved_profile; toast("Setup saved"); return r; }   // later saves edit this setup
     return null;
   };
-  return h("div", { class: "card", style: "margin-bottom:16px" },
-    h("div", { class: "card-head" }, h("h2", null, "Assistant settings"), h("span", { class: "sub" }, "your own API key · stored only on this computer")),
-    h("div", { class: "banner info" }, h("div", { class: "b-body small" }, cfg.privacy, " The key is kept in a private file outside your course data, so it is never included in backups or exports.")),
-    h("div", { class: "grid cols-2" }, h("label", { class: "field" }, h("span", null, "Provider"), presetSel), h("label", { class: "field" }, h("span", null, "Model"), model),
+  // One save or test at a time: overlapping clicks would each send profile_id "new" and create duplicates.
+  const saveBtn = h("button", { class: "primary" }, "Save");
+  const testBtn = h("button", null, "Save & test");
+  let busy = false;
+  const exclusive = (fn) => async () => {
+    if (busy) return;
+    busy = true; saveBtn.disabled = testBtn.disabled = true;
+    try { await fn(); } finally { busy = false; saveBtn.disabled = testBtn.disabled = false; }
+  };
+  saveBtn.addEventListener("click", exclusive(async () => { const r = await save(); if (r && card.isConnected) goTo(r.saved_profile); }));
+  testBtn.addEventListener("click", exclusive(async () => {
+    const r = await save(); if (!r) return;
+    mount(result, h("span", { class: "muted" }, "Testing…"));
+    const t = await guard(() => api("/api/assistant/test", { method: "POST", body: { profile_id: r.saved_profile } }));
+    if (t) mount(result, t.ok ? pill("ok", `Connected · ${t.model || ""}`) : h("span", { style: "color:var(--bad)" }, t.message));
+    // Show the new setup's own page, unless the user has moved on meanwhile.
+    if (isNew) setTimeout(() => { if (card.isConnected) goTo(r.saved_profile); }, t && t.ok ? 1200 : 4000);
+  }));
+  const goTo = (pid) => { const h2 = `#/assistant/settings?p=${encodeURIComponent(pid)}`; if (location.hash === h2) route(); else location.hash = h2; };
+  const card = h("div", { class: "card" },
+    h("div", { class: "card-head" }, h("h2", null, isNew ? "New setup" : cur.name),
+      !isNew && cur.id === cfg.active_profile ? pill("ok", "In use") : h("span", { class: "sub" }, "your own API key · stored only on this computer")),
+    h("div", { class: "banner info" }, h("div", { class: "b-body small" }, cfg.privacy, " Keys are kept in a private file outside your course data, so they are never included in backups or exports.")),
+    h("div", { class: "grid cols-2" }, h("label", { class: "field", style: "grid-column:1/-1" }, h("span", null, "Name"), name),
+      h("label", { class: "field" }, h("span", null, "Provider"), presetSel), h("label", { class: "field" }, h("span", null, "Model"), model),
       baseField, h("label", { class: "field" }, h("span", null, "API key"), key), effortField, thinkingField, extraField),
     hint,
-    h("div", { style: "margin-top:14px" }, h("div", { class: "small strong", style: "margin-bottom:6px" }, "The assistant may"),
-      h("div", { class: "perm-list" },
-        h("label", { class: "check" }, h("input", { type: "checkbox", checked: true, disabled: true }), "Read your stored Canvas data (always)"),
-        h("label", { class: "check" }, pNotes, "Create and edit your local notes and to-dos (never sent to Canvas)"),
-        h("label", { class: "check" }, pCollect, "Check Canvas for updates using the app's signed-in browser (read-only; same safety rules as Quick check)"),
-        h("label", { class: "check" }, pSettings, "Change which courses and sections are collected"))),
     h("div", { class: "row", style: "margin-top:14px" },
-      h("button", { class: "primary", onclick: async () => { if (await save()) route(); } }, "Save"),
-      h("button", { onclick: async () => { if (!(await save())) return; mount(result, h("span", { class: "muted" }, "Testing…"));
-        const t = await guard(() => api("/api/assistant/test", { method: "POST" }));
-        if (t) mount(result, t.ok ? pill("ok", `Connected · ${t.model || ""}`) : h("span", { style: "color:var(--bad)" }, t.message)); } }, "Save & test"),
-      cfg.api_key_saved ? h("button", { class: "ghost", onclick: async () => { await guard(() => api("/api/assistant/config", { method: "PUT", body: { clear_key: true } })); toast("Saved key removed"); route(); } }, "Remove saved key") : null,
+      saveBtn, testBtn,
+      !isNew && cur.id !== cfg.active_profile ? h("button", { class: "ghost", disabled: cur.configured ? null : true, onclick: async () => {
+        if (await guard(() => api(`/api/assistant/profiles/${encodeURIComponent(cur.id)}/activate`, { method: "POST" }))) { toast(`Now using ${cur.name}`); route(); }
+      } }, "Use this setup") : null,
+      !isNew && cur.api_key_saved ? h("button", { class: "ghost", onclick: async () => {
+        if (await guard(() => api("/api/assistant/config", { method: "PUT", body: { profile_id: cur.id, clear_key: true } }))) { toast("Saved key removed"); route(); }
+      } }, "Remove saved key") : null,
+      !isNew ? h("button", { class: "danger", onclick: async () => {
+        if (!confirm(`Delete the setup “${cur.name}” and its saved key?`)) return;
+        if (await guard(() => api(`/api/assistant/profiles/${encodeURIComponent(cur.id)}`, { method: "DELETE" }))) {
+          toast("Setup deleted");
+          if (location.hash === "#/assistant/settings") route(); else location.hash = "#/assistant/settings";   // same hash fires no hashchange
+        }
+      } }, "Delete setup") : null,
       result));
+  return card;
 }
 
 function mcpCard(info) {
