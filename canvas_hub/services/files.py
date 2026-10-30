@@ -16,6 +16,14 @@ from ..util import InvalidInput, NotFound, now_iso
 
 MAX_BYTES = 25 * 1024 * 1024
 _BAD = re.compile(r"[^\w.\- ()]+")
+_TEXT_MIMES = {"application/json", "application/xml", "application/javascript", "application/x-javascript",
+               "application/yaml", "application/x-yaml", "application/toml", "application/sql",
+               "application/ndjson", "application/x-ndjson", "application/jsonl"}
+
+
+def _text_mime(mime: str) -> bool:
+    mime = mime.split(";", 1)[0].strip().lower()
+    return mime.startswith("text/") or mime in _TEXT_MIMES or mime.endswith(("+json", "+xml"))
 
 
 def safe_filename(name: str) -> str:
@@ -39,7 +47,18 @@ class SavedFileService:
             raise InvalidInput("the file is empty")
         if len(data) > MAX_BYTES:
             raise InvalidInput("files are limited to 25 MB")
-        mime = mime or mimetypes.guess_type(name)[0] or ("text/plain" if is_text else "application/octet-stream")
+        guessed_mime = mimetypes.guess_type(name)[0]
+        mime = mime or guessed_mime or ("text/plain" if is_text else "application/octet-stream")
+        # Uploads arrive as bytes even for text files. For byte uploads, require
+        # both a text file type and valid UTF-8; a binary format can contain
+        # UTF-8-decodable bytes too.
+        is_text = (is_text or _text_mime(mime) or _text_mime(guessed_mime or "")
+                   or name.lower().endswith((".jsonl", ".ndjson")))
+        if is_text:
+            try:
+                data.decode("utf-8")
+            except UnicodeDecodeError:
+                is_text = False
         with self.db.tx() as c:
             fid = c.execute(
                 """INSERT INTO saved_files(account_id, title, filename, mime, size, sha256, content, is_text, course_canvas_id,

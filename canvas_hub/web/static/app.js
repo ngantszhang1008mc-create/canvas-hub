@@ -1260,6 +1260,7 @@ VIEWS.assistant = async (main, parts, params) => {
   let current = convId; let lastSeq = 0; let all = []; let stick = true; let wasBusy = false;
   showConvs(convs);
 
+  const chatCtx = { send: (t) => send(t) };   // one per chat view: components can tell a new view from a re-render
   const refresh = async () => {
     if (!current) return;
     const d = await api(A(`/assistant/conversations/${current}`) + qs({ after: 0 })).catch(() => null);
@@ -1268,7 +1269,7 @@ VIEWS.assistant = async (main, parts, params) => {
     const atBottom = stick || scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 60;
     const prevTop = scroller.scrollTop;
     all = d.messages;
-    renderMessages(log, all, { send });
+    renderMessages(log, all, chatCtx);
     const st = d.conversation.run_state;
     const busy = st === "running" || st === "cancelling";
     sendBtn.disabled = busy; stopBtn.hidden = !busy;
@@ -1540,7 +1541,12 @@ VIEWS.planner = async (main, _p, params) => {
     h("label", { class: "btn sm", title: "Weekly repeating events become class times" }, "Import timetable .ics", h("input", { type: "file", accept: ".ics,text/calendar", onchange: async (e) => {
       const f = e.target.files[0]; if (!f) return;
       const r = await guard(() => api(A("/planner/import-ics"), { method: "POST", raw: true, body: f, contentType: "text/calendar" }));
-      if (r) { toast(`Found ${r.found} weekly class time(s), added ${r.added}`); route(); } } })));
+      if (r) {
+        const skipped = r.skipped || [];
+        const summary = `Found ${r.found} weekly class time(s), added ${r.added}`;
+        toast(summary + (skipped.length ? `. Skipped ${skipped.length} event(s): ` + skipped.slice(0, 3).map((s) => `${s.title}: ${s.reason}`).join("; ") : ""), skipped.length > 0);
+        route();
+      } } })));
   const accessible = courses.courses.filter((c) => c.access === "accessible");
   const f = { title: h("input", { type: "text", placeholder: "e.g. MATH1023 Lecture" }),
     course: h("select", null, h("option", { value: "" }, "Course (optional)"), accessible.map((c) => h("option", { value: c.course_id }, c.title))),

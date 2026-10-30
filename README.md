@@ -93,8 +93,8 @@ In another terminal, run `uv run canvas-hub --home /tmp/canvas-hub-demo serve`, 
   - **Automatic refresh** (Collection) runs a quick check every 30 minutes to 4 hours while the app runs and you're signed in. It is off by default and never opens a sign-in window.
   - The 🔔 bell lists new announcements and assignments, changed due dates, newly posted grades and items that disappeared. Desktop notifications are optional.
   - Exam dates found in course pages appear under **Deadlines** for you to confirm.
-  - A timetable `.ics` can be imported into the Planner.
-- **Files:** finished work the assistant writes can be saved under **Notes & tasks → Files**, downloaded, or attached to a prepared submission.
+  - A timetable `.ics` can be imported into the Planner. Each saved class time repeats every week; fortnightly events are skipped and reported.
+- **Files:** finished work the assistant writes can be saved under **Notes & tasks → Files**, downloaded, or attached to a prepared submission. Uploaded UTF-8 text files (such as Markdown, CSV and JSON) can also be read back by the assistant.
 - **Trackers page:** the assistant can build a **score model** for a course, with each assessed line, its points, gating rules (all-or-nothing, minimum hours) and the pass mark. Untick lines you plan to skip and the total, ceiling and margin update immediately. It can also build a **checklist** that can be linked to your to-dos. Both are saved, with undo, and the assistant can read back what you ticked.
 - **Grade projections and hours:** the assistant can build a **grade projector** for a course. You enter what-if scores and see your letter, and the score you need on the rest for each letter. It can also build an **hours tracker** for service hours, where nothing counts until the minimum and the line is lost if the deadline passes below it. Both show warnings when a plan is at risk.
 - **To-dos:** to do / in progress / blocked / done, with a **Board** view you can drag cards across. Click any title or body to edit it, and tick `- [ ]` lines in place.
