@@ -76,6 +76,9 @@ In another terminal, run `uv run canvas-hub --home /tmp/canvas-hub-demo serve`, 
   ```
 
   The exact command for your installation is shown under **Data & settings → Connect other agents**.
+- **Interactive answers:** the assistant can show deadline cards with buttons, a week timetable, tables, charts and quick-reply buttons instead of plain text.
+- **Planner page:** add your class times, see your week with deadlines and to-dos, get suggested study blocks, and export to Apple Calendar (`.ics`). It's a local plan only.
+- **Agent requests page:** for sites outside Canvas (like a separate course website), leave a request that a connected agent with its own browser access can fulfil. Run the MCP server with `--allow-fulfil` for that agent. The text it sends back is stored, searchable, and labelled as agent-provided.
 - **Direct Codex connection:** reserved for Codex to build (see `CODEX_HANDOFF.md` §6). Codex can already use the MCP server.
 
 ## Where your data lives

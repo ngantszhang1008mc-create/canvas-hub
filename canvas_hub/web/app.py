@@ -330,6 +330,40 @@ def create_app(api: HubAPI, *, token: str, port: int) -> FastAPI:
         b = await body(request)
         return api.delete_account_data(aid, b.get("confirm", ""))
 
+    # ---- planner & external-site requests --------------------------------------------
+    @app.get("/api/accounts/{aid}/planner/week")
+    def planner_week(aid: int, week_of: str | None = None, suggest: bool = False, hours: float = 3.0):
+        return api.planner_week(aid, week_of=week_of, suggest_study=suggest, study_hours=hours)
+
+    @app.get("/api/accounts/{aid}/planner/classes")
+    def planner_classes(aid: int):
+        return api.list_class_times(aid)
+
+    @app.post("/api/accounts/{aid}/planner/classes")
+    async def planner_add_class(aid: int, request: Request):
+        return api.add_class_time(aid, await body(request))
+
+    @app.delete("/api/accounts/{aid}/planner/classes/{cid}")
+    def planner_delete_class(aid: int, cid: int):
+        return api.delete_class_time(aid, cid)
+
+    @app.get("/api/accounts/{aid}/planner.ics")
+    def planner_ics(aid: int, weeks: int = 8):
+        return Response(api.planner_ics(aid, weeks), media_type="text/calendar; charset=utf-8",
+                        headers={"Content-Disposition": 'attachment; filename="canvas-hub.ics"'})
+
+    @app.get("/api/accounts/{aid}/requests")
+    def view_requests(aid: int, status: str | None = None):
+        return api.list_view_requests(aid, status)
+
+    @app.post("/api/accounts/{aid}/requests")
+    async def create_view_request(aid: int, request: Request):
+        return api.create_view_request(aid, await body(request))
+
+    @app.post("/api/accounts/{aid}/requests/{rid}/cancel")
+    def cancel_view_request(aid: int, rid: int):
+        return api.cancel_view_request(aid, rid)
+
     # ---- assistant (bring-your-own API key) ---------------------------------------
     def _assistant():
         a = getattr(api, "assistant", None)

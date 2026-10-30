@@ -562,6 +562,20 @@ VIEWS.item = async (main, parts) => {
   const cards = [];
   for (const f of bodyF) cards.push(h("div", { class: "card" }, h("div", { class: "card-head" }, h("h2", null, f.field === "message" ? "Message" : f.field === "body" ? "Content" : f.field[0].toUpperCase() + f.field.slice(1)),
     h("span", { class: "sub" }, "read " + ago(f.last_observed_at))), fieldValue(f.field, f, it)));
+  if (it.item_type === "external_link") {
+    const content = (it.fields.find((f) => f.field === "content") || {}).value;
+    const by = (it.fields.find((f) => f.field === "provided_by") || {}).value;
+    const readAt = (it.fields.find((f) => f.field === "read_at") || {}).value;
+    if (content) cards.unshift(h("div", { class: "card" }, h("div", { class: "card-head" }, h("h2", null, "Content read by a connected agent"),
+      h("span", { class: "sub" }, `${by || "agent"} · ${readAt ? fmtDate(readAt) : ""}`)),
+      h("div", { class: "banner warn", style: "margin-bottom:10px" }, h("div", { class: "b-body small" }, "Provided by a connected agent, not reported by Canvas. Check the original site for anything important.")),
+      h("pre", { class: "text" }, content)));
+    const url = (it.fields.find((f) => f.field === "url") || {}).value || it.source_url;
+    if (url) cards.unshift(h("div", { class: "card" }, h("div", { class: "spread" },
+      h("div", { class: "small" }, "Canvas Hub doesn't open external sites itself. A connected agent with its own access can read this page for you."),
+      h("button", { onclick: async () => { const r = await guard(() => api(A("/requests"), { method: "POST", body: { url, title: it.title || undefined, course_id: it.course_canvas_id || undefined } }));
+        if (r) { toast("Request left for connected agents"); location.hash = "#/requests"; } } }, content ? "Ask an agent to re-read" : "Ask a connected agent to read this"))));
+  }
   if (it.submission_item_id) cards.push(h("div", { class: "card" }, h("a", { href: `#/item/${it.submission_item_id}` }, "View your submission and feedback →")));
   if (it.resources.length) cards.push(h("div", { class: "card" }, h("h2", null, "Document"), it.resources.map((r) => resourceBlock(r))));
   cards.push(h("div", { class: "card" }, h("div", { class: "card-head" }, h("h2", null, "Details"), h("span", { class: "sub" }, "value · last read")),
@@ -910,6 +924,9 @@ const STEP_LABEL = {
   update_note: () => "Updated a local note", delete_note: () => "Deleted a local note",
   start_collection: (a) => `Started a ${a.mode || "quick"} check of Canvas`, wait_for_job: () => "Waited for the Canvas check",
   cancel_job: () => "Cancelled a job", update_scope: () => "Changed the collection scope",
+  get_timetable: () => "Built your week", list_class_times: () => "Read your class times",
+  add_class_time: (a) => `Saved class time “${a.title}”`, remove_class_time: () => "Removed a class time",
+  list_view_requests: () => "Checked agent requests", request_external_view: (a) => `Asked a connected agent to read ${a.title || a.url}`,
 };
 
 function mdInline(text) {
@@ -958,7 +975,7 @@ function stepRow(call, result) {
     result ? h("pre", { class: "text tiny" }, result.preview) : null);
 }
 
-function renderMessages(list, msgs) {
+function renderMessages(list, msgs, ctx = {}) {
   const results = {};
   for (const m of msgs) if (m.role === "tool") for (const r of m.results) results[r.id] = r;
   const out = [];
@@ -967,7 +984,9 @@ function renderMessages(list, msgs) {
     else if (m.role === "assistant") {
       const parts = [];
       if (m.text) parts.push(renderMarkdown(m.text));
-      if (m.tool_calls && m.tool_calls.length) parts.push(h("div", { class: "steps" }, m.tool_calls.map((c) => stepRow(c, results[c.id]))));
+      const plain = (m.tool_calls || []).filter((c) => !(results[c.id] && results[c.id].display));
+      if (plain.length) parts.push(h("div", { class: "steps" }, plain.map((c) => stepRow(c, results[c.id]))));
+      for (const c of m.tool_calls || []) if (results[c.id] && results[c.id].display) parts.push(componentView(results[c.id].display, ctx));
       if (m.stop === "refusal") parts.push(h("div", { class: "small muted" }, "The model declined to continue."));
       if (parts.length) out.push(h("div", { class: "msg assistant" }, parts));
     }
@@ -1003,13 +1022,13 @@ VIEWS.assistant = async (main, parts) => {
     const d = await api(A(`/assistant/conversations/${current}`) + qs({ after: 0 })).catch(() => null);
     if (!d) return;
     all = d.messages;
-    renderMessages(log, all);
+    renderMessages(log, all, { send });
     const st = d.conversation.run_state;
     const busy = st === "running" || st === "cancelling";
     sendBtn.disabled = busy; stopBtn.hidden = !busy;
     mount(status, busy ? h("span", { class: "working" }, st === "cancelling" ? "Stopping…" : "Working…")
       : st === "error" ? h("div", { class: "banner bad", style: "margin:0" }, h("div", { class: "b-body" }, h("div", { class: "b-title" }, "The assistant stopped"), h("div", { class: "small" }, d.conversation.run_error || ""))) : null);
-    if (all.length && all[all.length - 1].seq !== lastSeq) { lastSeq = all[all.length - 1].seq; log.scrollTop = log.scrollHeight; }
+    if (all.length && all[all.length - 1].seq !== lastSeq) { lastSeq = all[all.length - 1].seq; input.scrollIntoView({ block: "end", behavior: "smooth" }); }
     if (!busy) clearInterval(assistantPoll);
   };
   const send = async (text) => {
@@ -1030,15 +1049,15 @@ VIEWS.assistant = async (main, parts) => {
   stopBtn.addEventListener("click", async () => { await guard(() => api(A(`/assistant/conversations/${current}/stop`), { method: "POST" })); refresh(); });
   input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } });
 
-  const suggestions = h("div", { class: "chips suggest" }, ["What's due in the next 7 days?", "Anything new since yesterday?",
-    "Check Canvas for new announcements", "Which assignments haven't I submitted?"].map((s) => h("button", { class: "chip", onclick: () => send(s) }, s)));
+  const suggestions = h("div", { class: "chips suggest" }, ["What's due in the next 7 days?", "Plan my study time this week",
+    "Anything new since yesterday?", "Check Canvas for new announcements", "Show my scores"].map((s) => h("button", { class: "chip", onclick: () => send(s) }, s)));
   const perms = cfg.permissions;
   const footer = h("div", { class: "tiny muted" }, `${preset ? preset.label : cfg.provider} · ${cfg.model || "default model"} · can ${["read your data", perms.notes ? "edit your notes" : null, perms.collect ? "check Canvas" : null, perms.settings ? "change scope" : null].filter(Boolean).join(", ")}. Questions and the data it reads are sent to this provider.`);
   const chat = h("div", { class: "chat" }, log, status,
     current ? null : h("div", { class: "chat-empty", id: "chat-empty" }, h("div", { class: "e-title" }, "What would you like to know?"), suggestions),
     h("div", { class: "composer" }, input, h("div", { class: "row" }, stopBtn, sendBtn)), footer);
   mount(main, head, settings, h("div", { class: "assistant-layout" }, sideList, chat));
-  if (current) { await refresh(); const st = all.length; if (st) log.scrollTop = log.scrollHeight; assistantPoll = setInterval(refresh, 1000); }
+  if (current) { await refresh(); assistantPoll = setInterval(refresh, 1000); }
   input.focus();
 };
 
@@ -1125,6 +1144,152 @@ function mcpCard(info) {
       [["Read-only", ""], ["+ notes & to-dos", " --allow-notes"], ["+ notes & Canvas checks", " --allow-writes"]].map(([label, flags]) => [
         h("div", { class: "k" }, label), h("div", null, h("code", { class: "wrap-anywhere" }, line(flags))), h("div", { class: "t" }, copy(line(flags)))])),
     h("p", { class: "tiny muted", style: "margin-top:8px" }, "Canvas checks requested over MCP run in this app, which must be open and signed in. Browser sessions and credentials are never exposed to agents."));
+}
+
+// ---------- timetable (shared by Planner and assistant components) ----------
+const TT_START = 8, TT_END = 23, TT_HOUR = 42;
+function minutesOf(iso) { const t = iso.slice(11, 16); return Number(t.slice(0, 2)) * 60 + Number(t.slice(3, 5)); }
+const KIND_LABEL = { class: "Class", calendar: "Event", deadline: "Due", task: "To-do", study: "Suggested study" };
+
+async function addStudyTask(e) {
+  const r = await guard(() => api(A("/annotations"), { method: "POST", body: { kind: "task", title: e.title,
+    item_id: e.for_item_id || undefined, local_due: new Date(e.start).toISOString() } }));
+  if (r) toast("Added to your to-dos (local only)");
+  return r;
+}
+
+function ttEvent(e, opts) {
+  const s = minutesOf(e.start), en = Math.max(minutesOf(e.end), s + (e.kind === "deadline" ? 28 : 30));
+  const total = (TT_END - TT_START) * TT_HOUR;
+  const height = Math.max(26, (Math.min(en, TT_END * 60) - Math.max(s, TT_START * 60)) * TT_HOUR / 60);
+  // Items outside the visible hours are pinned to the top/bottom edge (their time is still shown).
+  const top = Math.min(Math.max(0, (s - TT_START * 60) * TT_HOUR / 60), total - height);
+  const el = h("div", { class: `tt-ev ${e.kind}${e.done ? " done" : ""}`, style: `top:${top}px;height:${height}px`,
+    title: `${KIND_LABEL[e.kind]}: ${e.title}${e.location ? " · " + e.location : ""}` },
+    h("div", { class: "tt-time" }, e.start.slice(11, 16), e.kind !== "deadline" && e.kind !== "task" ? "–" + e.end.slice(11, 16) : ""),
+    e.item_id ? h("a", { href: `#/item/${e.item_id}`, class: "tt-title" }, e.title) : h("div", { class: "tt-title" }, e.title),
+    e.location ? h("div", { class: "tt-loc" }, e.location) : null,
+    e.kind === "study" ? h("button", { class: "sm", onclick: async (ev) => { ev.preventDefault(); if (await addStudyTask(e)) { el.classList.remove("study"); el.classList.add("task"); ev.target.remove(); if (opts.onChange) opts.onChange(); } } }, "+ Add") : null);
+  return el;
+}
+
+function renderTimetable(week, opts = {}) {
+  const hours = [];
+  for (let hh = TT_START; hh < TT_END; hh++) hours.push(h("div", { class: "tt-hour", style: `top:${(hh - TT_START) * TT_HOUR}px` }, `${String(hh).padStart(2, "0")}:00`));
+  const today = dayKey(new Date().toISOString());
+  const grid = h("div", { class: "tt-grid" },
+    h("div", { class: "tt-axis" }, h("div", { class: "tt-dayhead" }), h("div", { class: "tt-col-body", style: `height:${(TT_END - TT_START) * TT_HOUR}px` }, hours)),
+    week.days.map((d) => h("div", { class: "tt-col" + (d.date === today ? " today" : "") },
+      h("div", { class: "tt-dayhead" }, h("span", { class: "dow" }, d.weekday.slice(0, 3)), h("span", { class: "dnum" }, String(Number(d.date.slice(8, 10))))),
+      h("div", { class: "tt-col-body", style: `height:${(TT_END - TT_START) * TT_HOUR}px` }, d.events.map((e) => ttEvent(e, opts))))));
+  const list = h("div", { class: "tt-list" }, week.days.filter((d) => d.events.length).map((d) => h("div", { class: "tt-list-day" },
+    h("div", { class: "day-label" }, `${d.weekday} ${Number(d.date.slice(8, 10))}`),
+    d.events.map((e) => h("div", { class: `tt-list-ev ${e.kind}${e.done ? " done" : ""}` },
+      h("span", { class: "mono small" }, e.start.slice(11, 16)), pill(e.kind === "deadline" ? "bad plain" : e.kind === "study" ? "warn plain" : "muted plain", KIND_LABEL[e.kind]),
+      e.item_id ? h("a", { href: `#/item/${e.item_id}` }, e.title) : h("span", null, e.title),
+      e.kind === "study" ? h("button", { class: "sm", onclick: async (ev) => { if (await addStudyTask(e)) ev.target.remove(); } }, "+ Add") : null)))));
+  if (!week.days.some((d) => d.events.length)) list.append(h("div", { class: "muted small" }, "Nothing scheduled this week."));
+  const legend = h("div", { class: "legend tt-legend" }, ["class", "calendar", "deadline", "task", "study"].map((k) =>
+    h("span", null, h("span", { class: "swatch tt-sw " + k }), KIND_LABEL[k])));
+  return h("div", { class: "timetable" }, legend, grid, list);
+}
+
+VIEWS.planner = async (main, _p, params) => {
+  const weekOf = params.get("week") || "";
+  const suggest = params.get("suggest") === "1";
+  const [week, classes, courses] = await Promise.all([
+    api(A("/planner/week") + qs({ week_of: weekOf, suggest: suggest ? "true" : "", hours: 3 })),
+    api(A("/planner/classes")), api(A("/courses"))]);
+  const shift = (days) => { const d = new Date(week.week_start + "T12:00:00"); d.setDate(d.getDate() + days); return d.toISOString().slice(0, 10); };
+  const go = (w, sg = suggest) => { location.hash = `#/planner${qs({ week: w, suggest: sg ? 1 : "" })}`; };
+  const nav = h("div", { class: "row" },
+    h("button", { class: "sm", onclick: () => go(shift(-7)) }, "‹ Previous"),
+    h("button", { class: "sm", onclick: () => go("") }, "This week"),
+    h("button", { class: "sm", onclick: () => go(shift(7)) }, "Next ›"),
+    h("label", { class: "check small", style: "margin-left:10px" }, h("input", { type: "checkbox", checked: suggest ? true : null, onchange: (e) => go(weekOf, e.target.checked) }), "Suggest study blocks"),
+    h("a", { class: "btn sm", href: A("/planner.ics") + qs({ weeks: 8 }) }, "Export .ics"));
+  const accessible = courses.courses.filter((c) => c.access === "accessible");
+  const f = { title: h("input", { type: "text", placeholder: "e.g. MATH1023 Lecture" }),
+    course: h("select", null, h("option", { value: "" }, "Course (optional)"), accessible.map((c) => h("option", { value: c.course_id }, c.title))),
+    weekday: h("select", null, ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"].map((d, i) => h("option", { value: i }, d))),
+    start: h("input", { type: "text", placeholder: "14:00", size: 6 }), end: h("input", { type: "text", placeholder: "15:20", size: 6 }),
+    location: h("input", { type: "text", placeholder: "Room (optional)" }) };
+  f.course.addEventListener("change", () => { if (!f.title.value && f.course.value) f.title.value = (accessible.find((c) => c.course_id === f.course.value) || {}).course_code || ""; });
+  const classCard = h("div", { class: "card", style: "margin-top:16px" },
+    h("div", { class: "card-head" }, h("h2", null, "Your class times"), h("span", { class: "sub" }, "saved locally · the assistant can add these from your syllabus")),
+    classes.class_times.length ? h("table", { class: "t" }, h("tbody", null, classes.class_times.map((c) => h("tr", null,
+      h("td", null, h("span", { class: "strong" }, c.title)), h("td", { class: "nowrap" }, `${c.weekday_name} ${c.start_time}–${c.end_time}`),
+      h("td", { class: "muted small" }, c.location || ""), h("td", { class: "nowrap" }, h("button", { class: "ghost sm", onclick: async () => { await guard(() => api(A(`/planner/classes/${c.id}`), { method: "DELETE" })); route(); } }, "Remove")))))) : h("p", { class: "muted small" }, "No class times yet. Add them here, or ask the assistant to read them from your syllabus."),
+    h("div", { class: "row", style: "margin-top:10px" }, f.course, f.title, f.weekday, f.start, f.end, f.location,
+      h("button", { class: "primary sm", onclick: async () => {
+        const r = await guard(() => api(A("/planner/classes"), { method: "POST", body: { title: f.title.value, weekday: Number(f.weekday.value),
+          start: f.start.value.trim(), end: f.end.value.trim(), location: f.location.value || undefined, course_id: f.course.value || undefined } }));
+        if (r) { toast("Class time saved"); route(); } } }, "Add")));
+  mount(main, pageHead("Planner", `Week of ${fmtDate(week.week_start + "T12:00:00", { time: false })} · ${week.time_zone}. Local plan only — nothing is written to Canvas.`, nav),
+    h("div", { class: "card" }, renderTimetable(week, { onChange: () => {} })), classCard);
+};
+
+// ---------- external-site requests ----------
+VIEWS.requests = async (main) => {
+  const [reqs, courses] = await Promise.all([api(A("/requests")), api(A("/courses"))]);
+  const accessible = courses.courses.filter((c) => c.access === "accessible");
+  const url = h("input", { type: "url", placeholder: "https://course-website.example.edu/…", style: "flex:1;min-width:240px" });
+  const title = h("input", { type: "text", placeholder: "What is it? e.g. COMP1023 course website", style: "width:100%" });
+  const course = h("select", null, h("option", { value: "" }, "Course (optional)"), accessible.map((c) => h("option", { value: c.course_id }, c.title)));
+  const note = h("textarea", { rows: 2, placeholder: "Instructions for the agent, e.g. “Use Chrome profile ngan. Read the Schedule and Assignments pages.”" });
+  const STATUS = { open: ["info", "Waiting for an agent"], claimed: ["warn", "Being read"], done: ["ok", "Done"], declined: ["bad", "Declined"], cancelled: ["muted", "Cancelled"] };
+  mount(main, pageHead("Agent requests", "Ask a connected agent to read sites Canvas Hub can't open itself, such as a course website outside Canvas."),
+    h("div", { class: "banner info" }, h("div", { class: "b-body small" },
+      "Canvas Hub never opens these sites or touches your other browser profiles. An agent you connect over MCP (for example Codex or Claude with your browser) can pick up a request, read the site with its own access, and send back the text. It is stored as ",
+      h("strong", null, "agent-provided"), " content, separate from what Canvas reported, and becomes searchable. The agent needs ",
+      h("code", null, "canvas-hub mcp --allow-fulfil"), ".")),
+    h("div", { class: "card" }, h("h2", { style: "margin-bottom:10px" }, "New request"),
+      h("div", { class: "stack" }, h("div", { class: "row" }, url, course), title, note,
+        h("div", null, h("button", { class: "primary", onclick: async () => {
+          const r = await guard(() => api(A("/requests"), { method: "POST", body: { url: url.value, title: title.value || undefined,
+            note: note.value || undefined, course_id: course.value || undefined } }));
+          if (r) { toast("Request left for connected agents"); route(); } } }, "Leave request")))),
+    h("div", { class: "card" }, h("h2", { style: "margin-bottom:6px" }, "Requests"),
+      reqs.requests.length ? h("ul", { class: "list" }, reqs.requests.map((r) => h("li", null,
+        h("div", { class: "spread" }, h("div", { class: "row" }, pill(STATUS[r.status][0], STATUS[r.status][1]), h("span", { class: "strong" }, r.title || r.url)),
+          ["open", "claimed"].includes(r.status) ? h("button", { class: "ghost sm", onclick: async () => { await guard(() => api(A(`/requests/${r.id}/cancel`), { method: "POST" })); route(); } }, "Cancel") : null),
+        h("div", { class: "li-meta" }, h("a", { href: r.url, target: "_blank", rel: "noopener noreferrer" }, r.url),
+          r.claimed_by ? h("span", null, `agent: ${r.claimed_by}`) : null, h("span", null, `asked by ${r.requested_by} ${ago(r.created_at)}`)),
+        r.note ? h("div", { class: "small", style: "margin-top:4px" }, r.note) : null,
+        r.result_item_id ? h("div", { class: "small", style: "margin-top:4px" }, h("a", { href: `#/item/${r.result_item_id}` }, "Read the content the agent sent →")) : null,
+        r.status === "declined" && r.result_note ? h("div", { class: "small", style: "margin-top:4px;color:var(--bad)" }, r.result_note) : null))) : empty("No requests yet", "Requests you or the assistant leave appear here.")));
+};
+
+// ---------- assistant components ----------
+function componentView(d, ctx) {
+  if (!d) return null;
+  if (d.component === "deadlines") return h("div", { class: "cmp cmp-deadlines" }, d.deadlines.length ? d.deadlines.map((x) => h("div", { class: "cmp-card" },
+    h("div", { class: "spread" }, h("div", null, h("div", { class: "cmp-when" }, fmtDate(x.due_local, { weekday: true }), " · ", until(x.due_local)),
+      h("a", { class: "cmp-title", href: `#/item/${x.item_id}` }, x.title), h("div", { class: "tiny muted" }, x.course || "")),
+      submissionPill(x.submission ? { ...x.submission, state: x.submission.state } : null)),
+    h("div", { class: "row", style: "margin-top:8px" },
+      h("button", { class: "sm", onclick: async (ev) => { const r = await guard(() => api(A("/annotations"), { method: "POST", body: { kind: "task", item_id: x.item_id, title: x.title } })); if (r) { ev.target.textContent = "✓ Added"; ev.target.disabled = true; } } }, "+ To-do"),
+      x.source_url ? h("a", { class: "btn sm", href: x.source_url, target: "_blank", rel: "noopener noreferrer" }, "Open in Canvas") : null))) : h("div", { class: "muted small" }, "No deadlines in that range."));
+  if (d.component === "timetable") return h("div", { class: "cmp" }, renderTimetable(d.week));
+  if (d.component === "items") return h("div", { class: "cmp cmp-deadlines" }, d.items.map((x) => h("div", { class: "cmp-card" },
+    h("div", { class: "tiny muted" }, TYPE_LABEL[x.type] || x.type, x.course ? " · " + x.course : "", x.due ? " · due " + x.due : ""),
+    h("a", { class: "cmp-title", href: `#/item/${x.item_id}` }, x.title || "(untitled)"),
+    x.excerpt ? h("div", { class: "small", style: "margin-top:4px" }, x.excerpt) : null,
+    x.source_url ? h("div", { style: "margin-top:6px" }, h("a", { class: "small", href: x.source_url, target: "_blank", rel: "noopener noreferrer" }, "Open in Canvas")) : null)));
+  if (d.component === "table") return h("div", { class: "cmp" }, d.title ? h("div", { class: "cmp-head" }, d.title) : null,
+    h("div", { class: "table-wrap" }, h("table", { class: "t" }, h("thead", null, h("tr", null, d.columns.map((c) => h("th", null, c)))),
+      h("tbody", null, d.rows.map((r) => h("tr", null, r.map((c) => h("td", null, c))))))));
+  if (d.component === "chart") {
+    const max = d.max || Math.max(1, ...d.values);
+    return h("div", { class: "cmp" }, d.title ? h("div", { class: "cmp-head" }, d.title) : null,
+      d.labels.length ? h("div", { class: "bars" }, d.labels.map((l, i) => h("div", { class: "bar-row" }, h("div", { class: "bar-label" }, l),
+        h("div", { class: "bar-track" }, h("span", { style: `width:${Math.max(0, Math.min(100, d.values[i] / max * 100))}%` })),
+        h("div", { class: "bar-val num" }, `${d.values[i]}${d.unit || ""}`)))) : h("div", { class: "muted small" }, "No values to show."),
+      (d.notes || []).length ? h("div", { class: "tiny muted", style: "margin-top:6px" }, d.notes.join(" · ")) : null);
+  }
+  if (d.component === "choices") return h("div", { class: "cmp cmp-choices" }, h("div", { class: "small" }, d.question),
+    h("div", { class: "chips", style: "margin-top:6px" }, d.options.map((o) => h("button", { class: "chip", onclick: () => ctx.send && ctx.send(o) }, o))));
+  return null;
 }
 
 // ---------- boot ----------

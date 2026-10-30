@@ -154,6 +154,8 @@ def cmd_mcp(args):
         perms.add("collect")
     if args.allow_settings:
         perms.add("settings")
+    if args.allow_fulfil:
+        perms.add("fulfil")
     serve_stdio(_hub(args), perms)
     return 0
 
@@ -236,6 +238,8 @@ def main(argv=None) -> int:
     s.add_argument("--allow-collection", action="store_true", help="allow starting/cancelling collection jobs")
     s.add_argument("--allow-settings", action="store_true", help="allow changing the collection scope")
     s.add_argument("--allow-writes", action="store_true", help="shorthand for --allow-notes --allow-collection")
+    s.add_argument("--allow-fulfil", action="store_true",
+                   help="allow this agent to claim and complete requests to read external sites")
     s.set_defaults(fn=cmd_mcp)
 
     s = sub.add_parser("schema", help="print the observation package JSON Schema")

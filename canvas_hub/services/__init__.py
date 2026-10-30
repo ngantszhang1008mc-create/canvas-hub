@@ -13,7 +13,9 @@ from .annotations import AnnotationService
 from .identity import IdentityService
 from .importer import Importer
 from .jobs import JobService
+from .planner import PlannerService
 from .query import QueryService
+from .requests import RequestService
 from .resources import ResourceService
 from .search import SearchService
 
@@ -32,6 +34,8 @@ class Hub:
         self.query = QueryService(self.db)
         self.annotations = AnnotationService(self.db)
         self.importer = Importer(self.db, self.identity, self.jobs, self.search, self.resources)
+        self.planner = PlannerService(self.db, self.query)
+        self.requests = RequestService(self.db, self.identity, self.importer)
 
     def close(self) -> None:
         self.db.close()

@@ -181,6 +181,40 @@ class HubAPI:
         self.hub.annotations.delete(a["id"], int(annotation_id))
         return {"deleted": int(annotation_id)}
 
+    # ---- planner (local) ---------------------------------------------------------
+    def planner_week(self, account_id, *, week_of=None, suggest_study=False, study_hours=3.0) -> dict:
+        a = self._acct(account_id)
+        return self.hub.planner.week(a["id"], week_of=week_of, suggestions=self._bool(suggest_study),
+                                     study_hours=float(study_hours or 3))
+
+    def list_class_times(self, account_id) -> dict:
+        return {"class_times": self.hub.planner.list_classes(self._acct(account_id)["id"])}
+
+    def add_class_time(self, account_id, data: dict) -> dict:
+        allowed = {"title", "weekday", "start", "end", "course_id", "location", "valid_from", "valid_until"}
+        if set(data) - allowed:
+            raise InvalidInput(f"unknown fields {sorted(set(data) - allowed)}")
+        return self.hub.planner.add_class(self._acct(account_id)["id"], **data)
+
+    def delete_class_time(self, account_id, class_id) -> dict:
+        return self.hub.planner.delete_class(self._acct(account_id)["id"], int(class_id))
+
+    def planner_ics(self, account_id, weeks=8) -> str:
+        return self.hub.planner.ics(self._acct(account_id)["id"], int(weeks or 8))
+
+    # ---- external-site requests ---------------------------------------------------
+    def list_view_requests(self, account_id, status=None) -> dict:
+        return {"requests": self.hub.requests.list(self._acct(account_id)["id"], status)}
+
+    def create_view_request(self, account_id, data: dict) -> dict:
+        allowed = {"url", "title", "note", "course_id"}
+        if set(data) - allowed:
+            raise InvalidInput(f"unknown fields {sorted(set(data) - allowed)}")
+        return self.hub.requests.create(self._acct(account_id)["id"], requested_by="user", **data)
+
+    def cancel_view_request(self, account_id, request_id) -> dict:
+        return self.hub.requests.cancel(self._acct(account_id)["id"], int(request_id))
+
     # ---- observations -----------------------------------------------------------
     def validate_observations(self, package: Any) -> dict:
         pkg = self.hub.importer.validate(package)

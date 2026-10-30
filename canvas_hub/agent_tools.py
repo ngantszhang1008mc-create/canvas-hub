@@ -9,6 +9,10 @@ permission so a client only gets what the user enabled:
                under the same scope, read-only and view-to-complete rules as
                the UI)
     settings - change the remembered collection scope
+    ui       - show_* tools that render interactive components in the app's
+               assistant chat (in-app only; not offered over MCP)
+    fulfil   - claim and complete requests to read external sites (MCP agents
+               with their own browser access, e.g. a course website)
 
 No tool takes SQL, a filesystem path, a shell command, browser control or a
 credential. Collected Canvas content is returned as data; it is untrusted and
@@ -28,7 +32,7 @@ from .htmltools import to_text
 from .model import CATEGORIES, ITEM_TYPES
 from .util import HubError, InvalidInput
 
-PERMISSIONS = ("read", "notes", "collect", "settings")
+PERMISSIONS = ("read", "notes", "collect", "settings", "ui", "fulfil")
 MAX_RESULT_CHARS = 24000
 
 
@@ -407,6 +411,159 @@ def h_update_scope(ctx, a):
             "note": "Opening view-to-complete module items can only be allowed by the user in the app."}
 
 
+def h_timetable(ctx, a):
+    aid = _account(ctx, a)
+    return ctx.api.hub.planner.week(aid, week_of=a.get("week_of"), suggestions=a.get("suggest_study", False),
+                                    study_hours=a.get("study_hours", 3))
+
+
+def h_list_classes(ctx, a):
+    return {"class_times": [{k: c[k] for k in ("id", "title", "weekday_name", "start_time", "end_time", "location",
+                                               "course_canvas_id", "valid_from", "valid_until")}
+                            for c in ctx.api.hub.planner.list_classes(_account(ctx, a))]}
+
+
+_WEEKDAY = {n.lower(): i for i, n in enumerate(["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"])}
+
+
+def h_add_class(ctx, a):
+    wd = a["weekday"].strip().lower()
+    wd = _WEEKDAY.get(wd) if wd in _WEEKDAY else next((i for n, i in _WEEKDAY.items() if n.startswith(wd[:3])), None)
+    if wd is None:
+        raise InvalidInput("weekday must be a day name, e.g. Tuesday")
+    c = ctx.api.hub.planner.add_class(_account(ctx, a), title=a["title"], weekday=wd, start=a["start"], end=a["end"],
+                                      course_id=a.get("course_id"), location=a.get("location"),
+                                      valid_from=a.get("valid_from"), valid_until=a.get("valid_until"))
+    return {"added": {"class_id": c["id"], "title": c["title"], "weekday": c["weekday_name"], "start": c["start_time"],
+                      "end": c["end_time"]}, "note": "Saved in your local timetable only."}
+
+
+def h_remove_class(ctx, a):
+    return ctx.api.hub.planner.delete_class(_account(ctx, a), a["class_id"])
+
+
+def _req_view(r):
+    return {k: r.get(k) for k in ("id", "url", "title", "note", "course_canvas_id", "status", "requested_by", "claimed_by",
+                                  "claimed_at", "result_item_id", "result_note", "created_at", "completed_at")}
+
+
+def h_request_view(ctx, a):
+    r = ctx.api.hub.requests.create(_account(ctx, a), url=a["url"], title=a.get("title"), note=a.get("note"),
+                                    course_id=a.get("course_id"), requested_by="assistant" if ctx.account_id else "user")
+    return {"request": _req_view(r), "note": "A connected agent with its own access can now read this site and send back "
+                                             "its content. Canvas Hub itself does not open it."}
+
+
+def h_list_requests(ctx, a):
+    return {"requests": [_req_view(r) for r in ctx.api.hub.requests.list(_account(ctx, a), a.get("status"))]}
+
+
+def h_claim_request(ctx, a):
+    return {"request": _req_view(ctx.api.hub.requests.claim(_account(ctx, a), a["request_id"], a["agent_name"])),
+            "next_step": "Read the page with your own access, then call submit_view_result with the text you read "
+                         "(or decline_view_request if you cannot access it)."}
+
+
+def h_submit_request(ctx, a):
+    r = ctx.api.hub.requests.submit(_account(ctx, a), a["request_id"], a["agent_name"], content=a["content"],
+                                    title=a.get("title"), source_url=a.get("source_url"), read_at=a.get("read_at"))
+    return {"request": _req_view(r), "stored_item_id": r["result_item_id"]}
+
+
+def h_decline_request(ctx, a):
+    return {"request": _req_view(ctx.api.hub.requests.decline(_account(ctx, a), a["request_id"], a["agent_name"], a["reason"]))}
+
+
+# ---- interactive components (rendered by the app's chat UI) --------------------------
+def _display(component: str, data: dict, summary: str) -> dict:
+    return {"display": {"component": component, **data}, "summary": summary}
+
+
+def h_show_deadlines(ctx, a):
+    d = h_deadlines(ctx, {k: v for k, v in a.items() if k in ("days_ahead", "course_id")} | {"include_calendar": False})
+    return _display("deadlines", {"deadlines": d["deadlines"], "time_zone": d["time_zone"]},
+                    f"Showed {len(d['deadlines'])} deadline(s) as cards: "
+                    + "; ".join(f"{x['title']} ({x['due_local']}, {(x['submission'] or {}).get('workflow_state') or 'no status'})"
+                                for x in d["deadlines"][:15]))
+
+
+def h_show_timetable(ctx, a):
+    w = h_timetable(ctx, a)
+    n = sum(len(d["events"]) for d in w["days"])
+    sugg = [e for d in w["days"] for e in d["events"] if e["kind"] == "study"]
+    return _display("timetable", {"week": w}, f"Showed the week of {w['week_start']} with {n} entries"
+                    + (f", including {len(sugg)} suggested study block(s): " + "; ".join(f"{e['title']} {e['start']}" for e in sugg)
+                       if sugg else "") + (". No class times are defined yet." if not w["classes_defined"] else "."))
+
+
+def h_show_items(ctx, a):
+    aid = _account(ctx, a)
+    cards = []
+    for iid in a["item_ids"][:12]:
+        try:
+            v = _item_view(ctx, aid, int(iid), body_chars=400)
+        except HubError:
+            continue
+        body = next((f["value"] for k, f in v["fields"].items() if k in ("message", "body", "description", "content")
+                     and isinstance(f["value"], str)), None)
+        due = v["fields"].get("due_at", {}).get("value")
+        cards.append({"item_id": v["item_id"], "type": v["type"], "title": v["title"], "course": v["course"],
+                      "excerpt": body, "due": due.get("local") if isinstance(due, dict) else None,
+                      "source_url": v["source_url"], "last_read": v["last_read"]})
+    return _display("items", {"items": cards}, f"Showed {len(cards)} item card(s): " + "; ".join(c["title"] or "" for c in cards))
+
+
+def h_show_table(ctx, a):
+    cols = [str(c)[:60] for c in a["columns"]][:8]
+    rows = [[str(x)[:300] for x in r][:len(cols)] for r in a["rows"][:50] if isinstance(r, list)]
+    return _display("table", {"title": (a.get("title") or "")[:120], "columns": cols, "rows": rows},
+                    f"Showed a table with {len(rows)} row(s).")
+
+
+def h_show_chart(ctx, a):
+    labels = [str(x)[:40] for x in a["labels"]][:24]
+    values = [float(v) for v in a["values"][:len(labels)] if isinstance(v, (int, float)) and not isinstance(v, bool)]
+    if len(values) != len(labels):
+        raise InvalidInput("values must be numbers, one per label")
+    return _display("chart", {"title": (a.get("title") or "")[:120], "labels": labels, "values": values,
+                              "unit": (a.get("unit") or "")[:12], "max": a.get("max")},
+                    f"Showed a bar chart of {len(values)} value(s).")
+
+
+def h_show_grades(ctx, a):
+    aid = _account(ctx, a)
+    hub = ctx.api.hub
+    sql = "SELECT id, source_key FROM items WHERE account_id=? AND item_type='submission' AND current_revision>0"
+    params: list = [aid]
+    if a.get("course_id"):
+        sql += " AND course_canvas_id=?"
+        params.append(str(a["course_id"]))
+    labels, values, notes = [], [], []
+    for r in hub.db.query(sql, params):
+        f = hub.query._fields(r["id"])
+        asg = hub.db.one("SELECT id, title FROM items WHERE account_id=? AND item_type='assignment' AND source_key=?",
+                         (aid, r["source_key"]))
+        if not asg:
+            continue
+        pts = hub.query._fields(asg["id"]).get("points_possible")
+        if f.get("score") is not None and pts:
+            labels.append((asg["title"] or "")[:40])
+            values.append(round(100 * float(f["score"]) / float(pts), 1))
+        elif f.get("workflow_state") == "graded" and f.get("grade_visible") is False:
+            notes.append(f"{asg['title']}: graded, score hidden")
+    return _display("chart", {"title": "Scores (% of points)", "labels": labels[:24], "values": values[:24], "unit": "%",
+                              "max": 100, "notes": notes[:10]},
+                    f"Showed {len(values)} visible score(s): "
+                    + "; ".join(f"{l_} {v}%" for l_, v in zip(labels, values, strict=True))
+                    + (f". Hidden: {', '.join(notes[:5])}" if notes else "") + ".")
+
+
+def h_show_choices(ctx, a):
+    opts = [str(o)[:120] for o in a["options"]][:6]
+    return _display("choices", {"question": a["question"][:300], "options": opts},
+                    "Showed buttons; the user's click arrives as their next message.")
+
+
 _CATS = [c for c in CATEGORIES if c != "courses"]
 _DATE_DESC = "ISO-8601 timestamp with offset, e.g. 2026-11-01T00:00:00+08:00"
 
@@ -487,6 +644,69 @@ TOOLS: list[AgentTool] = [
               {"courses": {"type": "string"}, "categories": {"type": "array", "items": {"type": "string", "enum": _CATS}},
                "download_files": {"type": "boolean"}, "calendar_days_ahead": {"type": "integer", "minimum": 0, "maximum": 3650},
                "calendar_days_back": {"type": "integer", "minimum": 0, "maximum": 3650}}, [], h_update_scope),
+]
+_TIME = {"type": "string", "description": "HH:MM, 24-hour, local time"}
+TOOLS += [
+    # ---- planner
+    AgentTool("get_timetable", "The user's week: class times, Canvas calendar events, deadlines with submission state and "
+              "dated to-dos. Optionally suggest study blocks before unfinished deadlines (suggestions are not saved).", "read",
+              {"week_of": {"type": "string", "description": "any date in the week, YYYY-MM-DD (default: this week)"},
+               "suggest_study": {"type": "boolean"}, "study_hours": {"type": "number", "description": "per deadline, default 3"}},
+              [], h_timetable),
+    AgentTool("list_class_times", "The user's saved weekly class times.", "read", handler=h_list_classes),
+    AgentTool("add_class_time", "Save a weekly class time in the user's local timetable (e.g. a lecture every Tuesday "
+              "14:00-15:20). Local only.", "notes",
+              {"title": {"type": "string"}, "weekday": {"type": "string", "description": "day name, e.g. Tuesday"},
+               "start": _TIME, "end": _TIME, "course_id": {"type": "string"}, "location": {"type": "string"},
+               "valid_from": {"type": "string", "description": "YYYY-MM-DD"}, "valid_until": {"type": "string", "description": "YYYY-MM-DD"}},
+              ["title", "weekday", "start", "end"], h_add_class),
+    AgentTool("remove_class_time", "Remove a saved class time.", "notes", {"class_id": {"type": "integer"}}, ["class_id"],
+              h_remove_class),
+    # ---- external sites
+    AgentTool("list_view_requests", "Requests for connected agents to read sites Canvas Hub cannot reach (e.g. a separate "
+              "course website), with their status and results.", "read",
+              {"status": {"type": "string", "enum": ["open", "claimed", "done", "declined", "cancelled", "active"]}},
+              [], h_list_requests),
+    AgentTool("request_external_view", "Leave a request for a connected agent (with its own browser access) to read an "
+              "external site, such as a course website outside Canvas. Canvas Hub does not open the site itself.", "notes",
+              {"url": {"type": "string"}, "title": {"type": "string"}, "course_id": {"type": "string"},
+               "note": {"type": "string", "description": "instructions for the agent, e.g. which browser profile to use"}},
+              ["url"], h_request_view),
+    AgentTool("claim_view_request", "Claim an open request to read an external site, so other agents leave it to you.", "fulfil",
+              {"request_id": {"type": "integer"}, "agent_name": {"type": "string", "description": "who you are, e.g. Codex"}},
+              ["request_id", "agent_name"], h_claim_request),
+    AgentTool("submit_view_result", "Submit the text you read from a requested external site (plain text or markdown, up "
+              "to 200,000 characters). It is stored as agent-provided content with your name and the time.", "fulfil",
+              {"request_id": {"type": "integer"}, "agent_name": {"type": "string"}, "content": {"type": "string"},
+               "title": {"type": "string"}, "source_url": {"type": "string", "description": "the exact page read, if different"},
+               "read_at": {"type": "string", "description": _DATE_DESC}},
+              ["request_id", "agent_name", "content"], h_submit_request),
+    AgentTool("decline_view_request", "Decline a request you cannot fulfil (no access, login failed, ...), with a reason.",
+              "fulfil", {"request_id": {"type": "integer"}, "agent_name": {"type": "string"}, "reason": {"type": "string"}},
+              ["request_id", "agent_name", "reason"], h_decline_request),
+    # ---- interactive components (in-app chat)
+    AgentTool("show_deadlines", "Show deadlines to the user as interactive cards (open, add to-do, open in Canvas).", "ui",
+              {"days_ahead": {"type": "integer", "minimum": 1, "maximum": 120}, "course_id": {"type": "string"}}, [],
+              h_show_deadlines),
+    AgentTool("show_timetable", "Show a week timetable grid (classes, events, deadlines, to-dos, optional suggested study "
+              "blocks the user can add with one click).", "ui",
+              {"week_of": {"type": "string"}, "suggest_study": {"type": "boolean"}, "study_hours": {"type": "number"}},
+              [], h_show_timetable),
+    AgentTool("show_items", "Show stored items (announcements, assignments, pages, files...) as cards.", "ui",
+              {"item_ids": {"type": "array", "items": {"type": "integer"}}}, ["item_ids"], h_show_items),
+    AgentTool("show_table", "Show a small table (max 8 columns, 50 rows) of text you prepared from the data.", "ui",
+              {"title": {"type": "string"}, "columns": {"type": "array", "items": {"type": "string"}},
+               "rows": {"type": "array", "items": {"type": "array", "items": {"type": "string"}}}},
+              ["columns", "rows"], h_show_table),
+    AgentTool("show_chart", "Show a bar chart (max 24 bars) of numbers you computed from the data.", "ui",
+              {"title": {"type": "string"}, "labels": {"type": "array", "items": {"type": "string"}},
+               "values": {"type": "array", "items": {"type": "number"}}, "unit": {"type": "string"},
+               "max": {"type": "number"}}, ["labels", "values"], h_show_chart),
+    AgentTool("show_grades", "Show visible assignment scores as a chart (% of points); hidden grades are listed, not zero.",
+              "ui", {"course_id": {"type": "string"}}, [], h_show_grades),
+    AgentTool("show_choices", "Offer the user up to 6 quick-reply buttons; their click is sent as their next message.", "ui",
+              {"question": {"type": "string"}, "options": {"type": "array", "items": {"type": "string"}}},
+              ["question", "options"], h_show_choices),
 ]
 TOOLS_BY_NAME = {t.name: t for t in TOOLS}
 
