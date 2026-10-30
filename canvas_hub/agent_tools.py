@@ -619,9 +619,9 @@ def h_update_component(ctx, a):
     if a.get("spec") is None and a.get("state") is None and a.get("pin") is None:
         raise InvalidInput("give spec, state or pin")
     v = svc.get(aid, a["component_id"])
-    if v["kind"] == "checklist" and (a.get("spec") is not None or a.get("state") is not None):
-        if (a["spec"] if isinstance(a.get("spec"), dict) else v["spec"]).get("sync_todos"):   # the spec in force after the call
-            _need_notes_for_todos(ctx)
+    after = a["spec"] if isinstance(a.get("spec"), dict) else v["spec"]      # the spec in force after the call
+    if v["kind"] == "checklist" and (a.get("spec") is not None or a.get("state") is not None) and after.get("sync_todos"):
+        _need_notes_for_todos(ctx)
     if a.get("spec") is not None:
         v = svc.update_spec(aid, v["id"], a["spec"], by="assistant")
     if a.get("state") is not None:

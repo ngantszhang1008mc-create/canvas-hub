@@ -167,7 +167,15 @@ class ComponentService:
             ).lastrowid
         return self.get(account_id, cid)
 
-    def _save(self, account_id: int, row: dict, spec: dict, state: dict, by: str) -> dict:
+    def _effective_state_json(self, account_id: int, row: dict) -> str:
+        """The state as the user sees it (linked to-dos finished elsewhere count as ticked): what undo goes back to.
+        Taken before a change pushes new to-do states."""
+        spec, state = json.loads(row["spec_json"]), json.loads(row["state_json"])
+        if row["kind"] == "checklist" and spec.get("sync_todos") and state.get("links"):
+            return json.dumps(self._pull_todos(account_id, spec, state))
+        return row["state_json"]
+
+    def _save(self, account_id: int, row: dict, spec: dict, state: dict, by: str, history_state: str | None = None) -> dict:
         now = now_iso()
         with self.db.tx() as c:
             # Conditional on the version that was read: a concurrent writer makes this a conflict, never an overwrite.
@@ -178,7 +186,7 @@ class ComponentService:
                 raise Conflict("this component changed elsewhere; reload it", code="version_conflict")
             c.execute("""INSERT OR REPLACE INTO component_versions(component_id, version, spec_json, state_json,
                          changed_by, created_at) VALUES (?,?,?,?,?,?)""",
-                      (row["id"], row["version"], row["spec_json"], row["state_json"], by, now))
+                      (row["id"], row["version"], row["spec_json"], history_state or row["state_json"], by, now))
             c.execute("""DELETE FROM component_versions WHERE component_id=? AND version NOT IN
                          (SELECT version FROM component_versions WHERE component_id=? ORDER BY version DESC LIMIT ?)""",
                       (row["id"], row["id"], KEEP_VERSIONS))
@@ -194,26 +202,24 @@ class ComponentService:
         if expected_version is not None and int(expected_version) != row["version"]:
             raise Conflict("this component changed elsewhere; reload it", code="version_conflict")
         spec = json.loads(row["spec_json"])
+        before = self._effective_state_json(account_id, row)
         st = self._clean_state(row["kind"], spec, state)
         if row["kind"] == "checklist" and spec.get("sync_todos"):
             # Links are server-owned: a client that sends stale or missing links must not create duplicate to-dos.
             saved = json.loads(row["state_json"]).get("links") or {}
             st["links"] = {**st["links"], **saved}
             st = self._push_todos(account_id, spec, st)
-        return self._save(account_id, row, spec, st, by)
+        return self._save(account_id, row, spec, st, by, before)
 
     def update_spec(self, account_id: int, cid: int, spec: dict, *, by: str = "assistant") -> dict:
         with self._lock:
             row = self._row(account_id, cid)
             clean = self.normalize(row["kind"], spec)
-            st = json.loads(row["state_json"])
-            old = json.loads(row["spec_json"])
-            if row["kind"] == "checklist" and old.get("sync_todos") and st.get("links"):
-                st = self._pull_todos(account_id, old, st)        # keep the ticks as they are now when sync turns off
-            st = self._clean_state(row["kind"], clean, st)
+            before = self._effective_state_json(account_id, row)
+            st = self._clean_state(row["kind"], clean, json.loads(before))   # ticks as they are now, e.g. when sync turns off
             if row["kind"] == "checklist" and clean.get("sync_todos"):
                 st = self._push_todos(account_id, clean, st)
-            return self._save(account_id, row, clean, st, by)
+            return self._save(account_id, row, clean, st, by, before)
 
     def undo(self, account_id: int, cid: int) -> dict:
         with self._lock:

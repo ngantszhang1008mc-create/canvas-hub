@@ -253,3 +253,19 @@ def test_linked_checklist_tools_need_the_notes_permission(hub, account):
     assert err and json.loads(text)["error"] == "notes_permission_required"
     assert not run_tool_display(ctx, "update_component", {"component_id": cid, "pin": True}, {"read", "ui"})[1]
     assert not run_tool_display(ctx, "show_checklist", {**spec, "sync_todos": False}, {"read", "ui"})[1]
+
+
+def test_undo_keeps_todos_finished_elsewhere(hub, account):
+    aid = account["id"]
+    svc = hub.components
+    v = svc.create(aid, "checklist", {"title": "T", "sync_todos": True, "sections": [
+        {"id": "s", "rows": [{"id": "r1", "label": "One"}, {"id": "r2", "label": "Two"}]}]})
+    links = v["state"]["links"]
+    hub.annotations.update(aid, links["r1"], task_state="done")         # finished under Notes & tasks
+    v = svc.get(aid, v["id"])
+    assert v["state"]["done"] == {"r1": True}
+    v = svc.set_state(aid, v["id"], {**v["state"], "done": {"r1": True, "r2": True}})
+    v = svc.undo(aid, v["id"])                                          # undoes only the r2 tick
+    assert v["state"]["done"] == {"r1": True}
+    assert hub.annotations.get(aid, links["r1"])["task_state"] == "done"
+    assert hub.annotations.get(aid, links["r2"])["task_state"] == "open"
