@@ -82,3 +82,15 @@ After the runs above, check in Canvas:
 ## 7. COMP1023 external website (brief §3)
 
 Canvas Hub does not open the separate COMP1023 course website and never imports your Chrome profile `ngan`. If you want that site's content in Canvas Hub later, the documented route is user-controlled. You open it in your own Chrome profile, and a trusted collector produces an observation package that you import, under the same identity checks as the built-in collector. That collector could be the future Codex Canvas Reader adaptation. See `CODEX_HANDOFF.md` §5.
+
+## 8. Assistant and MCP (needs your own API key for 8.1–8.4)
+
+Don't paste your key into chat; enter it only in the app.
+
+| # | Step | Expected |
+| --- | --- | --- |
+| 8.1 | **Assistant → Settings**: pick a provider, paste your key, click **Save & test** | Shows *Connected* with the model name |
+| 8.2 | Ask "What's due in the next 7 days?" | Steps such as *Checked deadlines* appear; the answer matches the Deadlines page, in HKT |
+| 8.3 | Ask "Check Canvas for new announcements in MATH1023" (while signed in) | It starts a quick check limited to that course, waits for it, then answers. The job also appears under **Collection**. |
+| 8.4 | Ask "Add a to-do to start the next assignment on Saturday" | The to-do appears under **Notes & tasks**; nothing changes in Canvas |
+| 8.5 | Run `uv run canvas-hub mcp` and register it in Codex or Claude Code (command shown under **Data & settings → Connect other agents**) | The agent can list your courses and deadlines. Write tools appear only with `--allow-notes` / `--allow-writes`. |
