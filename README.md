@@ -93,8 +93,8 @@ In another terminal, run `uv run canvas-hub --home /tmp/canvas-hub-demo serve`, 
   - **Automatic refresh** (Collection) runs a quick check every 30 minutes to 4 hours while the app runs and you're signed in. It is off by default and never opens a sign-in window.
   - The 🔔 bell lists new announcements and assignments, changed due dates, newly posted grades and items that disappeared. Desktop notifications are optional.
   - Exam dates found in course pages appear under **Deadlines** for you to confirm.
-  - A timetable `.ics` can be imported into the Planner.
-- **Files:** finished work the assistant writes can be saved under **Notes & tasks → Files**, downloaded, or attached to a prepared submission.
+  - A timetable `.ics` can be imported into the Planner. Each saved class time repeats every week; fortnightly events are skipped and reported.
+- **Files:** finished work the assistant writes can be saved under **Notes & tasks → Files**, downloaded, or attached to a prepared submission. Uploaded UTF-8 text files (such as Markdown, CSV and JSON) can also be read back by the assistant.
 - **Trackers page:** the assistant can build a **score model** for a course, with each assessed line, its points, gating rules (all-or-nothing, minimum hours) and the pass mark. Untick lines you plan to skip and the total, ceiling and margin update immediately. It can also build a **checklist** that can be linked to your to-dos. Both are saved, with undo, and the assistant can read back what you ticked.
 - **Planner page:** add your class times, see your week with deadlines and to-dos, get suggested study blocks, and export to Apple Calendar (`.ics`). It's a local plan only.
 - **Agent requests page:** for sites outside Canvas (like a separate course website), leave a request that a connected agent with its own browser access can fulfil. Run the MCP server with `--allow-fulfil` for that agent. The text it sends back is stored, searchable, and labelled as agent-provided.

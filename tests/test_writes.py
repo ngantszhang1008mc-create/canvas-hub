@@ -133,6 +133,52 @@ def test_file_download_is_always_an_attachment(hub, account):
     assert c.put(f"/api/accounts/{account['id']}/write-settings", json={"enabled": True}, headers=hdr).json()["enabled"]
 
 
+@pytest.mark.parametrize("filename,mime", [
+    ("notes.txt", "text/plain"),
+    ("plan.md", "application/octet-stream"),
+    ("scores.csv", "text/csv"),
+    ("answer.json", "application/json"),
+    ("answer.data", "application/vnd.example+json"),
+    ("settings.yaml", "application/octet-stream"),
+])
+def test_uploaded_utf8_text_can_be_read_by_the_assistant(hub, account, filename, mime):
+    from fastapi.testclient import TestClient
+
+    from canvas_hub.web.app import create_app
+    api = HubAPI(hub)
+    c = TestClient(create_app(api, token="t" * 40, port=8730), base_url="http://127.0.0.1:8730")
+    hdr = {"Authorization": "Bearer " + "t" * 40, "X-Canvas-Hub": "1"}
+    base = f"/api/accounts/{account['id']}/files"
+    text = "Study plan — 溫習\nRead chapter 2.\n"
+    raw = text.encode("utf-8")
+    r = c.post(base, content=raw, headers={**hdr, "Content-Type": mime, "X-Filename": filename})
+    assert r.status_code == 200, r.text
+    saved = r.json()
+    assert saved["is_text"]
+    ctx = ToolContext(api=api, account_id=account["id"])
+    result, error, _ = run_tool_display(ctx, "get_file", {"file_id": saved["id"]}, {"read"})
+    assert not error and json.loads(result)["content"] == text
+    assert c.get(f"{base}/{saved['id']}/download", headers=hdr).content == raw
+
+
+@pytest.mark.parametrize("filename,mime,raw", [
+    ("document.pdf", "application/pdf", b"%PDF-1.7\nASCII bytes still belong to a PDF"),
+    ("data.bin", "application/octet-stream", b"ASCII bytes with no text file type"),
+    ("bad.txt", "text/plain", b"invalid UTF-8: \xff\xfe"),
+])
+def test_binary_or_invalid_utf8_uploads_are_not_read_as_text(hub, account, filename, mime, raw):
+    aid = account["id"]
+    saved = hub.files.save(aid, filename=filename, content=raw, mime=mime, created_by="user")
+    assert not saved["is_text"]
+    with pytest.raises(InvalidInput) as exc:
+        hub.files.text(aid, saved["id"])
+    assert exc.value.code == "not_text"
+    ctx = ToolContext(api=HubAPI(hub), account_id=aid)
+    result, error, _ = run_tool_display(ctx, "get_file", {"file_id": saved["id"]}, {"read"})
+    assert not error and "content" not in json.loads(result)
+    assert hub.files.get(aid, saved["id"], with_content=True)["content"] == raw
+
+
 @pytest.mark.browser
 def test_confirmed_writes_reach_canvas_through_the_browser(tmp_path):
     from .test_collector_e2e import Env

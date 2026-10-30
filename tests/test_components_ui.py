@@ -15,6 +15,7 @@ from canvas_hub.web.app import create_app
 
 from .fake_llm import FakeLLM
 from .test_components import HMAW
+from .test_dates_courses import FORTNIGHTLY_EVENT, ICS
 
 pytestmark = pytest.mark.browser
 
@@ -251,4 +252,26 @@ def test_a_chat_shows_changes_made_on_trackers_when_reopened(app_server, hub, ac
         expect(score.locator(".save-state")).to_contain_text("Saved", timeout=10000)
         pg.goto(chat)                                   # the chat's copy of the model is cached from before
         expect(pg.locator(".cmp-score .sl-big .num")).to_have_text("85", timeout=10000)
+        b.close()
+
+
+def test_timetable_import_shows_skipped_recurrences(app_server, hub, account):
+    from playwright.sync_api import expect, sync_playwright
+    base, tok, _ = app_server
+    ics = ICS.replace("END:VCALENDAR", FORTNIGHTLY_EVENT + "END:VCALENDAR")
+    with sync_playwright() as p:
+        b = p.chromium.launch()
+        pg = b.new_page()
+        pg.goto(f"{base}/?token={tok}")
+        pg.goto(f"{base}/#/planner")
+        upload = pg.locator('input[type="file"][accept=".ics,text/calendar"]')
+        upload.set_input_files({"name": "classes.ics", "mimeType": "text/calendar", "buffer": ics.encode("utf-8")})
+        expect(pg.locator("#toasts")).to_contain_text("Found 2 weekly class time(s), added 2. Skipped 1 event(s): Fortnightly lab")
+        expect(pg.get_by_text("COMP2711H Lecture").first).to_be_visible()
+        assert {c["title"] for c in hub.planner.list_classes(account["id"])} == {"COMP2711H Lecture"}
+
+        only_fortnightly = "BEGIN:VCALENDAR\n" + FORTNIGHTLY_EVENT + "END:VCALENDAR\n"
+        upload.set_input_files({"name": "labs.ics", "mimeType": "text/calendar", "buffer": only_fortnightly.encode("utf-8")})
+        expect(pg.locator("#toasts")).to_contain_text("no class times imported: only events that repeat every week are supported")
+        assert len(hub.planner.list_classes(account["id"])) == 2
         b.close()

@@ -1412,7 +1412,12 @@ VIEWS.planner = async (main, _p, params) => {
     h("label", { class: "btn sm", title: "Weekly repeating events become class times" }, "Import timetable .ics", h("input", { type: "file", accept: ".ics,text/calendar", onchange: async (e) => {
       const f = e.target.files[0]; if (!f) return;
       const r = await guard(() => api(A("/planner/import-ics"), { method: "POST", raw: true, body: f, contentType: "text/calendar" }));
-      if (r) { toast(`Found ${r.found} weekly class time(s), added ${r.added}`); route(); } } })));
+      if (r) {
+        const skipped = r.skipped || [];
+        const summary = `Found ${r.found} weekly class time(s), added ${r.added}`;
+        toast(summary + (skipped.length ? `. Skipped ${skipped.length} event(s): ` + skipped.slice(0, 3).map((s) => `${s.title}: ${s.reason}`).join("; ") : ""), skipped.length > 0);
+        route();
+      } } })));
   const accessible = courses.courses.filter((c) => c.access === "accessible");
   const f = { title: h("input", { type: "text", placeholder: "e.g. MATH1023 Lecture" }),
     course: h("select", null, h("option", { value: "" }, "Course (optional)"), accessible.map((c) => h("option", { value: c.course_id }, c.title))),

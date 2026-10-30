@@ -197,9 +197,13 @@ def find_clashes(hub, account_id: int, days_ahead: int = 21) -> dict:
         if isinstance(endv, dict) and endv.get("iso"):
             end_local = datetime.fromisoformat(endv["iso"].replace("Z", "+00:00")).astimezone(
                 datetime.fromisoformat(start).tzinfo).isoformat()
-        wd = datetime.fromisoformat(start).weekday()
+        local_date = datetime.fromisoformat(start).date()
+        wd = local_date.weekday()
         s_t, e_t = start[11:16], (end_local or start)[11:16]
         for c in classes:
+            if (c["valid_from"] and local_date.isoformat() < c["valid_from"]) or (
+                    c["valid_until"] and local_date.isoformat() > c["valid_until"]):
+                continue
             if c["weekday"] == wd and c["start_time"] < (max(s_t, e_t)) and s_t < c["end_time"]:
                 clashes.append({"event": e["title"], "course": e["course_title"], "when": start, "class": c["title"],
                                 "class_time": f"{c['start_time']}-{c['end_time']}", "event_item_id": e["item_id"]})

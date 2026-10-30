@@ -314,8 +314,13 @@ class HubAPI:
     def import_timetable(self, account_id, ics_text: str) -> dict:
         from .services.datefinder import parse_ics
         a = self._acct(account_id)
-        rows = parse_ics(ics_text, a.get("time_zone"))
+        skipped: list[dict] = []
+        rows = parse_ics(ics_text, a.get("time_zone"), skipped=skipped)
         if not rows:
+            if skipped:
+                raise InvalidInput("no class times imported: only events that repeat every week are supported. "
+                                   + " ".join(f"{s['title']}: {s['reason']}" for s in skipped[:3]),
+                                   code="no_weekly_events", detail={"skipped": skipped})
             raise InvalidInput("no weekly repeating events found in that calendar file", code="no_weekly_events")
         have = {(c["title"], c["weekday"], c["start_time"]) for c in self.hub.planner.list_classes(a["id"])}
         added = 0
@@ -326,7 +331,7 @@ class HubAPI:
                                        location=r["location"], valid_from=r["valid_from"], valid_until=r["valid_until"])
             have.add((r["title"], r["weekday"], r["start"]))
             added += 1
-        return {"found": len(rows), "added": added, "class_times": self.hub.planner.list_classes(a["id"])}
+        return {"found": len(rows), "added": added, "skipped": skipped, "class_times": self.hub.planner.list_classes(a["id"])}
 
     # ---- saved files ------------------------------------------------------------------------
     def list_files(self, account_id) -> dict:

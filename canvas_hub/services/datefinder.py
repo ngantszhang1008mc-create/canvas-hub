@@ -212,8 +212,13 @@ class DateFinder:
 _DAYS = {"MO": 0, "TU": 1, "WE": 2, "TH": 3, "FR": 4, "SA": 5, "SU": 6}
 
 
-def parse_ics(text: str, time_zone: str | None) -> list[dict]:
-    """Weekly recurring events from an iCalendar file -> class times."""
+def parse_ics(text: str, time_zone: str | None, *, skipped: list[dict] | None = None) -> list[dict]:
+    """Weekly recurring events from an iCalendar file -> class times.
+
+    The Planner stores a weekly pattern, so other repeat intervals cannot be
+    represented. Report those events to import callers instead of turning a
+    fortnightly class into one that happens every week.
+    """
     lines = []
     for raw in (text or "").replace("\r\n", "\n").split("\n"):
         if raw[:1] in (" ", "\t") and lines:
@@ -249,6 +254,16 @@ def parse_ics(text: str, time_zone: str | None) -> list[dict]:
         rr = dict(p.split("=", 1) for p in (e.get("RRULE", ("", {}))[0] or "").split(";") if "=" in p)
         if rr.get("FREQ") != "WEEKLY":
             continue
+        title = (e.get("SUMMARY", ("", {}))[0] or "Class").replace("\\,", ",").replace("\\;", ";")[:200]
+        try:
+            interval = int(rr.get("INTERVAL", "1"))
+        except ValueError:
+            interval = 0
+        if interval != 1:
+            if skipped is not None:
+                reason = f"Repeats every {interval} weeks." if interval > 1 else "Invalid repeat interval."
+                skipped.append({"title": title, "reason": reason + " Only events that repeat every week can be imported."})
+            continue
         s, en = dt(e.get("DTSTART")), dt(e.get("DTEND"))
         if not s or not en:
             continue
@@ -267,7 +282,6 @@ def parse_ics(text: str, time_zone: str | None) -> list[dict]:
         except ValueError:
             shift = 0
         days = [(_DAYS[d[-2:]] + shift) % 7 for d in rr.get("BYDAY", "").split(",") if d[-2:] in _DAYS] or [s.weekday()]
-        title = (e.get("SUMMARY", ("", {}))[0] or "Class").replace("\\,", ",").replace("\\;", ";")[:200]
         loc = (e.get("LOCATION", ("", {}))[0] or "").replace("\\,", ",")[:200] or None
         for wd in days:
             out.append({"title": title, "weekday": wd, "start": s.strftime("%H:%M"), "end": en.strftime("%H:%M"),

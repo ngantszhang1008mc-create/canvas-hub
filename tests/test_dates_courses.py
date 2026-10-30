@@ -117,3 +117,76 @@ def test_ics_weekdays_follow_the_time_zone_conversion():
     ics = ("BEGIN:VCALENDAR\nBEGIN:VEVENT\nSUMMARY:Late\nDTSTART;TZID=Asia/Hong_Kong:20260907T010000\n"
            "DTEND;TZID=Asia/Hong_Kong:20260907T020000\nRRULE:FREQ=WEEKLY;BYDAY=MO\nEND:VEVENT\nEND:VCALENDAR\n")
     assert [(r["weekday"], r["start"]) for r in parse_ics(ics, "UTC")] == [(6, "17:00")]
+
+
+FORTNIGHTLY_EVENT = """BEGIN:VEVENT
+SUMMARY:Fortnightly lab
+DTSTART;TZID=Asia/Hong_Kong:20260901T140000
+DTEND;TZID=Asia/Hong_Kong:20260901T150000
+RRULE:FREQ=WEEKLY;INTERVAL=2;BYDAY=TU
+END:VEVENT
+"""
+
+
+@pytest.mark.parametrize("interval", ["2", "0", "-1", "invalid"])
+def test_ics_refuses_unsupported_weekly_intervals(hub, account, interval):
+    ics = "BEGIN:VCALENDAR\n" + FORTNIGHTLY_EVENT.replace("INTERVAL=2", f"INTERVAL={interval}") + "END:VCALENDAR\n"
+    assert parse_ics(ics, "Asia/Hong_Kong") == []
+    with pytest.raises(InvalidInput) as exc:
+        HubAPI(hub).import_timetable(account["id"], ics)
+    assert "every week" in str(exc.value)
+    assert exc.value.detail["skipped"][0]["title"] == "Fortnightly lab"
+    assert hub.planner.list_classes(account["id"]) == []
+
+
+def test_ics_import_reports_skipped_fortnightly_events(hub, account):
+    ics = ICS.replace("END:VCALENDAR", FORTNIGHTLY_EVENT + "END:VCALENDAR")
+    r = HubAPI(hub).import_timetable(account["id"], ics)
+    assert r["found"] == r["added"] == 2
+    assert len(r["skipped"]) == 1 and r["skipped"][0]["title"] == "Fortnightly lab"
+    assert "every 2 weeks" in r["skipped"][0]["reason"]
+    assert {c["title"] for c in r["class_times"]} == {"COMP2711H Lecture"}
+    assert HubAPI(hub).import_timetable(account["id"], ics)["added"] == 0
+
+
+def test_ics_accepts_an_explicit_weekly_interval():
+    assert parse_ics(ICS.replace("FREQ=WEEKLY", "FREQ=WEEKLY;INTERVAL=1"), "Asia/Hong_Kong") == parse_ics(
+        ICS, "Asia/Hong_Kong")
+
+
+def test_clashes_use_class_validity_dates_in_the_account_time_zone(hub, account, fixture_pkg, monkeypatch):
+    from canvas_hub.services.querylayer import find_clashes
+
+    class FixedNow(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 11, 1, tzinfo=timezone.utc).astimezone(tz)
+
+    monkeypatch.setattr("canvas_hub.services.querylayer.datetime", FixedNow)
+    pkg = copy.deepcopy(fixture_pkg)
+    # Monday in UTC, Tuesday in the account's Hong Kong time zone.
+    pkg["items"].append({
+        "type": "calendar_event", "course_id": "4242", "canvas_id": "9001", "title": "Midterm",
+        "url": "https://canvas.example.edu/calendar?event_id=9001", "observed_at": "2026-10-30T01:58:10Z",
+        "method": "canvas_api", "depth": "detail", "fields": {
+            k: {"raw": v, "iso": v, "precision": "instant", "source": "canvas_api_iso8601"}
+            for k, v in (("start_at", "2026-11-02T16:30:00Z"), ("end_at", "2026-11-02T17:30:00Z"))
+        },
+    })
+    hub.importer.import_package(pkg)
+    aid = account["id"]
+    for title, valid_from, valid_until in [
+        ("Old term", None, "2026-11-02"),
+        ("Next term", "2026-11-04", None),
+        ("First day", "2026-11-03", None),
+        ("Last day", None, "2026-11-03"),
+        ("No bounds", None, None),
+    ]:
+        hub.planner.add_class(aid, title=title, weekday=1, start="00:00", end="02:00",
+                              valid_from=valid_from, valid_until=valid_until)
+    clashes = find_clashes(hub, aid)["events_overlapping_classes"]
+    expected = {"First day", "Last day", "No bounds"}
+    assert {c["class"] for c in clashes} == expected
+    planner = hub.planner.week(aid, week_of="2026-11-03", suggestions=False)
+    classes = {e["title"] for d in planner["days"] for e in d["events"] if e["kind"] == "class"}
+    assert classes == expected
