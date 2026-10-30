@@ -662,6 +662,8 @@ def _draft_categories(ctx, aid: int, course_id: str) -> list[dict]:
     lines = h_course_score_lines(ctx, {"course_id": course_id})
     cats: dict[str, dict] = {}
     for b in lines["buckets"]:
+        if b["status"] == "excused":            # excused work counts for nothing, not as work still to do
+            continue
         g = b.get("group") or "Assignments"
         c = cats.setdefault(g, {"id": re.sub(r"[^\w.:-]", "_", g)[:60] or "g", "name": g,
                                 "weight": lines["group_weights"].get(g), "items": []})
@@ -796,6 +798,9 @@ def h_course_score_lines(ctx, a):
     hub = ctx.api.hub
     now = datetime.now(timezone.utc)
     lines, groups = [], {}
+    course = hub.db.one("SELECT id FROM items WHERE account_id=? AND item_type='course' AND source_key=?",
+                        (aid, str(a["course_id"])))
+    weighting = hub.query._fields(course["id"]).get("apply_assignment_group_weights") if course else None
     for r in hub.db.query("""SELECT id, canvas_id, title FROM items WHERE account_id=? AND item_type='assignment'
                              AND course_canvas_id=? AND current_revision>0 ORDER BY id""", (aid, str(a["course_id"]))):
         f = hub.query._fields(r["id"])
@@ -821,10 +826,11 @@ def h_course_score_lines(ctx, a):
             line["status"] = "locked"
         else:
             line["status"] = "pending"
-        if f.get("assignment_group_weight"):
+        if f.get("assignment_group_weight") and weighting:     # group weights only count in a weighted course
             groups[f.get("assignment_group")] = f.get("assignment_group_weight")
         lines.append(line)
     return {"course_id": str(a["course_id"]), "buckets": lines, "group_weights": groups,
+            "grading": "weighted groups" if weighting else "points" if weighting is False else "not collected",
             "note": "Drafted from Canvas points and submission states. Gating rules (all-or-nothing, minimum hours) and "
                     "pass thresholds are not in Canvas data: ask the user or read the syllabus, then pass the buckets to "
                     "show_score_model. Graded = earned; missing or past due without a submission = lost."}
