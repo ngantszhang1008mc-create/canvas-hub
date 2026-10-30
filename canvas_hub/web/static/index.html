@@ -4,7 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Canvas Hub</title>
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230f766e'/%3E%3Cpath d='M9 10h14M9 16h14M9 22h9' stroke='white' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%231e1b16'/%3E%3Cpath d='M9 10h14M9 16h14M9 22h9' stroke='%23f3efe6' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E">
+  <link rel="preload" href="/static/source-serif-4.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="/static/styles.css">
   <script type="module" src="/static/app.js"></script>
 </head>
@@ -17,6 +18,7 @@
       </div>
       <div class="account-switch" id="account-switch"></div>
       <nav class="nav" id="nav" aria-label="Sections">
+        <div class="nav-label">Read</div>
         <a href="#/overview" data-view="overview">Overview</a>
         <a href="#/deadlines" data-view="deadlines">Deadlines</a>
         <a href="#/courses" data-view="courses">Courses</a>
@@ -24,7 +26,7 @@
         <a href="#/changes" data-view="changes">Changes</a>
         <a href="#/coverage" data-view="coverage">Coverage</a>
         <a href="#/notes" data-view="notes">Notes &amp; tasks</a>
-        <div class="nav-sep"></div>
+        <div class="nav-label">Manage</div>
         <a href="#/collect" data-view="collect">Collection</a>
         <a href="#/settings" data-view="settings">Data &amp; settings</a>
       </nav>

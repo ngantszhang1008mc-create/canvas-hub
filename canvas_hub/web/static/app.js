@@ -104,6 +104,16 @@ function dayKey(iso) {
   const d = parseTs(iso);
   return new Intl.DateTimeFormat("en-CA", { timeZone: tz(), year: "numeric", month: "2-digit", day: "2-digit" }).format(d);
 }
+function dateParts(iso) {
+  const d = parseTs(iso);
+  const f = (o) => new Intl.DateTimeFormat(undefined, { timeZone: tz(), ...o }).format(d);
+  const key = dayKey(iso);
+  const today = dayKey(new Date().toISOString());
+  const tomorrow = dayKey(new Date(Date.now() + 86400000).toISOString());
+  const diff = Math.round((Date.parse(key) - Date.parse(today)) / 86400000);
+  const rel = key === today ? "Today" : key === tomorrow ? "Tomorrow" : diff < 0 ? `${-diff} d ago` : `in ${diff} d`;
+  return { dow: f({ weekday: "short" }), day: f({ day: "numeric" }), mon: f({ month: "short", year: "numeric" }), rel, today: key === today };
+}
 function ago(iso) {
   const d = parseTs(iso); if (!d) return "never";
   const s = (Date.now() - d.getTime()) / 1000;
@@ -368,7 +378,7 @@ VIEWS.overview = async (main) => {
   const stats = h("div", { class: "grid cols-4" },
     h("div", { class: "card stat" }, h("span", { class: "label" }, "Due in 14 days"), h("span", { class: "value" }, dl.deadlines.length),
       h("span", { class: "hint" }, `${dl.deadlines.filter((d) => d.submission && !d.submission.submitted_at && !d.submission.excused && d.submission.workflow_state !== "graded").length} not yet submitted`)),
-    h("div", { class: "card stat" }, h("span", { class: "label" }, "Last thorough run"), h("span", { class: "value", style: "font-size:17px" }, fresh.last_thorough_job ? ago(fresh.last_thorough_job.finished_at) : "never"),
+    h("div", { class: "card stat" }, h("span", { class: "label" }, "Last thorough run"), h("span", { class: "value", style: "font-size:26px" }, fresh.last_thorough_job ? ago(fresh.last_thorough_job.finished_at) : "never"),
       h("span", { class: "hint" }, fresh.last_thorough_job ? JOB_LABEL[fresh.last_thorough_job.state] : "Run a baseline to start")),
     h("div", { class: "card stat" }, h("span", { class: "label" }, "Stored items"), h("span", { class: "value" }, fresh.items || 0),
       h("span", { class: "hint" }, fresh.items_not_currently_observed ? `${fresh.items_not_currently_observed} no longer listed` : "all currently observed")),
@@ -383,9 +393,9 @@ VIEWS.overview = async (main) => {
     disc.discrepancies.slice(0, 3).map((d) => h("div", { class: "small" }, h("a", { href: `#/item/${d.item_id}` }, d.item_title), " mentions ",
       (d.detail.announcement_mentions || []).join(", "), " for ", h("a", { href: `#/item/${d.other_item_id}` }, d.other_title), ` (due ${d.detail.assignment_due_local})`)))));
   const dlCard = h("div", { class: "card" }, h("div", { class: "card-head" }, h("h2", null, "Upcoming"), h("a", { href: "#/deadlines", class: "small" }, "All deadlines")),
-    dl.deadlines.length ? h("ul", { class: "list" }, dl.deadlines.slice(0, 8).map((d) => h("li", null,
-      h("div", { class: "spread" }, h("a", { class: "li-title", href: `#/item/${d.item_id}` }, d.title), submissionPill(d.submission)),
-      h("div", { class: "li-meta" }, h("span", null, fmtDate(d.date.iso, { weekday: true })), h("span", null, until(d.date.iso)), h("span", null, d.course_title || ""))))) :
+    dl.deadlines.length ? h("ul", { class: "list" }, dl.deadlines.slice(0, 8).map((d) => { const p = dateParts(d.date.iso); return h("li", null,
+      h("div", { class: "spread" }, h("div", null, h("span", { class: "li-date" }, `${p.dow} ${p.day}`), h("a", { class: "li-title", href: `#/item/${d.item_id}` }, d.title)), submissionPill(d.submission)),
+      h("div", { class: "li-meta", style: "padding-left:58px" }, h("span", null, fmtTime(d.date.iso)), h("span", null, until(d.date.iso)), h("span", null, d.course_title || ""))); })) :
       empty("Nothing due in the next 14 days", "Based on the deadlines collected so far."));
   const chCard = h("div", { class: "card" }, h("div", { class: "card-head" }, h("h2", null, "Recent changes"), h("a", { href: "#/changes", class: "small" }, "All changes")),
     recent.length ? h("ul", { class: "list" }, recent.map(eventLi)) : empty("No changes since the baseline", "Changes appear after a later check finds edits."));
@@ -420,9 +430,12 @@ VIEWS.deadlines = async (main, _p, params) => {
     h("label", { class: "check small", style: "margin-left:8px" }, h("input", { type: "checkbox", checked: cal ? true : null, onchange: (e) => { location.hash = `#/deadlines?range=${range}&cal=${e.target.checked ? 1 : 0}`; } }), "Include calendar events"));
   const groups = new Map();
   for (const d of data.deadlines) { const k = dayKey(d.date.iso); if (!groups.has(k)) groups.set(k, []); groups.get(k).push(d); }
-  const body = groups.size ? [...groups.entries()].map(([k, list]) => h("div", { class: "day-group" },
-    h("div", { class: "day-label" }, fmtDate(list[0].date.iso, { weekday: true, time: false })),
-    list.map((d) => {
+  const body = groups.size ? h("div", { class: "agenda" }, [...groups.entries()].map(([k, list]) => {
+    const p = dateParts(list[0].date.iso);
+    return h("div", { class: "day-group" + (p.today ? " today" : "") },
+    h("div", { class: "day-date" }, h("span", { class: "dow" }, p.dow), h("span", { class: "dnum" }, p.day),
+      h("span", { class: "mon" }, p.mon), h("span", { class: "rel" }, p.rel)),
+    h("div", { class: "day-items" }, list.map((d) => {
       const doneLocal = d.local_tasks && d.local_tasks.some((t) => t.task_state === "done");
       return h("div", { class: "deadline" + (doneLocal ? " done-local" : "") },
         h("div", { class: "time" }, fmtTime(d.date.iso)),
@@ -434,12 +447,13 @@ VIEWS.deadlines = async (main, _p, params) => {
             d.source_url ? h("a", { href: d.source_url, target: "_blank", rel: "noopener noreferrer" }, "Open in Canvas") : null)),
         h("div", { class: "row", style: "justify-content:flex-end" }, submissionPill(d.submission),
           d.item_type !== "calendar_event" ? localTaskToggle(d) : null));
-    }))) : [empty("Nothing in this range", "No collected deadlines fall in this window.")];
+    })));
+  })) : [empty("Nothing in this range", "No collected deadlines fall in this window.")];
   const unresolved = data.unresolved_dates.length ? h("div", { class: "card", style: "margin-top:14px" }, h("h2", null, "Dates that could not be placed"),
     h("p", { class: "muted small" }, "These dates were shown without a year or time zone. They are kept exactly as written rather than guessed."),
     h("ul", { class: "list" }, data.unresolved_dates.map((d) => h("li", null, h("a", { href: `#/item/${d.item_id}` }, d.title), " — ", d.date.raw)))) : null;
   mount(main, pageHead("Deadlines", `Times in ${data.time_zone}. Submission states are as Canvas reported them when last read.`), chips,
-    h("div", { style: "margin-top:14px" }, body), unresolved,
+    h("div", { style: "margin-top:18px" }, body), unresolved,
     h("p", { class: "muted small", style: "margin-top:16px" }, "The ✓ toggle is a private reminder stored locally. It never submits anything or changes Canvas."));
 };
 
@@ -469,7 +483,7 @@ VIEWS.courses = async (main) => {
         h("div", { class: "spread" }, h("span", { class: "strong" }, c.title), accessible ? null : pill("bad", c.access === "invitation_pending" ? "Invitation" : "Not accessible")),
         h("div", { class: "li-meta" }, c.course_code ? h("span", null, c.course_code) : null, c.term ? h("span", null, c.term) : null,
           c.published === false ? h("span", null, "unpublished") : null),
-        accessible ? h("div", { class: "li-meta" }, ["assignment", "announcement", "file", "page"].filter((t) => counts[t]).map((t) => h("span", null, `${counts[t]} ${TYPE_LABEL[t].toLowerCase()}s`))) : h("div", { class: "small muted", style: "margin-top:6px" }, "Listed in All Courses but cannot be opened; not collected."),
+        accessible ? h("div", { class: "li-meta" }, ["assignment", "announcement", "file", "page"].filter((t) => counts[t]).map((t) => h("span", null, `${counts[t]} ${TYPE_LABEL[t].toLowerCase()}${counts[t] === 1 ? "" : "s"}`))) : h("div", { class: "small muted", style: "margin-top:6px" }, "Listed in All Courses but cannot be opened; not collected."),
         h("div", { class: "tiny muted", style: "margin-top:6px" }, "last read " + ago(c.last_observed_at)));
     }))) : null;
   mount(main, pageHead("Courses", "From Courses → All Courses, including entries not shown on the Dashboard."),
@@ -702,7 +716,7 @@ VIEWS.coverage = async (main) => {
   const rows = [...byCourse.entries()].filter(([k]) => k);
   const matrix = rows.length ? h("div", { class: "table-wrap" }, h("table", { class: "matrix" },
     h("thead", null, h("tr", null, h("th"), cats.map((c) => h("th", { class: "rot" }, CAT_LABEL[c])))),
-    h("tbody", null, rows.map(([cid, recs]) => h("tr", null, h("th", { style: "max-width:260px;font-size:12.5px;color:var(--text)" }, titles[cid] || cid),
+    h("tbody", null, rows.map(([cid, recs]) => h("tr", null, h("th", { style: "max-width:280px" }, titles[cid] || cid),
       cats.map((c) => {
         const r = recs[c];
         const st = r ? r.latest.status : "none";
@@ -715,7 +729,7 @@ VIEWS.coverage = async (main) => {
   const acctCard = h("div", { class: "card" }, h("h2", null, "Account-wide"), h("table", { class: "t" }, h("tbody", null, Object.values(acct).map((r) => h("tr", { class: "clickable", onclick: () => showDetail(r) },
     h("td", null, CAT_LABEL[r.category]), h("td", null, pill(STATUS_CLASS[r.latest.status], r.latest.status.replace("_", " "))), h("td", { class: "small muted" }, r.latest.reason || (r.latest.detail.start ? `${fmtDate(r.latest.detail.start, { time: false })} – ${fmtDate(r.latest.detail.end, { time: false })}` : "")))))));
   const legend = h("div", { class: "legend" }, [["complete", "Complete"], ["partial", "Partial"], ["blocked", "Blocked"], ["not_exposed", "Not in navigation"], ["none", "Not recorded"]].map(([k, l]) =>
-    h("span", null, h("span", { class: "swatch", style: `background:var(--${{ complete: "ok-soft", partial: "warn-soft", blocked: "bad-soft", not_exposed: "muted-soft", none: "surface" }[k]});border:1px solid var(--border-strong)` }), l)));
+    h("span", null, h("span", { class: "swatch " + k }), l)));
   const pending = cov.unfinished_jobs.length ? h("div", { class: "card" }, h("h2", null, "Unfinished work"), cov.unfinished_jobs.map((j) => h("div", null,
     h("div", { class: "row" }, h("span", { class: "strong" }, `Job ${j.id}`), pill(JOB_CLASS[j.state], JOB_LABEL[j.state]), h("span", { class: "small muted" }, j.message || "")),
     h("div", { class: "small muted" }, `${j.pending_tasks.length} destination(s) pending`)))) : null;

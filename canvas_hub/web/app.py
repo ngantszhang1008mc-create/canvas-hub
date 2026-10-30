@@ -16,6 +16,7 @@ from ..util import HubError, InvalidInput
 from .security import COOKIE, CSP, allowed_hosts, token_ok
 
 log = logging.getLogger("canvas_hub.web")
+mimetypes.add_type("font/woff2", ".woff2")
 STATIC = Path(str(importlib_resources.files("canvas_hub") / "web" / "static"))
 
 
