@@ -381,11 +381,13 @@ async function route() {
   const old = $("#main");
   const main = old.cloneNode(false);
   if (!keep) main.classList.remove("fill");
+  delete main.dataset.keepScroll;                    // the clone copies it from the page before
   const lists = keep ? [...old.querySelectorAll(".conv-scroll, .chat-scroll")].map((el) => [el, el.scrollTop]) : [];
   old.replaceWith(main);
   if (keep) {
     main.append(...old.childNodes);
     for (const [el, top] of lists) el.scrollTop = top;          // moving them resets where they were scrolled to
+    for (const el of main.children) el.inert = true;            // shown, but nothing sends to the old chat
     main.dataset.keepScroll = String(scrollY);
   }
   else mount(main, h("div", { class: "muted" }, "Loading…"));

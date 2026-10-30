@@ -1,5 +1,7 @@
 """The assistant chat in a real browser: replies appear word by word, and the focus mode."""
 
+import time
+
 import pytest
 
 from .test_components_ui import serve
@@ -165,5 +167,20 @@ def test_switching_chats_keeps_the_page_where_it_is(hub, account):
         pg.get_by_role("button", name="Chat").click()
         expect(pg.locator(".composer")).to_be_visible()
         assert pg.evaluate("window.scrollY") == y
+        # While the next chat loads, the old one stays on screen but cannot be used: nothing goes to the old chat.
+        pg.route("**/api/assistant/config", lambda route: (time.sleep(1.0), route.continue_()))
+        pg.locator(".conv").filter(has=pg.get_by_text("Question 2", exact=True)).click()
+        pg.wait_for_timeout(300)
+        assert pg.locator(".composer textarea").evaluate("el => !!el.closest('[inert]')")
+        expect(pg.locator(".msg.user .bubble").first).to_have_text("Question 2")
+        assert not pg.locator(".composer textarea").evaluate("el => !!el.closest('[inert]')")
+        pg.unroute("**/api/assistant/config")
+        # Another page, then back: an ordinary visit starts at the top again.
+        pg.goto(f"{base}/#/deadlines")
+        expect(pg.locator(".main > .page-head")).to_be_visible()
+        pg.goto(f"{base}/#/assistant")
+        expect(pg.locator(".composer")).to_be_visible()
+        pg.wait_for_timeout(200)
+        assert pg.evaluate("window.scrollY") == 0
         b.close()
     assert not errors, errors
