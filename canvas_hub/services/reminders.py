@@ -6,6 +6,11 @@ from datetime import datetime, timezone
 
 from ..db import Database
 from ..util import InvalidInput, NotFound, now_iso, parse_iso, to_utc_iso
+from .deadlines import archived_sql
+
+
+_ACTIVE = f"NOT EXISTS (SELECT 1 FROM items i WHERE i.id=COALESCE(reminders.item_id, " \
+          f"(SELECT item_id FROM annotations WHERE id=reminders.annotation_id)) AND {archived_sql()})"
 
 
 class ReminderService:
@@ -36,7 +41,7 @@ class ReminderService:
         return dict(r)
 
     def list(self, account_id: int, status: str | None = "pending") -> list[dict]:
-        sql, p = "SELECT * FROM reminders WHERE account_id=?", [account_id]
+        sql, p = f"SELECT * FROM reminders WHERE account_id=? AND {_ACTIVE}", [account_id]
         if status:
             sql += " AND status=?"
             p.append(status)
@@ -47,7 +52,7 @@ class ReminderService:
         now = to_utc_iso(datetime.now(timezone.utc))
         with self.db.tx() as c:
             rows = [dict(r) for r in c.execute(
-                "SELECT * FROM reminders WHERE account_id=? AND status='pending' AND remind_at<=? ORDER BY remind_at",
+                f"SELECT * FROM reminders WHERE account_id=? AND status='pending' AND remind_at<=? AND {_ACTIVE} ORDER BY remind_at",
                 (account_id, now)).fetchall()]
             c.executemany("UPDATE reminders SET status='fired', fired_at=? WHERE id=?", [(now_iso(), r["id"]) for r in rows])
         return rows

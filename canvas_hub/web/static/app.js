@@ -516,15 +516,73 @@ function eventLi(e) {
 }
 
 // ---------- deadlines ----------
+function archiveDeadlineButton(d) {
+  return h("button", { class: "sm ghost", onclick: async (e) => {
+    e.target.disabled = true;
+    const r = await guard(() => api(A(`/deadlines/${d.item_id}/archive`), { method: "PATCH", body: { archived: !d.archived } }));
+    if (r) { toast(r.archived ? "Deadline archived" : "Deadline restored"); await route(); }
+    else e.target.disabled = false;
+  } }, d.archived ? "Restore" : "Archive");
+}
+
 VIEWS.deadlines = async (main, _p, params) => {
-  const range = params.get("range") || "14";
-  const start = new Date(Date.now() - (range === "past" ? 30 : 1) * 86400000);
-  const end = new Date(Date.now() + (range === "past" ? 0 : Number(range)) * 86400000 + 1);
-  const cal = params.get("cal") !== "0";
-  const data = await api(A("/deadlines") + qs({ start: start.toISOString(), end: end.toISOString(), include_calendar: cal }));
-  const chips = h("div", { class: "chips" }, [["7", "7 days"], ["14", "14 days"], ["30", "30 days"], ["120", "Term"], ["past", "Past 30 days"]].map(([k, l]) =>
-    h("button", { class: "chip" + (k === range ? " on" : ""), onclick: () => { location.hash = `#/deadlines?range=${k}&cal=${cal ? 1 : 0}`; } }, l)),
-    h("label", { class: "check small", style: "margin-left:8px" }, h("input", { type: "checkbox", checked: cal ? true : null, onchange: (e) => { location.hash = `#/deadlines?range=${range}&cal=${e.target.checked ? 1 : 0}`; } }), "Include calendar events"));
+  if (params.get("archive") === "1") {
+    const data = await api(A("/deadlines/archived"));
+    mount(main, pageHead("Archived deadlines", "Hidden from active views. Restore a deadline to show it again. Canvas and grade records are unchanged."),
+      h("a", { class: "btn", href: "#/deadlines" }, "Back to deadlines"),
+      data.deadlines.length ? h("div", { class: "card", style: "margin-top:14px" }, h("ul", { class: "list" }, data.deadlines.map((d) => h("li", null,
+        h("div", { class: "spread" }, h("div", null, h("a", { class: "strong", href: `#/item/${d.item_id}` }, d.title),
+          h("div", { class: "small muted" }, d.course_title || "", d.date?.iso ? ` · ${fmtDate(d.date.iso)}` : "")),
+          archiveDeadlineButton({ ...d, archived: true })))))) : empty("No archived deadlines", "Archive a deadline from any saved deadline view."));
+    return;
+  }
+  const [views, coursesData] = await Promise.all([api(A("/deadline-views")), api(A("/courses"))]);
+  const tab = views.tabs.find((t) => t.id === views.active_tab) || views.tabs[0];
+  const filters = { ...tab.filters };
+  // Old bookmarks remain usable without changing the saved view.
+  if (["7", "14", "30", "120", "365", "past", "all"].includes(params.get("range"))) filters.range = params.get("range");
+  if (params.has("cal")) filters.include_calendar = params.get("cal") !== "0";
+  const range = filters.range;
+  const start = range === "all" ? new Date("1900-01-01T00:00:00Z") : new Date(Date.now() - (range === "past" ? 30 : 1) * 86400000);
+  const end = range === "all" ? new Date("9999-01-01T00:00:00Z") : new Date(Date.now() + (range === "past" ? 0 : Number(range)) * 86400000 + 1);
+  const request = { start: start.toISOString(), end: end.toISOString(), include_calendar: filters.include_calendar,
+    course_id: filters.course_id, item_type: filters.item_type, status: filters.status, archive: filters.archive, limit: 500 };
+  const data = await api(A("/deadlines") + qs(request));
+  while (data.next_cursor) {
+    const next = await api(A("/deadlines") + qs({ ...request, cursor: data.next_cursor }));
+    data.deadlines.push(...next.deadlines); data.next_cursor = next.next_cursor;
+  }
+  const saveFilters = async (patch) => {
+    if (await guard(() => api(A("/deadline-views"), { method: "POST", body: { id: tab.id, filters: patch } }))) {
+      if (location.hash !== "#/deadlines") location.hash = "#/deadlines"; else route();
+    }
+  };
+  const picker = (label, key, options) => h("label", { class: "field" }, h("span", null, label),
+    h("select", { "aria-label": label, onchange: (e) => saveFilters({ [key]: e.target.value }) },
+      options.map(([v, l]) => h("option", { value: v, selected: filters[key] === v ? true : null }, l))));
+  const name = h("input", { "aria-label": "Deadline tab name", value: tab.name, maxlength: 60 });
+  const chips = h("div", null, h("div", { class: "chips", role: "tablist", "aria-label": "Deadline views" }, views.tabs.map((t) =>
+    h("button", { class: "chip" + (t.id === tab.id ? " on" : ""), role: "tab", "aria-selected": String(t.id === tab.id), onclick: async () => {
+      if (await guard(() => api(A("/deadline-views/active"), { method: "PUT", body: { id: t.id } }))) {
+        if (location.hash !== "#/deadlines") location.hash = "#/deadlines"; else route();
+      }
+    } }, t.name))),
+    h("div", { class: "row", style: "margin-top:12px;align-items:end;flex-wrap:wrap" },
+      picker("Date range", "range", [["7", "7 days"], ["14", "14 days"], ["30", "30 days"], ["120", "Term"], ["365", "Year"], ["past", "Past 30 days"], ["all", "All dates"]]),
+      picker("Deadline course", "course_id", [["", "All courses"], ...coursesData.courses.map((c) => [c.course_id, c.title])]),
+      picker("Deadline type", "item_type", [["", "All types"], ["assignment", "Assignments"], ["quiz", "Quizzes"], ["calendar_event", "Calendar events"]]),
+      picker("Deadline status", "status", [["all", "Any status"], ["unfinished", "Unfinished"], ["completed", "Completed"]]),
+      h("label", { class: "check small" }, h("input", { type: "checkbox", checked: filters.include_calendar ? true : null,
+        onchange: (e) => saveFilters({ include_calendar: e.target.checked }) }), "Include calendar events"),
+      h("label", { class: "check small" }, h("input", { type: "checkbox", checked: filters.archive !== "active" ? true : null,
+        onchange: (e) => saveFilters({ archive: e.target.checked ? "all" : "active" }) }), "Show archived"),
+      h("a", { class: "btn sm", href: "#/deadlines?archive=1" }, "Archive list")),
+    h("details", { style: "margin-top:12px" }, h("summary", null, "Edit deadline tabs"), h("div", { class: "row", style: "margin-top:8px;flex-wrap:wrap" }, name,
+      h("button", { class: "sm", onclick: async () => { if (await guard(() => api(A("/deadline-views"), { method: "POST", body: { id: tab.id, name: name.value } }))) route(); } }, "Rename tab"),
+      h("button", { class: "sm", onclick: async () => { if (await guard(() => api(A("/deadline-views"), { method: "POST", body: { name: name.value, filters } }))) route(); } }, "Save as new tab"),
+      h("button", { class: "sm ghost", disabled: views.tabs.length === 1, onclick: async () => {
+        if (await guard(() => api(A(`/deadline-views/${tab.id}`), { method: "DELETE" }))) route();
+      } }, "Delete tab"))));
   const groups = new Map();
   for (const d of data.deadlines) { const k = dayKey(d.date.iso); if (!groups.has(k)) groups.set(k, []); groups.get(k).push(d); }
   const body = groups.size ? h("div", { class: "agenda" }, [...groups.entries()].map(([k, list]) => {
@@ -537,6 +595,7 @@ VIEWS.deadlines = async (main, _p, params) => {
       return h("div", { class: "deadline" + (doneLocal ? " done-local" : "") },
         h("div", { class: "time" }, fmtTime(d.date.iso), h("div", null, C.countdown(d.date.iso))),
         h("div", null, h("div", { class: "row" }, h("a", { class: "strong", href: `#/item/${d.item_id}` }, d.title),
+          d.archived ? pill("muted", "Archived") : null,
           d.item_type !== "assignment" ? pill("muted plain", TYPE_LABEL[d.item_type]) : null, d.presence !== "observed" ? pill("bad", "no longer listed") : null),
           h("div", { class: "li-meta" }, h("span", null, d.course_title || ""), d.points_possible != null ? h("span", null, `${d.points_possible} pts`) : null,
             d.location_name ? h("span", null, d.location_name) : null,
@@ -544,12 +603,12 @@ VIEWS.deadlines = async (main, _p, params) => {
             d.source_url ? h("a", { href: d.source_url, target: "_blank", rel: "noopener noreferrer" }, "Open in Canvas") : null)),
         h("div", { class: "row", style: "justify-content:flex-end" }, submissionPill(d.submission),
           d.item_type !== "calendar_event" ? C.remindButton({ title: `Due: ${d.title}`, due: d.date.iso, item_id: d.item_id }) : null,
-          d.item_type !== "calendar_event" ? localTaskToggle(d) : null));
+          d.item_type !== "calendar_event" ? localTaskToggle(d) : null, archiveDeadlineButton(d)));
     })));
   })) : [empty("Nothing in this range", "No collected deadlines fall in this window.")];
   const unresolved = data.unresolved_dates.length ? h("div", { class: "card", style: "margin-top:14px" }, h("h2", null, "Dates that could not be placed"),
     h("p", { class: "muted small" }, "These dates were shown without a year or time zone. They are kept exactly as written rather than guessed."),
-    h("ul", { class: "list" }, data.unresolved_dates.map((d) => h("li", null, h("a", { href: `#/item/${d.item_id}` }, d.title), " — ", d.date.raw)))) : null;
+    h("ul", { class: "list" }, data.unresolved_dates.map((d) => h("li", null, h("a", { href: `#/item/${d.item_id}` }, d.title), " — ", d.date.raw, archiveDeadlineButton(d))))) : null;
   const found = await api(A("/date-candidates/scan"), { method: "POST" }).catch(() => ({ candidates: [] }));
   const sugg = found.candidates.filter((c) => c.status === "suggested" && new Date(c.starts_at) > Date.now() - 86400000);
   const conf = found.candidates.filter((c) => c.status === "confirmed" && new Date(c.starts_at) > Date.now() - 86400000);
@@ -710,7 +769,8 @@ VIEWS.item = async (main, parts) => {
   const id = parts[0];
   const [it, hist] = await Promise.all([api(A(`/items/${id}`)), api(A(`/items/${id}/history`))]);
   const head = pageHead(it.title || "(untitled)", null,
-    it.source_url ? h("a", { class: "btn", href: it.source_url, target: "_blank", rel: "noopener noreferrer" }, "Open in Canvas") : null);
+    it.source_url ? h("a", { class: "btn", href: it.source_url, target: "_blank", rel: "noopener noreferrer" }, "Open in Canvas") : null,
+    ["assignment", "quiz", "calendar_event"].includes(it.item_type) ? archiveDeadlineButton({ item_id: it.id, archived: it.deadline_archived }) : null);
   const meta = h("div", { class: "row", style: "margin:-8px 0 14px" }, pill("muted plain", TYPE_LABEL[it.item_type]),
     it.course_canvas_id ? h("a", { href: `#/course/${it.course_canvas_id}`, class: "small" }, it.course_title || "Course " + it.course_canvas_id) : null,
     h("span", { class: "small muted" }, `first seen ${fmtDate(it.first_observed_at)} · last read ${ago(it.last_observed_at)}`));
@@ -718,6 +778,7 @@ VIEWS.item = async (main, parts) => {
   if (it.presence !== "observed") banners.push(h("div", { class: "banner bad" }, h("div", { class: "b-body" }, h("div", { class: "b-title" },
     it.presence === "source_unavailable" ? "Canvas no longer serves this item" : "Not in the latest complete list"),
     h("div", { class: "small" }, it.presence_detail || "", ". The last known content below is kept as evidence; this does not prove it was deleted."))));
+  if (it.deadline_archived) banners.push(h("div", { class: "banner info" }, "This deadline is archived and hidden from active views. Restore it to show it again."));
   if (it.freshness.state === "mixed") banners.push(h("div", { class: "banner info" }, h("div", { class: "b-body" }, h("div", { class: "b-title" }, "Fields were read at different times"),
     h("div", { class: "small" }, `Oldest field read ${ago(it.freshness.oldest_field_observed_at)}, newest ${ago(it.freshness.newest_field_observed_at)}. Each field shows when it was last read.`))));
   if (it.freshness.state === "not_collected") banners.push(h("div", { class: "banner warn" }, h("div", { class: "b-body" }, h("div", { class: "b-title" }, "Content not read"),
@@ -1437,7 +1498,7 @@ VIEWS.assistant = async (main, parts, params) => {
   reasoningSel.addEventListener("change", () => store.set(`reasoning.${setupSel.value}`, reasoningSel.value));
   const perms = cfg.permissions;
   const footer = h("div", { class: "chat-foot tiny muted" },
-    h("span", null, `Can ${["read your data", perms.notes ? "edit your notes" : null, perms.collect ? "check Canvas" : null, perms.settings ? "change scope" : null].filter(Boolean).join(", ")}. Questions and the data it reads go to the chosen provider.`));
+    h("span", null, `Can ${["read your data", perms.notes ? "edit your notes" : null, perms.collect ? "check Canvas" : null, perms.deadlines ? "manage deadlines" : null, perms.settings ? "change scope" : null].filter(Boolean).join(", ")}. Questions and the data it reads go to the chosen provider.`));
   scroller.append(log, status);
   if (!current) scroller.append(h("div", { class: "chat-empty", id: "chat-empty" }, h("div", { class: "e-title" }, "What would you like to know?"), suggestions));
   const chat = h("div", { class: "chat" }, scroller,
@@ -1500,15 +1561,17 @@ function assistantPermissionsCard(cfg) {
   const pNotes = h("input", { type: "checkbox", checked: cfg.permissions.notes ? true : null });
   const pCollect = h("input", { type: "checkbox", checked: cfg.permissions.collect ? true : null });
   const pSettings = h("input", { type: "checkbox", checked: cfg.permissions.settings ? true : null });
+  const pDeadlines = h("input", { type: "checkbox", checked: cfg.permissions.deadlines ? true : null });
   return h("div", { class: "card" },
     h("div", { class: "card-head" }, h("h2", null, "The assistant may"), h("span", { class: "sub" }, "applies to every setup")),
     h("div", { class: "perm-list" },
       h("label", { class: "check" }, h("input", { type: "checkbox", checked: true, disabled: true }), "Read your stored Canvas data (always)"),
       h("label", { class: "check" }, pNotes, "Create and edit your local notes and to-dos (never sent to Canvas)"),
+      h("label", { class: "check" }, pDeadlines, "Manage deadline tabs, filters and archives (local only; on by default)"),
       h("label", { class: "check" }, pCollect, "Check Canvas for updates using the app's signed-in browser (read-only; same safety rules as Quick check)"),
       h("label", { class: "check" }, pSettings, "Change which courses and sections are collected")),
     h("div", { class: "row", style: "margin-top:14px" }, h("button", { class: "primary", onclick: async () => {
-      const r = await guard(() => api("/api/assistant/config", { method: "PUT", body: { permissions: { notes: pNotes.checked, collect: pCollect.checked, settings: pSettings.checked } } }));
+      const r = await guard(() => api("/api/assistant/config", { method: "PUT", body: { permissions: { notes: pNotes.checked, collect: pCollect.checked, settings: pSettings.checked, deadlines: pDeadlines.checked } } }));
       if (r) toast("Permissions saved");
     } }, "Save permissions")));
 }

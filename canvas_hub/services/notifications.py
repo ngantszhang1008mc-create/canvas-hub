@@ -13,6 +13,7 @@ import json
 from .. import dates
 from ..db import Database
 from .settings import AccountSettings
+from .deadlines import archived_sql
 
 NEW_TYPES = ("announcement", "assignment", "quiz", "discussion", "calendar_event", "page", "file")
 WATCHED_FIELDS = {
@@ -61,12 +62,12 @@ class NotificationService:
     def feed(self, account_id: int, limit: int = 30) -> dict:
         seen = int(self.settings.get(account_id, "notifications").get("last_seen_change_id") or 0)
         rows = self.db.query(
-            """SELECT e.id, e.kind, e.field, e.old_json, e.new_json, e.observed_at, e.recorded_at, e.item_id,
+            f"""SELECT e.id, e.kind, e.field, e.old_json, e.new_json, e.observed_at, e.recorded_at, e.item_id,
                       i.item_type, i.title, i.course_canvas_id, i.source_url,
                       (SELECT title FROM items c WHERE c.account_id=e.account_id AND c.item_type='course'
                         AND c.canvas_id=i.course_canvas_id) AS course_title
                FROM change_events e JOIN items i ON i.id=e.item_id
-               WHERE e.account_id=? AND e.baseline=0 ORDER BY e.id DESC LIMIT 600""", (account_id,))
+               WHERE e.account_id=? AND e.baseline=0 AND NOT {archived_sql()} ORDER BY e.id DESC LIMIT 600""", (account_id,))
         acct = self.db.one("SELECT time_zone FROM accounts WHERE id=?", (account_id,))
         tz = acct["time_zone"] if acct else None
         mirrors = {r["item_id"] for r in self.db.query(

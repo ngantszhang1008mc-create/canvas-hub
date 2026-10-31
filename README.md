@@ -92,6 +92,19 @@ uv run canvas-hub fake-canvas --port 8765    # synthetic data only
 
 In another terminal, run `uv run canvas-hub --home /tmp/canvas-hub-demo serve` on macOS, or `uv run canvas-hub --home "$env:TEMP\canvas-hub-demo" serve` in Windows PowerShell. Paste `http://127.0.0.1:8765/`, and sign in with the test credentials the fake server prints.
 
+## Organize deadlines
+
+On **Deadlines**, use **Archive** to hide a Canvas deadline from active lists, search, the overview, planner,
+reminders and calendar exports. **Show archived** includes hidden deadlines in the current view;
+**Archive list** shows all archived deadlines, including older ones. Press **Restore** to bring one back.
+Archiving is local and survives refreshes and backups; it never changes Canvas or the underlying grade records.
+
+Each deadline tab saves its date range, course, type, completion and archive filters. Open **Edit deadline tabs**
+to rename, copy or delete a tab. These views are saved per Canvas account and shared with the assistant.
+
+The in-app assistant can manage these tabs, filters and archives too. **Assistant → Settings → The assistant may →
+Manage deadline tabs, filters and archives** is on by default; switch it off to disable assistant changes.
+
 ## Assistant and other agents
 
 - **Assistant page:** chat with your Canvas data using your own API key. It has a **Chat** tab, where only the conversation scrolls, and a **Settings** tab, where you can save several setups (for example DeepSeek and Claude). Next to the message box you pick the setup and the reasoning effort for each message; the reasoning level is not part of a saved setup.

@@ -206,7 +206,10 @@ footer{margin-top:24px;font-size:12px;color:#8b8170}</style></head><body><h1>${h
       h("div", { class: "row", style: "margin-top:8px" },
         h("button", { class: "sm", onclick: async (ev) => { const r = await guard(() => api(A("/annotations"), { method: "POST", body: { kind: "task", item_id: x.item_id, title: x.title } })); if (r) { ev.target.textContent = "✓ Added"; ev.target.disabled = true; } } }, "+ To-do"),
         x.source_url ? h("a", { class: "btn sm", href: x.source_url, target: "_blank", rel: "noopener noreferrer" }, "Open in Canvas") : null,
-        remindButton({ title: `Due: ${x.title}`, due: x.due_local, item_id: x.item_id })))) : h("div", { class: "muted small" }, "No deadlines in that range."));
+        remindButton({ title: `Due: ${x.title}`, due: x.due_local, item_id: x.item_id }),
+        h("button", { class: "sm ghost", onclick: async () => {
+          if (await guard(() => api(A(`/deadlines/${x.item_id}/archive`), { method: "PATCH", body: { archived: true } }))) env.route();
+        } }, "Archive")))) : h("div", { class: "muted small" }, "No deadlines in that range."));
     afterRender();
     return frame("deadlines", "Deadlines", body, () => ({ title: "Deadlines", markdown: toMD(["Title", "Course", "Due", "Status"], rows),
       csv: toCSV(["Title", "Course", "Due", "Status"], rows), json: d.deadlines,
@@ -1176,6 +1179,10 @@ ${pv.body || ""}`, json: w })));
   const cache = new Map();
   function componentView(d, ctx = {}, key = null) {
     if (!d) return null;
+    // Deadline snapshots may have changed because an item was archived since
+    // this answer was saved. Rebuild these cards when the visible data changes.
+    const visibility = ["deadlines", "timetable"].includes(d.component) ? JSON.stringify(d) : null;
+    if (key && cache.has(key) && cache.get(key).visibility !== visibility) cache.delete(key);
     if (key && cache.has(key)) {
       const hit = cache.get(key);
       // Shown again in a different chat view: a saved component may have changed meanwhile (not on every re-render).
@@ -1210,7 +1217,7 @@ ${pv.body || ""}`, json: w })));
     } catch (e) {
       el = h("div", { class: "cmp muted small" }, `Could not show this ${d.component}: ${e.message}`);
     }
-    if (key && el) { cache.set(key, { el, ref }); if (cache.size > 300) cache.delete(cache.keys().next().value); }
+    if (key && el) { cache.set(key, { el, ref, visibility }); if (cache.size > 300) cache.delete(cache.keys().next().value); }
     return el;
   }
 

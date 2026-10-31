@@ -127,10 +127,29 @@ class HubAPI:
         return self.hub.query.history(a["id"], int(item_id))
 
     def deadlines(self, account_id, *, start: str, end: str, time_zone=None, course_id=None,
-                  include_calendar=True, limit=None, cursor=None) -> dict:
+                  include_calendar=True, limit=None, cursor=None, archive="active", item_type=None, status="all") -> dict:
         a = self._acct(account_id)
         return self.hub.query.deadlines(a["id"], start=start, end=end, time_zone=time_zone, course_id=course_id,
-                                        include_calendar=self._bool(include_calendar, True), limit=limit, cursor=cursor)
+                                        include_calendar=self._bool(include_calendar, True), limit=limit, cursor=cursor,
+                                        archive=archive, item_type=item_type, status=status)
+
+    def archive_deadline(self, account_id, item_id, archived: bool) -> dict:
+        return self.hub.deadlines.set_archived(self._acct(account_id)["id"], int(item_id), archived)
+
+    def archived_deadlines(self, account_id) -> dict:
+        return self.hub.deadlines.archive_list(self._acct(account_id)["id"])
+
+    def deadline_views(self, account_id) -> dict:
+        return self.hub.deadlines.views(self._acct(account_id)["id"])
+
+    def save_deadline_tab(self, account_id, data) -> dict:
+        return self.hub.deadlines.save_tab(self._acct(account_id)["id"], data)
+
+    def select_deadline_tab(self, account_id, tab_id) -> dict:
+        return self.hub.deadlines.select_tab(self._acct(account_id)["id"], tab_id)
+
+    def delete_deadline_tab(self, account_id, tab_id) -> dict:
+        return self.hub.deadlines.delete_tab(self._acct(account_id)["id"], tab_id)
 
     def changes(self, account_id, *, cursor=None, since=None, include_baseline=False, include_first_observed=True,
                 kinds=None, course_id=None, limit=None) -> dict:
