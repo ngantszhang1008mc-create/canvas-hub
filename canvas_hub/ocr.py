@@ -111,10 +111,13 @@ def _parse_tsv(tsv: str) -> tuple[str, list[float]]:
 
 def _ocr_image(tess: str, image: Path, lang: str) -> tuple[str, list[float]]:
     out = subprocess.run(command_for_process([tess, image, "stdout", "-l", lang, "--psm", "3", "tsv"]),
-                         capture_output=True, text=True, check=False, timeout=PAGE_TIMEOUT)
+                         capture_output=True, check=False, timeout=PAGE_TIMEOUT)
     if out.returncode != 0:
-        raise RuntimeError((out.stderr or "tesseract failed").strip()[:300])
-    return _parse_tsv(out.stdout)
+        detail = (out.stderr or b"tesseract failed").decode("utf-8", errors="replace")
+        raise RuntimeError(detail.strip()[:300])
+    # Tesseract emits UTF-8 TSV. Do not let text=True choose a locale code page
+    # such as cp1252 on Windows, which corrupts non-ASCII output.
+    return _parse_tsv(out.stdout.decode("utf-8"))
 
 
 def ocr_file(path: Path, ext: str, lang: str = "eng") -> OcrResult:

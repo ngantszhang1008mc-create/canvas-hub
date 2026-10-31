@@ -308,6 +308,34 @@ def test_ocr_reads_tsv_into_lines_and_paragraphs():
         ocr.valid_lang("eng; rm -rf /")
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows locale and batch-shim regression")
+def test_windows_ocr_reads_utf8_tsv_and_spaced_paths(tmp_path, monkeypatch):
+    from canvas_hub import ocr
+
+    program_dir = tmp_path / "Program Files" / "OCR 工具"
+    program_dir.mkdir(parents=True)
+    script = program_dir / "fake tesseract.py"
+    script.write_text(
+        "import sys\n"
+        "rows = [\n"
+        "    'level\\tpage_num\\tblock_num\\tpar_num\\tline_num\\tword_num\\tleft\\ttop\\twidth\\theight\\tconf\\ttext',\n"
+        "    '5\\t1\\t1\\t1\\t1\\t1\\t0\\t0\\t10\\t10\\t91\\t中文',\n"
+        "]\n"
+        "sys.stdout.buffer.write(('\\n'.join(rows) + '\\n').encode('utf-8'))\n",
+        encoding="utf-8",
+    )
+    shim = program_dir / "tesseract command.cmd"
+    shim.write_text(f'@echo off\r\n"{sys.executable}" "{script}" %*\r\n', encoding="utf-8")
+    image = tmp_path / "Jane Doe" / "扫描 image.png"
+    image.parent.mkdir()
+    image.write_bytes(b"image")
+    monkeypatch.setenv("CANVAS_HUB_TESSERACT", str(shim))
+
+    text, confidence = ocr._ocr_image(str(shim), image, "chi_tra")
+    assert text == "中文"
+    assert confidence == [91.0]
+
+
 def test_ocr_is_optional_flags_confidence_and_makes_text_searchable(hub, account, fixture_pkg, ocr_stubs, monkeypatch):
     from canvas_hub import ocr
     hub.importer.import_package(fixture_pkg)
