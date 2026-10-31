@@ -26,35 +26,62 @@ Implementation brief: [docs/CLAUDE_BRIEF.md](docs/CLAUDE_BRIEF.md). Integration 
 
 The main application is built and tested against a synthetic Canvas, both with automated tests and with real Chromium end-to-end runs. Verification against real HKUST Canvas needs your sign-in and is still pending: see [docs/REAL_CANVAS_ACCEPTANCE.md](docs/REAL_CANVAS_ACCEPTANCE.md).
 
-## Install and run (macOS)
+## Install and run
 
-1. Install [uv](https://docs.astral.sh/uv/), which also installs a suitable Python:
+Install [uv](https://docs.astral.sh/uv/), which also installs a suitable Python.
 
-   ```bash
-   curl -LsSf https://astral.sh/uv/install.sh | sh
-   ```
+On macOS:
 
-2. Start Canvas Hub, either by double-clicking `scripts/start-canvas-hub.command` or with:
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
 
-   ```bash
-   uv sync
-   uv run playwright install chromium     # first time only (~150 MB browser download)
-   uv run canvas-hub serve
-   ```
+On Windows, in PowerShell:
 
-   Your default browser opens the app at `http://127.0.0.1:8730/?token=…`. The link contains a private local access token.
+```powershell
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+```
 
-3. In the app:
-   1. Paste your Canvas address.
-   2. Click **Open sign-in window** and sign in there.
-   3. Click **Start baseline collection**.
+Start Canvas Hub by double-clicking the launcher for your computer:
 
-   After that, use **Quick check** for fast updates and **Thorough refresh** to re-read everything.
+- macOS: `scripts/start-canvas-hub.command`
+- Windows: `scripts/start-canvas-hub.cmd`
+
+The first run installs the Python dependencies and Playwright's Chromium browser (~150 MB). Your default browser opens the app at `http://127.0.0.1:8730/?token=…`. The link contains a private local access token.
+
+You can also start it from a terminal:
+
+```bash
+uv sync
+uv run playwright install chromium     # first time only
+uv run canvas-hub serve
+```
+
+In the app:
+
+1. Paste your Canvas address.
+2. Click **Open sign-in window** and sign in there.
+3. Click **Start baseline collection**.
+
+After that, use **Quick check** for fast updates and **Thorough refresh** to re-read everything.
 
 If your institution's SSO doesn't like Playwright's Chromium, use your installed Google Chrome with the app's own separate profile:
 
 ```bash
 CANVAS_HUB_BROWSER_CHANNEL=chrome uv run canvas-hub serve
+```
+
+In Windows PowerShell, set the variable first:
+
+```powershell
+$env:CANVAS_HUB_BROWSER_CHANNEL="chrome"
+uv run canvas-hub serve
+```
+
+To pass server options through the Windows launcher, such as a different port:
+
+```powershell
+.\scripts\start-canvas-hub.cmd --port 8740
 ```
 
 ### Try it without a Canvas account
@@ -63,7 +90,7 @@ CANVAS_HUB_BROWSER_CHANNEL=chrome uv run canvas-hub serve
 uv run canvas-hub fake-canvas --port 8765    # synthetic data only
 ```
 
-In another terminal, run `uv run canvas-hub --home /tmp/canvas-hub-demo serve`, paste `http://127.0.0.1:8765/`, and sign in with the test credentials the fake server prints.
+In another terminal, run `uv run canvas-hub --home /tmp/canvas-hub-demo serve` on macOS, or `uv run canvas-hub --home "$env:TEMP\canvas-hub-demo" serve` in Windows PowerShell. Paste `http://127.0.0.1:8765/`, and sign in with the test credentials the fake server prints.
 
 ## Assistant and other agents
 
@@ -103,7 +130,7 @@ In another terminal, run `uv run canvas-hub --home /tmp/canvas-hub-demo serve`, 
 - **Grading rules and formulas:** Canvas usually reports 0 for every group weight. Each course page has a **Grading rules** card for the syllabus weights and the pass mark, and the assistant can also save rules Canvas lacks (minimum hours, all-or-nothing lines, a formula such as `if(hours >= 10, 20 * min(1, hours / 20), 0)`). Score models and projections use them; they stay on this computer.
 - **All courses at a glance:** the Overview shows every course on one scale: grade so far, work done, what is lost, and what is due next.
 - **Custom blocks (advanced, off by default):** when no built-in view fits, the assistant can write its own HTML. It runs only when you press **Run**, in an isolated frame with no network access.
-- **Text from scans and photos (optional):** with [tesseract](https://tesseract-ocr.github.io/) installed (`brew install tesseract poppler`), Canvas Hub can read photographed forms and scanned PDFs. Each document shows a confidence score, and low-confidence text is flagged.
+- **Text from scans and photos (optional):** with [Tesseract](https://tesseract-ocr.github.io/) and [Poppler](https://poppler.freedesktop.org/) installed, Canvas Hub can read photographed forms and scanned PDFs. Install `tesseract poppler` with Homebrew on macOS, or the Windows builds and add their program folders to `PATH` on Windows. Each document shows a confidence score, and low-confidence text is flagged.
 - **Planner page:** add your class times, see your week with deadlines and to-dos, get suggested study blocks, and export to Apple Calendar (`.ics`). It's a local plan only.
 - **Agent requests page:** for sites outside Canvas (like a separate course website), leave a request that a connected agent with its own browser access can fulfil. Run the MCP server with `--allow-fulfil` for that agent. The text it sends back is stored, searchable, and labelled as agent-provided.
 - **Direct Codex connection:** the assistant can use your locally installed Codex CLI and its existing login, with the same Canvas Hub tools and permissions. No Codex credentials are saved in Canvas Hub.
@@ -128,7 +155,7 @@ If the app cannot find `codex`, restart it after installing the CLI or set `CANV
 
 | What | Where |
 | --- | --- |
-| Course data (SQLite database, downloaded originals, extracted text) | `~/Library/Application Support/CanvasHub/data/` |
+| Course data (SQLite database, downloaded originals, extracted text) | macOS: `~/Library/Application Support/CanvasHub/data/`; Windows: `%LOCALAPPDATA%\CanvasHub\data\` |
 | Backups and exports | `…/CanvasHub/data/backups/` |
 | App browser profiles (your Canvas sign-in) | `…/CanvasHub/browser-profiles/` (separate; never backed up or exported) |
 

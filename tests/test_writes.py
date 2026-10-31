@@ -161,6 +161,15 @@ def test_uploaded_utf8_text_can_be_read_by_the_assistant(hub, account, filename,
     assert c.get(f"{base}/{saved['id']}/download", headers=hdr).content == raw
 
 
+def test_common_text_extension_does_not_depend_on_the_os_mime_database(hub, account, monkeypatch):
+    from canvas_hub.services import files
+    monkeypatch.setattr(files.mimetypes, "guess_type", lambda _name: (None, None))
+    saved = hub.files.save(account["id"], filename="settings.yaml",
+                           content="Study plan — 溫習\n".encode(), mime="application/octet-stream",
+                           created_by="user")
+    assert saved["is_text"]
+
+
 @pytest.mark.parametrize("filename,mime,raw", [
     ("document.pdf", "application/pdf", b"%PDF-1.7\nASCII bytes still belong to a PDF"),
     ("data.bin", "application/octet-stream", b"ASCII bytes with no text file type"),

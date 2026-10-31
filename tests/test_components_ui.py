@@ -108,7 +108,8 @@ def test_score_model_and_artifact_in_the_browser(app_server, hub, account):
         art.get_by_role("button", name="Expand full (60 lines)").click()
         assert art.locator(".art-lines li").count() == 60
         art.get_by_role("button", name="Copy", exact=True).click()
-        assert pg.evaluate("navigator.clipboard.readText()") == SPEC_TEXT
+        clipboard = pg.evaluate("navigator.clipboard.readText()").replace("\r\n", "\n")
+        assert clipboard == SPEC_TEXT
         with pg.expect_download() as d:
             art.get_by_role("button", name="Download", exact=True).click()
         assert d.value.suggested_filename == "canvas-hub-spec.md"

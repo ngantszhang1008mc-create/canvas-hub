@@ -16,6 +16,9 @@ from ..util import InvalidInput, NotFound, now_iso
 
 MAX_BYTES = 25 * 1024 * 1024
 _BAD = re.compile(r"[^\w.\- ()]+")
+_TEXT_SUFFIXES = {".txt", ".md", ".markdown", ".csv", ".tsv", ".json", ".jsonl", ".ndjson", ".xml", ".yaml",
+                  ".yml", ".toml", ".ini", ".cfg", ".conf", ".sql", ".html", ".htm", ".css", ".js", ".ts",
+                  ".py", ".java", ".c", ".cpp", ".h", ".tex", ".rtf"}
 _TEXT_MIMES = {"application/json", "application/xml", "application/javascript", "application/x-javascript",
                "application/yaml", "application/x-yaml", "application/toml", "application/sql",
                "application/ndjson", "application/x-ndjson", "application/jsonl"}
@@ -53,7 +56,7 @@ class SavedFileService:
         # both a text file type and valid UTF-8; a binary format can contain
         # UTF-8-decodable bytes too.
         is_text = (is_text or _text_mime(mime) or _text_mime(guessed_mime or "")
-                   or name.lower().endswith((".jsonl", ".ndjson")))
+                   or any(name.lower().endswith(suffix) for suffix in _TEXT_SUFFIXES))
         if is_text:
             try:
                 data.decode("utf-8")

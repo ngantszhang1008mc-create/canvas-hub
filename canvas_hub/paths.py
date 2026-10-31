@@ -1,4 +1,4 @@
-"""Application data locations.
+r"""Application data locations.
 
 Course data (database, resources) and browser sessions live in *separate*
 directory trees so that exports/backups can never pick up browser state:
@@ -10,9 +10,10 @@ directory trees so that exports/backups can never pick up browser state:
     <home>/browser-profiles/<instance>/  app-managed Chromium profiles (sessions)
     <home>/runtime/                      local API token, lock files, logs
 
-<home> defaults to ~/Library/Application Support/CanvasHub on macOS and
-$XDG_DATA_HOME/canvas-hub (or ~/.local/share/canvas-hub) elsewhere. It can be
-overridden with CANVAS_HUB_HOME.
+<home> defaults to ~/Library/Application Support/CanvasHub on macOS,
+%LOCALAPPDATA%\CanvasHub on Windows, and $XDG_DATA_HOME/canvas-hub (or
+~/.local/share/canvas-hub) elsewhere. It can be overridden with
+CANVAS_HUB_HOME.
 """
 
 from __future__ import annotations
@@ -29,6 +30,10 @@ def default_home() -> Path:
         return Path(env).expanduser().resolve()
     if sys.platform == "darwin":
         return Path.home() / "Library" / "Application Support" / "CanvasHub"
+    if sys.platform == "win32":
+        local = os.environ.get("LOCALAPPDATA")
+        base = Path(local) if local else Path.home() / "AppData" / "Local"
+        return base / "CanvasHub"
     xdg = os.environ.get("XDG_DATA_HOME")
     base = Path(xdg) if xdg else Path.home() / ".local" / "share"
     return base / "canvas-hub"

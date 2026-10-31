@@ -1,10 +1,10 @@
 """Optional OCR for photos and scanned PDFs, with a confidence flag per document.
 
 Off by default (Data & settings → Text from scans and photos). It needs the
-``tesseract`` program (macOS: ``brew install tesseract``); scanned PDFs also
-need ``pdftoppm`` from poppler (``brew install poppler``). Nothing is sent
-anywhere: both run locally on the stored original. ``CANVAS_HUB_TESSERACT`` and
-``CANVAS_HUB_PDFTOPPM`` override where the programs are found.
+``tesseract`` program; scanned PDFs also need ``pdftoppm`` from poppler.
+Nothing is sent anywhere: both run locally on the stored original.
+``CANVAS_HUB_TESSERACT`` and ``CANVAS_HUB_PDFTOPPM`` override where the
+programs are found.
 
 Each document gets the mean confidence tesseract reports for the words it
 read (0-100). Below ``LOW_CONFIDENCE`` the text is kept but flagged, because
@@ -17,9 +17,12 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+
+from .commands import run_command
 
 LOW_CONFIDENCE = 70.0
 MAX_PAGES = 40
@@ -49,13 +52,27 @@ def status() -> dict:
     version = None
     if t:
         try:
-            out = subprocess.run([t, "--version"], capture_output=True, text=True, timeout=10, check=False)
+            out = run_command([t, "--version"], capture_output=True, text=True, timeout=10, check=False)
             version = ((out.stdout or out.stderr).splitlines() or [""])[0].strip() or None
         except (OSError, subprocess.SubprocessError):
             t = None
-    return {"tesseract": bool(t), "version": version, "pdf": bool(pdftoppm_path()),
-            "install_hint": None if t else "Install tesseract (macOS: brew install tesseract; scanned PDFs also need "
-                                           "brew install poppler), then restart Canvas Hub."}
+    pdf = bool(pdftoppm_path())
+    if sys.platform == "win32":
+        hint = ("Install Tesseract OCR for Windows and Poppler for Windows, add their program folders to PATH, "
+                "then restart Canvas Hub.")
+        pdf_hint = ("Scanned PDFs also need Poppler for Windows. Add its bin folder to PATH, then restart "
+                    "Canvas Hub.")
+    elif sys.platform == "darwin":
+        hint = ("Install tesseract with `brew install tesseract`; scanned PDFs also need "
+                "`brew install poppler`, then restart Canvas Hub.")
+        pdf_hint = "Scanned PDFs also need `brew install poppler`, then restart Canvas Hub."
+    else:
+        hint = ("Install tesseract and poppler-utils with your package manager, then restart Canvas Hub. "
+                "For Debian/Ubuntu: sudo apt install tesseract-ocr poppler-utils.")
+        pdf_hint = ("Scanned PDFs also need poppler-utils. On Debian/Ubuntu: "
+                    "sudo apt install poppler-utils.")
+    return {"tesseract": bool(t), "version": version, "pdf": pdf,
+            "install_hint": None if t else hint, "pdf_install_hint": None if pdf else pdf_hint}
 
 
 def valid_lang(lang: str) -> str:
@@ -92,11 +109,14 @@ def _parse_tsv(tsv: str) -> tuple[str, list[float]]:
 
 
 def _ocr_image(tess: str, image: Path, lang: str) -> tuple[str, list[float]]:
-    out = subprocess.run([tess, str(image), "stdout", "-l", lang, "--psm", "3", "tsv"], capture_output=True, text=True, check=False,
-                         timeout=PAGE_TIMEOUT)
+    out = run_command([tess, image, "stdout", "-l", lang, "--psm", "3", "tsv"],
+                      capture_output=True, check=False, timeout=PAGE_TIMEOUT)
     if out.returncode != 0:
-        raise RuntimeError((out.stderr or "tesseract failed").strip()[:300])
-    return _parse_tsv(out.stdout)
+        detail = (out.stderr or b"tesseract failed").decode("utf-8", errors="replace")
+        raise RuntimeError(detail.strip()[:300])
+    # Tesseract emits UTF-8 TSV. Do not let text=True choose a locale code page
+    # such as cp1252 on Windows, which corrupts non-ASCII output.
+    return _parse_tsv(out.stdout.decode("utf-8"))
 
 
 def ocr_file(path: Path, ext: str, lang: str = "eng") -> OcrResult:
@@ -116,8 +136,8 @@ def ocr_file(path: Path, ext: str, lang: str = "eng") -> OcrResult:
     if not ppm:
         raise RuntimeError("scanned PDFs need pdftoppm (poppler)")
     with tempfile.TemporaryDirectory() as td:
-        out = subprocess.run([ppm, "-r", "200", "-gray", "-png", "-l", str(MAX_PAGES), str(path), str(Path(td) / "p")],
-                             capture_output=True, text=True, timeout=PAGE_TIMEOUT * 2, check=False)
+        out = run_command([ppm, "-r", "200", "-gray", "-png", "-l", str(MAX_PAGES), path, Path(td) / "p"],
+                          capture_output=True, text=True, timeout=PAGE_TIMEOUT * 2, check=False)
         if out.returncode != 0:
             raise RuntimeError((out.stderr or "pdftoppm failed").strip()[:300])
         pages = sorted(Path(td).glob("p*.png"))

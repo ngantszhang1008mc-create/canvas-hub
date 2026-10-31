@@ -6,11 +6,36 @@ import argparse
 import json
 import logging
 import os
+import socket
 import sys
+import threading
+import time
 import webbrowser
 from pathlib import Path
 
 from . import __version__
+
+
+def _open_browser_when_ready(url: str, host: str, port: int, timeout: float = 15) -> threading.Thread:
+    """Open the UI only after the local server accepts connections."""
+    def wait_and_open():
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                with socket.create_connection((host, port), timeout=0.25):
+                    break
+            except OSError:
+                time.sleep(0.1)
+        else:
+            return
+        try:
+            webbrowser.open(url)
+        except Exception:  # noqa: BLE001
+            pass
+
+    thread = threading.Thread(target=wait_and_open, name="canvas-hub-open-browser", daemon=True)
+    thread.start()
+    return thread
 
 
 def _hub(args):
@@ -48,10 +73,7 @@ def cmd_serve(args):
         print("  NOTE: another Canvas Hub process is running collection; this one serves stored data only.")
     print(f"\nOpen: {url}\n(keep this link private; it grants access to your local data)")
     if not args.no_open:
-        try:
-            webbrowser.open(url)
-        except Exception:  # noqa: BLE001
-            pass
+        _open_browser_when_ready(url, "127.0.0.1", args.port)
     try:
         uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="warning")
     finally:

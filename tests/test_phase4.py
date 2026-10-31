@@ -1,6 +1,8 @@
 """Phase 4: formulas in score models, local grading overrides, the sandboxed HTML component, the dashboard and OCR."""
 
 import json
+import os
+import sys
 
 import pytest
 
@@ -247,14 +249,51 @@ for last; do :; done
 touch "$last-1.png" "$last-2.png"
 """
 
+STUB_TESSERACT_WINDOWS = r"""
+import os
+import sys
+from pathlib import Path
+
+if sys.argv[1] == "--version":
+    print("tesseract 5.3.4 (stub)")
+    raise SystemExit(0)
+if b"UNREADABLE" in Path(sys.argv[1]).read_bytes():
+    print("Error: cannot read image", file=sys.stderr)
+    raise SystemExit(1)
+conf = os.environ.get("STUB_CONF", "91")
+print("level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext")
+print("1\t1\t0\t0\t0\t0\t0\t0\t100\t100\t-1\t")
+for line, word, text in ((1, 1, "Photosynthesis"), (1, 2, "worksheet"), (2, 1, "Q1")):
+    print(f"5\t1\t1\t1\t{line}\t{word}\t0\t0\t10\t10\t{conf}\t{text}")
+print(f"5\t1\t1\t2\t1\t1\t0\t0\t10\t10\t{conf}\t{Path(sys.argv[1]).name}")
+"""
+
+STUB_PDFTOPPM_WINDOWS = r"""
+import sys
+from pathlib import Path
+
+prefix = Path(sys.argv[-1])
+prefix.with_name(prefix.name + "-1.png").touch()
+prefix.with_name(prefix.name + "-2.png").touch()
+"""
+
 
 @pytest.fixture
 def ocr_stubs(tmp_path, monkeypatch):
-    for name, body in (("tesseract", STUB_TESSERACT), ("pdftoppm", STUB_PDFTOPPM)):
-        p = tmp_path / name
-        p.write_text(body)
-        p.chmod(0o755)
-        monkeypatch.setenv(f"CANVAS_HUB_{name.upper()}", str(p))
+    if os.name == "nt":
+        programs = (("tesseract", STUB_TESSERACT_WINDOWS), ("pdftoppm", STUB_PDFTOPPM_WINDOWS))
+        for name, body in programs:
+            script = tmp_path / f"{name}.py"
+            script.write_text(body, encoding="utf-8")
+            p = tmp_path / f"{name}.cmd"
+            p.write_text(f'@echo off\r\n"{sys.executable}" "{script}" %*\r\n', encoding="utf-8")
+            monkeypatch.setenv(f"CANVAS_HUB_{name.upper()}", str(p))
+    else:
+        for name, body in (("tesseract", STUB_TESSERACT), ("pdftoppm", STUB_PDFTOPPM)):
+            p = tmp_path / name
+            p.write_text(body)
+            p.chmod(0o755)
+            monkeypatch.setenv(f"CANVAS_HUB_{name.upper()}", str(p))
     return tmp_path
 
 
@@ -267,6 +306,35 @@ def test_ocr_reads_tsv_into_lines_and_paragraphs():
     assert text == "Hello world\nagain\n\nNew" and confs == [90, 80, 70, 60]
     with pytest.raises(ValueError):
         ocr.valid_lang("eng; rm -rf /")
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows locale and batch-shim regression")
+def test_windows_ocr_reads_utf8_tsv_and_spaced_paths(tmp_path, monkeypatch):
+    from canvas_hub import ocr
+
+    program_dir = tmp_path / "Program Files" / "OCR 工具 & %NAME%"
+    program_dir.mkdir(parents=True)
+    script = program_dir / "fake tesseract.py"
+    script.write_text(
+        "import sys\n"
+        "rows = [\n"
+        "    'level\\tpage_num\\tblock_num\\tpar_num\\tline_num\\tword_num\\tleft\\ttop\\twidth\\theight\\tconf\\ttext',\n"
+        "    '5\\t1\\t1\\t1\\t1\\t1\\t0\\t0\\t10\\t10\\t91\\t中文',\n"
+        "]\n"
+        "sys.stdout.buffer.write(('\\n'.join(rows) + '\\n').encode('utf-8'))\n",
+        encoding="utf-8",
+    )
+    shim = program_dir / "tesseract command.cmd"
+    shim.write_text(f'@echo off\r\n"{sys.executable}" "%~dp0fake tesseract.py" %*\r\n', encoding="utf-8")
+    image = tmp_path / "Jane Doe" / "扫描 image & %NAME%.png"
+    image.parent.mkdir()
+    image.write_bytes(b"image")
+    monkeypatch.setenv("NAME", "expanded")
+    monkeypatch.setenv("CANVAS_HUB_TESSERACT", str(shim))
+
+    text, confidence = ocr._ocr_image(str(shim), image, "chi_tra")
+    assert text == "中文"
+    assert confidence == [91.0]
 
 
 def test_ocr_is_optional_flags_confidence_and_makes_text_searchable(hub, account, fixture_pkg, ocr_stubs, monkeypatch):

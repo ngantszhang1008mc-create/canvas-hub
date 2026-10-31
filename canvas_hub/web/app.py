@@ -5,6 +5,9 @@ from __future__ import annotations
 import json
 import logging
 import mimetypes
+import os
+import shutil
+import sys
 from importlib import resources as importlib_resources
 from pathlib import Path
 
@@ -21,12 +24,20 @@ mimetypes.add_type("font/woff2", ".woff2")
 STATIC = Path(str(importlib_resources.files("canvas_hub") / "web" / "static"))
 
 
+def _mcp_candidates(script_dir: Path, platform_name: str | None = None) -> list[Path]:
+    """Console-script names used by virtual environments on each platform."""
+    if (platform_name or os.name) == "nt":
+        names = ("canvas-hub.exe", "canvas-hub.cmd", "canvas-hub.bat")
+    else:
+        names = ("canvas-hub",)
+    return [script_dir / name for name in names]
+
+
 def mcp_command() -> list[str]:
     """The command an MCP client should run to reach this installation."""
-    import shutil
-    import sys
-    exe = Path(sys.executable).parent / "canvas-hub"
-    cmd = str(exe) if exe.exists() else (shutil.which("canvas-hub") or "canvas-hub")
+    candidates = _mcp_candidates(Path(sys.executable).parent)
+    exe = next((p for p in candidates if p.is_file()), None)
+    cmd = str(exe) if exe else (shutil.which("canvas-hub") or "canvas-hub")
     return [cmd, "mcp"]
 
 

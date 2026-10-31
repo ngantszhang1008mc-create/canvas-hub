@@ -33,6 +33,9 @@ def test_extraction_statuses(hub):
                    "notes.txt": "ok", "bundle.zip": "unsupported_type", "weird.xyz": "unsupported_type"}
     sha = hub.resources.store_bytes(cases["ok.pdf"])
     assert "Spectral theorem" in hub.resources.extracted_text_for(sha)
+    stored = hub.db.one("SELECT stored_path, extracted_path FROM resources WHERE id=?", (sha,))
+    assert "\\" not in stored["stored_path"]
+    assert "/" in stored["extracted_path"] and "\\" not in stored["extracted_path"]
 
 
 def _seed(hub, fixture_pkg):
