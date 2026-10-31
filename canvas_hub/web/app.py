@@ -231,6 +231,12 @@ def create_app(api: HubAPI, *, token: str, port: int) -> FastAPI:
             raise InvalidInput("give archived: true or false")
         return api.archive_deadline(aid, iid, data["archived"])
 
+    @app.patch("/api/accounts/{aid}/deadlines/{iid}/local-completion")
+    def set_deadline_local_completion(aid: int, iid: int, data: dict):
+        if set(data) != {"completed"}:
+            raise InvalidInput("give completed: true or false")
+        return api.set_deadline_local_completion(aid, iid, data["completed"])
+
     @app.get("/api/accounts/{aid}/deadline-views")
     def deadline_views(aid: int):
         return api.deadline_views(aid)

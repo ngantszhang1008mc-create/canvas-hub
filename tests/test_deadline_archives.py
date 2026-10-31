@@ -131,6 +131,36 @@ def test_status_filters_share_completion_across_assignment_mirrors(deadlines):
     assert completed[0]["done_locally"] is True
     assert quiz_task["id"] in {t["id"] for t in completed[0]["local_tasks"]}
 
+    dated_task = api.hub.annotations.create(
+        aid, kind="task", item_id=iid, title="Study block", local_due=due.isoformat(), task_state="done"
+    )
+    api.set_deadline_local_completion(aid, quiz_id, False)
+    assert api.hub.annotations.get(aid, assignment_task["id"])["task_state"] == "open"
+    assert api.hub.annotations.get(aid, quiz_task["id"])["task_state"] == "open"
+    assert api.hub.annotations.get(aid, dated_task["id"])["task_state"] == "done"
+    assert api.deadlines(aid, **window, item_type="quiz", status="unfinished")["deadlines"][0]["item_id"] == quiz_id
+    assert api.deadlines(aid, **window, item_type="quiz", status="completed")["deadlines"] == []
+
+    api.set_deadline_local_completion(aid, iid, True)
+    assert api.hub.annotations.get(aid, assignment_task["id"])["task_state"] == "done"
+    assert api.hub.annotations.get(aid, quiz_task["id"])["task_state"] == "done"
+    assert api.deadlines(aid, **window, item_type="quiz", status="completed")["deadlines"][0]["item_id"] == quiz_id
+    api.set_deadline_local_completion(aid, quiz_id, False)
+    assert api.deadlines(aid, **window, item_type="quiz", status="completed")["deadlines"] == []
+
+
+def test_local_completion_creates_one_canonical_marker(deadlines):
+    api, aid, iid, due, _ = deadlines
+    result = api.set_deadline_local_completion(aid, iid, True)
+    assert result["completed"] is True and len(result["task_ids"]) == 1
+    marker = api.hub.annotations.get(aid, result["task_ids"][0])
+    assert marker["item_id"] == iid and marker["task_state"] == "done" and marker["local_due"] is None
+    window = {"start": (due-timedelta(days=1)).isoformat(), "end": (due+timedelta(days=1)).isoformat()}
+    assert api.deadlines(aid, **window, status="completed")["deadlines"][0]["item_id"] == iid
+    api.set_deadline_local_completion(aid, iid, False)
+    assert api.hub.annotations.get(aid, marker["id"])["task_state"] == "open"
+    assert api.deadlines(aid, **window, status="unfinished")["deadlines"][0]["item_id"] == iid
+
 
 def test_views_and_archive_share_ui_and_assistant_boundary(deadlines):
     api, aid, iid, _, _ = deadlines
@@ -239,6 +269,65 @@ def test_saved_assistant_deadline_cards_hide_archived_items(deadlines):
     assert svc.get_conversation(aid, cid)["messages"][0]["results"][0]["display"]["deadlines"] == []
     api.archive_deadline(aid, iid, False)
     assert svc.get_conversation(aid, cid)["messages"][0]["results"][0]["display"]["deadlines"]
+
+
+@pytest.mark.browser
+def test_browser_local_completion_controls_the_shared_mirror_group(deadlines):
+    from playwright.sync_api import sync_playwright, expect
+    from .test_components_ui import serve
+
+    api, aid, iid, due, pkg = deadlines
+    newer = variant(pkg, "browser-status-mirror", "2026-11-01T00:00:00Z")
+    original = next(i for i in newer["items"] if i["type"] == "assignment" and i["canvas_id"] == "7001")
+    mirror = copy.deepcopy(original)
+    mirror.update(type="quiz", canvas_id="8201", title="Status mirror", observation_id="browser-status-8201")
+    mirror["fields"]["assignment_id"] = "7001"
+    newer["items"].append(mirror)
+    api.hub.importer.import_package(newer)
+    quiz_id = api.hub.db.one(
+        "SELECT id FROM items WHERE account_id=? AND item_type='quiz' AND canvas_id='8201'", (aid,)
+    )["id"]
+    assignment_task = api.hub.annotations.create(
+        aid, kind="task", item_id=iid, title="Open assignment marker", task_state="open"
+    )
+    quiz_task = api.hub.annotations.create(
+        aid, kind="task", item_id=quiz_id, title="Done quiz marker", task_state="done"
+    )
+
+    with serve(api.hub, []) as (base, tok, _), sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page()
+        page.goto(f"{base}/?token={tok}#/deadlines")
+        with page.expect_response(lambda r: r.url.endswith("/deadline-views") and r.request.method == "POST"):
+            page.get_by_label("Deadline type", exact=True).select_option("quiz")
+        with page.expect_response(lambda r: r.url.endswith("/deadline-views") and r.request.method == "POST"):
+            page.get_by_label("Deadline status", exact=True).select_option("completed")
+        card = page.locator(".deadline", has_text="Status mirror")
+        expect(card).to_be_visible()
+        assert "done-local" in (card.get_attribute("class") or "")
+        done = card.get_by_role("button", name="✓ Done (local)", exact=True)
+        expect(done).to_be_visible()
+
+        done.click()
+        expect(card).to_have_count(0)
+        with page.expect_response(lambda r: r.url.endswith("/deadline-views") and r.request.method == "POST"):
+            page.get_by_label("Deadline status", exact=True).select_option("unfinished")
+        expect(card).to_be_visible()
+        expect(card.get_by_role("button", name="Mark done locally", exact=True)).to_be_visible()
+
+        # Two done markers must reopen together with one click.
+        api.set_deadline_local_completion(aid, quiz_id, True)
+        with page.expect_response(lambda r: r.url.endswith("/deadline-views") and r.request.method == "POST"):
+            page.get_by_label("Deadline status", exact=True).select_option("completed")
+        expect(card).to_be_visible()
+        card.get_by_role("button", name="✓ Done (local)", exact=True).click()
+        with page.expect_response(lambda r: r.url.endswith("/deadline-views") and r.request.method == "POST"):
+            page.get_by_label("Deadline status", exact=True).select_option("unfinished")
+        expect(card).to_be_visible()
+        expect(card.get_by_role("button", name="Mark done locally", exact=True)).to_be_visible()
+        assert api.hub.annotations.get(aid, assignment_task["id"])["task_state"] == "open"
+        assert api.hub.annotations.get(aid, quiz_task["id"])["task_state"] == "open"
+        browser.close()
 
 
 @pytest.mark.browser

@@ -136,6 +136,9 @@ class HubAPI:
     def archive_deadline(self, account_id, item_id, archived: bool) -> dict:
         return self.hub.deadlines.set_archived(self._acct(account_id)["id"], int(item_id), archived)
 
+    def set_deadline_local_completion(self, account_id, item_id, completed: bool) -> dict:
+        return self.hub.deadlines.set_local_completion(self._acct(account_id)["id"], int(item_id), completed)
+
     def archived_deadlines(self, account_id) -> dict:
         return self.hub.deadlines.archive_list(self._acct(account_id)["id"])
 

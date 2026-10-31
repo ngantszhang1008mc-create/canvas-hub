@@ -626,14 +626,12 @@ VIEWS.deadlines = async (main, _p, params) => {
 };
 
 function localTaskToggle(d) {
-  const t = (d.local_tasks || []).find((x) => !x.local_due);   // dated to-dos (e.g. study blocks) are separate
-  const done = t && t.task_state === "done";
+  const done = !!d.done_locally;
   return h("button", { class: "sm " + (done ? "" : "ghost"), title: "Private local marker; not a Canvas submission",
     onclick: async (e) => {
       e.preventDefault();
-      if (t) await guard(() => api(A(`/annotations/${t.id}`), { method: "PATCH", body: { task_state: done ? "open" : "done" } }));
-      else await guard(() => api(A("/annotations"), { method: "POST", body: { kind: "task", item_id: d.item_id, title: d.title, task_state: "done" } }));
-      route();
+      if (await guard(() => api(A(`/deadlines/${d.item_id}/local-completion`),
+        { method: "PATCH", body: { completed: !done } }))) route();
     } }, done ? "✓ Done (local)" : "Mark done locally");
 }
 
