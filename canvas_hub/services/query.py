@@ -14,7 +14,7 @@ from ..db import Database
 from ..htmltools import absolutize
 from ..model import CATEGORIES, ITEM_TYPES, spec_for
 from ..util import InvalidInput, NotFound, clamp_limit, decode_cursor, encode_cursor, now_iso, parse_iso, to_utc_iso
-from .deadlines import archived_sql
+from .deadlines import archived_sql, deadline_key_sql
 
 
 def _tz(name: str | None, fallback: str | None) -> tuple[ZoneInfo, str]:
@@ -282,6 +282,48 @@ class QueryService:
         s_iso, e_iso = to_utc_iso(s), to_utc_iso(e)
         courses = self._course_titles(account_id)
         types = ["assignment", "quiz"] + (["calendar_event"] if include_calendar else [])
+        # Assignment, quiz and calendar mirrors share one completion state just
+        # as they share one archive state. Resolve local tasks across the whole
+        # mirror group, then apply type/status filters to that shared result.
+        relation_rows = self.db.query(
+            f"""SELECT i.id, i.item_type, i.canvas_id, ({deadline_key_sql()}) AS deadline_key
+                FROM items i WHERE i.account_id=?
+                AND i.item_type IN ('assignment','quiz','calendar_event')""",
+            (account_id,),
+        )
+        relation_by_id = {r["id"]: dict(r) for r in relation_rows}
+        tasks_by_key = {}
+        for task in self.db.query(
+            f"""SELECT a.id, a.title, a.task_state, a.local_due, a.item_id,
+                       ({deadline_key_sql()}) AS deadline_key
+                FROM annotations a JOIN items i ON i.id=a.item_id
+                WHERE a.account_id=? AND a.kind='task'
+                AND i.item_type IN ('assignment','quiz','calendar_event')
+                ORDER BY a.task_state='done', COALESCE(a.local_due,'9999'), a.updated_at DESC""",
+            (account_id,),
+        ):
+            item = dict(task)
+            key = item.pop("deadline_key")
+            tasks_by_key.setdefault(key, []).append(item)
+        submissions = {}
+
+        def resolve_completion(item_id, item_type, canvas_id, fields):
+            relation = relation_by_id.get(item_id, {})
+            local_tasks = tasks_by_key.get(relation.get("deadline_key"), [])
+            done_locally = any(t["task_state"] == "done" and not t["local_due"] for t in local_tasks)
+            assignment_canvas_id = (fields.get("assignment_id")
+                                    if item_type in ("quiz", "calendar_event") else canvas_id)
+            submission = None
+            if assignment_canvas_id:
+                cache_key = str(assignment_canvas_id)
+                if cache_key not in submissions:
+                    submissions[cache_key] = self._submission(account_id, cache_key)
+                submission = submissions[cache_key]
+            sub = submission or {}
+            completed = done_locally or bool(sub.get("submitted_at") or sub.get("excused") or
+                                             sub.get("workflow_state") == "graded")
+            return done_locally, local_tasks, submission, completed
+
         rows = self.db.query(
             f"""SELECT i.id, i.item_type, i.title, i.course_canvas_id, i.canvas_id, i.source_url, i.presence,
                 f.value_json, f.last_observed_at AS due_observed_at, f.field, ({archived_sql()}) AS archived
@@ -307,13 +349,7 @@ class QueryService:
             if inst is None:
                 if status != "all":
                     fields = self._fields(r["id"])
-                    submission = self._submission(account_id, fields.get("assignment_id")
-                        if r["item_type"] == "quiz" else r["canvas_id"]) if r["item_type"] != "calendar_event" else None
-                    submission = submission or {}
-                    done = self.db.one("SELECT 1 FROM annotations WHERE account_id=? AND item_id=? AND kind='task' "
-                                       "AND task_state='done' AND local_due IS NULL", (account_id, r["id"]))
-                    completed = bool(done or submission.get("submitted_at") or submission.get("excused") or
-                                     submission.get("workflow_state") == "graded")
+                    _, _, _, completed = resolve_completion(r["id"], r["item_type"], r["canvas_id"], fields)
                     if completed != (status == "completed"):
                         continue
                 unresolved.append(entry)
@@ -334,18 +370,16 @@ class QueryService:
             if r["item_type"] == "calendar_event":
                 entry["location_name"] = f.get("location_name")
                 entry["assignment_ref"] = f.get("assignment_id")
+            done_locally, local_tasks, submission, completed = resolve_completion(
+                r["id"], r["item_type"], r["canvas_id"], f
+            )
             if r["item_type"] in ("assignment", "quiz"):
-                entry["submission"] = self._submission(account_id, f.get("assignment_id") if r["item_type"] == "quiz" else r["canvas_id"])
-            entry["local_tasks"] = [dict(x) for x in self.db.query(
-                "SELECT id, title, task_state, local_due FROM annotations WHERE account_id=? AND item_id=? AND kind='task'",
-                (account_id, r["id"]))]
+                entry["submission"] = submission
             # Only an undated linked to-do ("Mark done locally") stands for the
             # deadline itself; dated ones (study blocks, "start on Saturday")
             # are steps towards it.
-            entry["done_locally"] = any(t["task_state"] == "done" and not t["local_due"] for t in entry["local_tasks"])
-            sub = entry.get("submission") or {}
-            completed = entry["done_locally"] or bool(sub.get("submitted_at") or sub.get("excused") or
-                                                     sub.get("workflow_state") == "graded")
+            entry["local_tasks"] = local_tasks
+            entry["done_locally"] = done_locally
             entry["completed"] = completed
             dated.append(entry)
         # A classic quiz is also an assignment; list it once (as the assignment,

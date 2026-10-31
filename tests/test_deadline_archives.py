@@ -94,6 +94,44 @@ def test_archive_covers_future_quiz_calendar_mirrors_and_account_isolation(deadl
     assert api.deadlines(aid, **window, status="completed")["unresolved_dates"] == []
 
 
+def test_status_filters_share_completion_across_assignment_mirrors(deadlines):
+    api, aid, iid, due, pkg = deadlines
+    newer = variant(pkg, "status-mirrors", "2026-11-01T00:00:00Z")
+    original = next(i for i in newer["items"] if i["type"] == "assignment" and i["canvas_id"] == "7001")
+    for kind, cid in (("quiz", "8101"), ("calendar_event", "9101")):
+        mirror = copy.deepcopy(original)
+        mirror.update(type=kind, canvas_id=cid, title="Status mirror", observation_id="status-"+cid)
+        mirror["fields"]["assignment_id"] = "7001"
+        if kind == "calendar_event":
+            mirror["fields"]["start_at"] = mirror["fields"].pop("due_at")
+        newer["items"].append(mirror)
+    api.hub.importer.import_package(newer)
+
+    assignment_task = api.hub.annotations.create(
+        aid, kind="task", item_id=iid, title="Done locally", task_state="done"
+    )
+    window = {"start": (due-timedelta(days=1)).isoformat(), "end": (due+timedelta(days=1)).isoformat()}
+    for item_type in ("quiz", "calendar_event"):
+        completed = api.deadlines(aid, **window, item_type=item_type, status="completed")["deadlines"]
+        assert [d["item_type"] for d in completed] == [item_type]
+        assert completed[0]["done_locally"] is True
+        assert [t["id"] for t in completed[0]["local_tasks"]] == [assignment_task["id"]]
+        assert api.deadlines(aid, **window, item_type=item_type, status="unfinished")["deadlines"] == []
+
+    # Completion also flows from a mirror-local task back to the canonical assignment.
+    api.hub.annotations.update(aid, assignment_task["id"], task_state="open")
+    quiz_id = api.hub.db.one(
+        "SELECT id FROM items WHERE account_id=? AND item_type='quiz' AND canvas_id='8101'", (aid,)
+    )["id"]
+    quiz_task = api.hub.annotations.create(
+        aid, kind="task", item_id=quiz_id, title="Done on quiz mirror", task_state="done"
+    )
+    completed = api.deadlines(aid, **window, status="completed")["deadlines"]
+    assert [d["item_id"] for d in completed] == [iid]
+    assert completed[0]["done_locally"] is True
+    assert quiz_task["id"] in {t["id"] for t in completed[0]["local_tasks"]}
+
+
 def test_views_and_archive_share_ui_and_assistant_boundary(deadlines):
     api, aid, iid, _, _ = deadlines
     svc = AssistantService(api.hub, api)
