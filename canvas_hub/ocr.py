@@ -22,7 +22,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from .commands import command_for_process
+from .commands import run_command
 
 LOW_CONFIDENCE = 70.0
 MAX_PAGES = 40
@@ -52,8 +52,7 @@ def status() -> dict:
     version = None
     if t:
         try:
-            out = subprocess.run(command_for_process([t, "--version"]), capture_output=True, text=True,
-                                 timeout=10, check=False)
+            out = run_command([t, "--version"], capture_output=True, text=True, timeout=10, check=False)
             version = ((out.stdout or out.stderr).splitlines() or [""])[0].strip() or None
         except (OSError, subprocess.SubprocessError):
             t = None
@@ -110,8 +109,8 @@ def _parse_tsv(tsv: str) -> tuple[str, list[float]]:
 
 
 def _ocr_image(tess: str, image: Path, lang: str) -> tuple[str, list[float]]:
-    out = subprocess.run(command_for_process([tess, image, "stdout", "-l", lang, "--psm", "3", "tsv"]),
-                         capture_output=True, check=False, timeout=PAGE_TIMEOUT)
+    out = run_command([tess, image, "stdout", "-l", lang, "--psm", "3", "tsv"],
+                      capture_output=True, check=False, timeout=PAGE_TIMEOUT)
     if out.returncode != 0:
         detail = (out.stderr or b"tesseract failed").decode("utf-8", errors="replace")
         raise RuntimeError(detail.strip()[:300])
@@ -137,9 +136,8 @@ def ocr_file(path: Path, ext: str, lang: str = "eng") -> OcrResult:
     if not ppm:
         raise RuntimeError("scanned PDFs need pdftoppm (poppler)")
     with tempfile.TemporaryDirectory() as td:
-        out = subprocess.run(command_for_process([ppm, "-r", "200", "-gray", "-png", "-l", str(MAX_PAGES),
-                                                  path, Path(td) / "p"]),
-                             capture_output=True, text=True, timeout=PAGE_TIMEOUT * 2, check=False)
+        out = run_command([ppm, "-r", "200", "-gray", "-png", "-l", str(MAX_PAGES), path, Path(td) / "p"],
+                          capture_output=True, text=True, timeout=PAGE_TIMEOUT * 2, check=False)
         if out.returncode != 0:
             raise RuntimeError((out.stderr or "pdftoppm failed").strip()[:300])
         pages = sorted(Path(td).glob("p*.png"))

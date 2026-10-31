@@ -20,7 +20,7 @@ import threading
 import time
 from collections import deque
 
-from ..commands import command_for_process
+from ..commands import popen_command
 from .providers import ProviderError, ToolCall, Turn
 
 START_TIMEOUT = 30
@@ -44,8 +44,8 @@ class AppServer:
         self.serial = 0
         self.deferred = deque()
         try:
-            self.process = subprocess.Popen(
-                command_for_process([executable, "app-server", "--listen", "stdio://"]), cwd=self.workspace.name,
+            self.process = popen_command(
+                [executable, "app-server", "--listen", "stdio://"], cwd=self.workspace.name,
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                 start_new_session=os.name != "nt")
         except OSError as e:

@@ -10,17 +10,54 @@ from __future__ import annotations
 import os
 import subprocess
 from collections.abc import Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
-def command_for_process(args: Sequence[str | Path]) -> str | list[str]:
-    """Return a subprocess argument list that can launch ``args`` on this OS."""
+@dataclass(frozen=True)
+class PreparedCommand:
+    command: str | list[str]
+    env: dict[str, str] = field(default_factory=dict)
+
+
+def command_for_process(args: Sequence[str | Path]) -> PreparedCommand:
+    """Prepare exact argv passing, routing Windows batch shims through cmd."""
     values = [str(arg) for arg in args]
     if os.name != "nt" or not values or Path(values[0]).suffix.lower() not in {".bat", ".cmd"}:
-        return values
+        return PreparedCommand(values)
     comspec = os.environ.get("COMSPEC") or "cmd.exe"
-    # cmd requires an extra pair of quotes around the complete command string
-    # when both the batch shim and a later argument can contain spaces. Passing
-    # a ready-made command-line string avoids the CRT re-quoting those quotes.
-    inner = subprocess.list2cmdline(values)
-    return f'{subprocess.list2cmdline([comspec])} /d /s /c "{inner}"'
+    # cmd expands metacharacters such as & and percent variables while parsing.
+    # Put each value in a private environment variable and expand it once inside
+    # quotes. Variable contents are not re-parsed for those shell characters.
+    env, tokens = {}, []
+    for index, value in enumerate(values):
+        name = f"CANVAS_HUB_ARG_{index}"
+        env[name] = value
+        tokens.append(f'"%{name}%"')
+    inner = " ".join(tokens)
+    return PreparedCommand(
+        f'{subprocess.list2cmdline([comspec])} /d /v:off /s /c "{inner}"',
+        env,
+    )
+
+
+def _environment(prepared: PreparedCommand, supplied: dict[str, str] | None = None) -> dict[str, str]:
+    env = os.environ.copy()
+    if supplied:
+        env.update(supplied)
+    env.update(prepared.env)
+    return env
+
+
+def run_command(args: Sequence[str | Path], **kwargs):
+    """``subprocess.run`` with shell-safe exact argument passing."""
+    prepared = command_for_process(args)
+    kwargs["env"] = _environment(prepared, kwargs.get("env"))
+    return subprocess.run(prepared.command, **kwargs)
+
+
+def popen_command(args: Sequence[str | Path], **kwargs):
+    """``subprocess.Popen`` with shell-safe exact argument passing."""
+    prepared = command_for_process(args)
+    kwargs["env"] = _environment(prepared, kwargs.get("env"))
+    return subprocess.Popen(prepared.command, **kwargs)

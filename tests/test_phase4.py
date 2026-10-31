@@ -312,7 +312,7 @@ def test_ocr_reads_tsv_into_lines_and_paragraphs():
 def test_windows_ocr_reads_utf8_tsv_and_spaced_paths(tmp_path, monkeypatch):
     from canvas_hub import ocr
 
-    program_dir = tmp_path / "Program Files" / "OCR 工具"
+    program_dir = tmp_path / "Program Files" / "OCR 工具 & %NAME%"
     program_dir.mkdir(parents=True)
     script = program_dir / "fake tesseract.py"
     script.write_text(
@@ -325,10 +325,11 @@ def test_windows_ocr_reads_utf8_tsv_and_spaced_paths(tmp_path, monkeypatch):
         encoding="utf-8",
     )
     shim = program_dir / "tesseract command.cmd"
-    shim.write_text(f'@echo off\r\n"{sys.executable}" "{script}" %*\r\n', encoding="utf-8")
-    image = tmp_path / "Jane Doe" / "扫描 image.png"
+    shim.write_text(f'@echo off\r\n"{sys.executable}" "%~dp0fake tesseract.py" %*\r\n', encoding="utf-8")
+    image = tmp_path / "Jane Doe" / "扫描 image & %NAME%.png"
     image.parent.mkdir()
     image.write_bytes(b"image")
+    monkeypatch.setenv("NAME", "expanded")
     monkeypatch.setenv("CANVAS_HUB_TESSERACT", str(shim))
 
     text, confidence = ocr._ocr_image(str(shim), image, "chi_tra")

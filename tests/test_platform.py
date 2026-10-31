@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from canvas_hub.commands import command_for_process
+from canvas_hub.commands import command_for_process, run_command
 from canvas_hub.cli import _open_browser_when_ready
 from canvas_hub.paths import default_home
 from canvas_hub.web.app import _mcp_candidates
@@ -69,8 +69,8 @@ def test_browser_opens_only_after_the_local_server_starts(monkeypatch):
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows batch-file launch")
-def test_windows_batch_shim_preserves_spaced_and_unicode_arguments(tmp_path):
-    program_dir = tmp_path / "Program Files" / "OCR 工具"
+def test_windows_batch_shim_preserves_shell_characters(tmp_path, monkeypatch):
+    program_dir = tmp_path / "Program Files" / "OCR 工具 & %NAME%"
     program_dir.mkdir(parents=True)
     script = program_dir / "argv.py"
     script.write_text(
@@ -79,14 +79,16 @@ def test_windows_batch_shim_preserves_spaced_and_unicode_arguments(tmp_path):
         encoding="utf-8",
     )
     shim = program_dir / "tesseract shim.cmd"
-    shim.write_text(f'@echo off\r\n"{sys.executable}" "{script}" %*\r\n', encoding="utf-8")
-    image = tmp_path / "Jane Doe" / "扫描 image.png"
+    shim.write_text(f'@echo off\r\n"{sys.executable}" "%~dp0argv.py" %*\r\n', encoding="utf-8")
+    image = tmp_path / "Jane Doe" / "扫描 image & %NAME%.png"
     image.parent.mkdir()
     image.write_bytes(b"not really an image")
+    monkeypatch.setenv("NAME", "expanded")
 
-    command = command_for_process([shim, image])
-    assert isinstance(command, str)
-    result = subprocess.run(command, capture_output=True, check=True)
+    prepared = command_for_process([shim, image])
+    assert isinstance(prepared.command, str)
+    assert prepared.env == {"CANVAS_HUB_ARG_0": str(shim), "CANVAS_HUB_ARG_1": str(image)}
+    result = run_command([shim, image], capture_output=True, check=True)
     assert json.loads(result.stdout.decode("utf-8")) == [str(image)]
 
 
@@ -104,8 +106,8 @@ def test_macos_subprocess_arguments_remain_direct_and_lossless(tmp_path):
     image.write_bytes(b"data")
 
     command = command_for_process([sys.executable, script, image])
-    assert command == [sys.executable, str(script), str(image)]
-    result = subprocess.run(command, capture_output=True, check=True)
+    assert command.command == [sys.executable, str(script), str(image)] and command.env == {}
+    result = run_command([sys.executable, script, image], capture_output=True, check=True)
     assert json.loads(result.stdout.decode("utf-8")) == [str(image)]
 
 
