@@ -109,7 +109,7 @@ class ResourceService:
             c.execute(
                 """INSERT INTO resources(id, size, content_type, stored_path, created_at)
                    VALUES (?,?,?,?,?) ON CONFLICT(id) DO NOTHING""",
-                (sha, len(data), content_type, str(target.relative_to(self.paths.resources)), now_iso()),
+                (sha, len(data), content_type, target.relative_to(self.paths.resources).as_posix(), now_iso()),
             )
         return sha
 
@@ -138,7 +138,7 @@ class ResourceService:
         if text:
             out = self.paths.extracted / f"{sha}.md"
             out.write_text(text, encoding="utf-8")
-            extracted_path = str(out.relative_to(self.paths.resources))
+            extracted_path = out.relative_to(self.paths.resources).as_posix()
         with self.db.tx() as c:
             c.execute(
                 """UPDATE resources SET extraction_status=?, extraction_tool=?, extraction_detail=?,

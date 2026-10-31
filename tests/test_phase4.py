@@ -1,6 +1,8 @@
 """Phase 4: formulas in score models, local grading overrides, the sandboxed HTML component, the dashboard and OCR."""
 
 import json
+import os
+import sys
 
 import pytest
 
@@ -247,14 +249,51 @@ for last; do :; done
 touch "$last-1.png" "$last-2.png"
 """
 
+STUB_TESSERACT_WINDOWS = r"""
+import os
+import sys
+from pathlib import Path
+
+if sys.argv[1] == "--version":
+    print("tesseract 5.3.4 (stub)")
+    raise SystemExit(0)
+if b"UNREADABLE" in Path(sys.argv[1]).read_bytes():
+    print("Error: cannot read image", file=sys.stderr)
+    raise SystemExit(1)
+conf = os.environ.get("STUB_CONF", "91")
+print("level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext")
+print("1\t1\t0\t0\t0\t0\t0\t0\t100\t100\t-1\t")
+for line, word, text in ((1, 1, "Photosynthesis"), (1, 2, "worksheet"), (2, 1, "Q1")):
+    print(f"5\t1\t1\t1\t{line}\t{word}\t0\t0\t10\t10\t{conf}\t{text}")
+print(f"5\t1\t1\t2\t1\t1\t0\t0\t10\t10\t{conf}\t{Path(sys.argv[1]).name}")
+"""
+
+STUB_PDFTOPPM_WINDOWS = r"""
+import sys
+from pathlib import Path
+
+prefix = Path(sys.argv[-1])
+prefix.with_name(prefix.name + "-1.png").touch()
+prefix.with_name(prefix.name + "-2.png").touch()
+"""
+
 
 @pytest.fixture
 def ocr_stubs(tmp_path, monkeypatch):
-    for name, body in (("tesseract", STUB_TESSERACT), ("pdftoppm", STUB_PDFTOPPM)):
-        p = tmp_path / name
-        p.write_text(body)
-        p.chmod(0o755)
-        monkeypatch.setenv(f"CANVAS_HUB_{name.upper()}", str(p))
+    if os.name == "nt":
+        programs = (("tesseract", STUB_TESSERACT_WINDOWS), ("pdftoppm", STUB_PDFTOPPM_WINDOWS))
+        for name, body in programs:
+            script = tmp_path / f"{name}.py"
+            script.write_text(body, encoding="utf-8")
+            p = tmp_path / f"{name}.cmd"
+            p.write_text(f'@echo off\r\n"{sys.executable}" "{script}" %*\r\n', encoding="utf-8")
+            monkeypatch.setenv(f"CANVAS_HUB_{name.upper()}", str(p))
+    else:
+        for name, body in (("tesseract", STUB_TESSERACT), ("pdftoppm", STUB_PDFTOPPM)):
+            p = tmp_path / name
+            p.write_text(body)
+            p.chmod(0o755)
+            monkeypatch.setenv(f"CANVAS_HUB_{name.upper()}", str(p))
     return tmp_path
 
 

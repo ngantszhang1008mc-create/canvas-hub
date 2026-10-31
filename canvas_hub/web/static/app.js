@@ -1102,7 +1102,7 @@ function ocrCard(s) {
   return h("div", { class: "card" }, h("div", { class: "card-head" }, h("h2", null, "Text from scans and photos (OCR)"),
     pill(s.enabled && s.tesseract ? "ok" : "muted", s.enabled && s.tesseract ? "On" : "Off")),
     h("p", { class: "small muted" }, `Reads text from photographed forms and scanned PDFs on this computer with tesseract. Each document gets a confidence score; below ${s.low_confidence_below}% it is flagged, because handwriting and formulas are often misread. Nothing is uploaded.`),
-    s.tesseract ? h("p", { class: "small" }, `Found ${s.version || "tesseract"}${s.pdf ? " and pdftoppm (scanned PDFs)" : " — scanned PDFs also need pdftoppm (brew install poppler)"}.`)
+    s.tesseract ? h("p", { class: "small" }, `Found ${s.version || "tesseract"}${s.pdf ? " and pdftoppm (scanned PDFs)" : `. ${s.pdf_install_hint || "Scanned PDFs also need pdftoppm from Poppler."}`}`)
       : h("div", { class: "banner warn" }, h("div", { class: "b-body" }, h("div", { class: "b-title" }, "tesseract is not installed"), h("div", { class: "small" }, s.install_hint))),
     h("label", { class: "check" }, on, h("strong", null, "Read text from scans and photos")),
     h("div", { class: "row", style: "margin-top:6px" }, h("label", { class: "small" }, "Languages ", lang), h("span", { class: "tiny muted" }, "e.g. eng, or eng+chi_tra (language packs must be installed)")),

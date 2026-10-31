@@ -1,6 +1,7 @@
 """Direct Codex assistant: stdio, the common tool loop, cancellation, and UI."""
 
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -16,10 +17,14 @@ from canvas_hub.util import InvalidInput
 
 @pytest.fixture
 def fake_codex(tmp_path, monkeypatch):
-    executable = tmp_path / "fake codex"
     script = Path(__file__).with_name("fake_codex.py")
-    executable.write_text(f"#!{sys.executable}\nimport runpy\nrunpy.run_path({str(script)!r}, run_name='__main__')\n")
-    executable.chmod(0o755)
+    if os.name == "nt":
+        executable = tmp_path / "fake codex.cmd"
+        executable.write_text(f'@echo off\r\n"{sys.executable}" "{script}"\r\n', encoding="utf-8")
+    else:
+        executable = tmp_path / "fake codex"
+        executable.write_text(f"#!{sys.executable}\nimport runpy\nrunpy.run_path({str(script)!r}, run_name='__main__')\n")
+        executable.chmod(0o755)
     log = tmp_path / "rpc.jsonl"
     monkeypatch.setenv("CANVAS_HUB_CODEX", str(executable))
     monkeypatch.setenv("CANVAS_HUB_FAKE_CODEX_LOG", str(log))

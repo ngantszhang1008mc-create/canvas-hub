@@ -145,7 +145,8 @@ def test_assistant_errors_and_key_storage(seeded):
     pub = svc.update_config({"preset": "anthropic", "api_key": "sk-ant-secret-abcd"})
     assert pub["api_key_saved"] and "secret" not in json.dumps(pub) and pub["api_key_hint"].endswith("abcd")
     p = hub.paths.runtime / "assistant.json"
-    assert stat.S_IMODE(os.stat(p).st_mode) == 0o600
+    if os.name != "nt":                   # Windows uses the per-user ACL inherited from LOCALAPPDATA
+        assert stat.S_IMODE(os.stat(p).st_mode) == 0o600
     # the key never ends up in backups or exports
     zp = backup.create_backup(hub)
     with zipfile.ZipFile(zp) as z:
@@ -294,7 +295,8 @@ def test_assistant_setups(seeded):
     assert fresh not in ("p1", p2)
     with pytest.raises(NotFound):
         svc.send(acct["id"], "hello", profile_id="p1")
-    assert stat.S_IMODE(os.stat(p).st_mode) == 0o600
+    if os.name != "nt":
+        assert stat.S_IMODE(os.stat(p).st_mode) == 0o600
 
 
 def test_assistant_setup_changes_are_serialised(seeded):

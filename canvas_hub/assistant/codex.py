@@ -20,6 +20,7 @@ import threading
 import time
 from collections import deque
 
+from ..commands import command_for_process
 from .providers import ProviderError, ToolCall, Turn
 
 START_TIMEOUT = 30
@@ -44,7 +45,7 @@ class AppServer:
         self.deferred = deque()
         try:
             self.process = subprocess.Popen(
-                [executable, "app-server", "--listen", "stdio://"], cwd=self.workspace.name,
+                command_for_process([executable, "app-server", "--listen", "stdio://"]), cwd=self.workspace.name,
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                 start_new_session=os.name != "nt")
         except OSError as e:
@@ -136,14 +137,23 @@ class AppServer:
         try:
             if self.process.poll() is None:
                 if os.name == "nt":
-                    self.process.terminate()
+                    # A package-manager shim runs under cmd.exe. Terminate its
+                    # whole tree so the real app-server cannot keep the
+                    # temporary workspace open.
+                    subprocess.run(
+                        ["taskkill", "/PID", str(self.process.pid), "/T", "/F"],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5, check=False,
+                    )
                 else:
                     os.killpg(self.process.pid, signal.SIGTERM)
                 try:
                     self.process.wait(timeout=2)
                 except subprocess.TimeoutExpired:
                     if os.name == "nt":
-                        self.process.kill()
+                        subprocess.run(
+                            ["taskkill", "/PID", str(self.process.pid), "/T", "/F"],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5, check=False,
+                        )
                     else:
                         os.killpg(self.process.pid, signal.SIGKILL)
                     self.process.wait(timeout=2)

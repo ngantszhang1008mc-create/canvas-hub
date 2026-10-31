@@ -156,7 +156,7 @@ Writing to Canvas is real: use a low-stakes assignment or a draft.
 | 13.2 | Ask "Track my SDE hours in the score model; 0 until 10 h, then 20 × hours / 20" | The SDE line shows the formula. Entering 8.5 h gives 0 and 15 h gives 15, both on the page and in the assistant's read-back |
 | 13.3 | **Overview** | **All courses** lists each course with grade so far, work done, lost lines and the next deadline; course names open the course |
 | 13.4 | **Data & settings → Custom HTML blocks**: switch on. Ask for "a custom chart of my hours by week" | A block appears with **Run**; nothing runs before you press it. After **Run** the chart shows, and the block cannot load anything from the internet |
-| 13.5 | Install tesseract (`brew install tesseract poppler`), restart, then **Data & settings → Text from scans and photos**: switch on and press **Read … stored documents** | Photographed forms and scanned problem sheets get text with a confidence score. Low-confidence ones say *OCR, low confidence*. Their words become searchable |
+| 13.5 | Install Tesseract and Poppler for your operating system, restart, then **Data & settings → Text from scans and photos**: switch on and press **Read … stored documents** | Photographed forms and scanned problem sheets get text with a confidence score. Low-confidence ones say *OCR, low confidence*. Their words become searchable |
 | 13.6 | With VoiceOver (⌘F5), tab through **Trackers** and the workload heatmap | Every control is announced by name, and heatmap days with deadlines read out what is due |
 
 ## 14. Codex in the assistant
