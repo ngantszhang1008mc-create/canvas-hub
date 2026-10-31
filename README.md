@@ -92,6 +92,13 @@ uv run canvas-hub fake-canvas --port 8765    # synthetic data only
 
 In another terminal, run `uv run canvas-hub --home /tmp/canvas-hub-demo serve` on macOS, or `uv run canvas-hub --home "$env:TEMP\canvas-hub-demo" serve` in Windows PowerShell. Paste `http://127.0.0.1:8765/`, and sign in with the test credentials the fake server prints.
 
+## Appearance
+
+Use **Light / Dark** in the top bar on any page. **Dark** keeps the original dark appearance;
+**Light** applies the white-and-blue style across the app. Dark is the default. The choice is
+remembered in this browser and shared between its tabs. Switching does not clear a chat draft
+or stop an assistant response.
+
 ## Organize deadlines
 
 On **Deadlines**, use **Archive** to hide a Canvas deadline from active lists, search, the overview, planner,

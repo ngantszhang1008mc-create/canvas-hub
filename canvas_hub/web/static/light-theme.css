@@ -1,0 +1,147 @@
+/* The optional Light appearance. Every rule is scoped so it cannot change Dark.
+   The original layouts and dark styles remain in styles.css. The zero-specificity
+   gate lets existing semantic states (danger, disabled, etc.) keep their priority. */
+:root[data-theme="light"] {
+  --bg: #f9fbfe; --paper: #fff; --surface: #fff; --surface-2: #f2f6fc;
+  --rule: #e8edf5; --border: #e1e8f2; --border-strong: #d6dfed;
+  --ink: #101828; --text: #25324b; --text-2: #566787; --text-3: #7f8da8;
+  --accent: #006bff; --accent-2: #0055df; --accent-soft: #e8f2ff; --mark: #006bff;
+  --ok: #1ba74d; --ok-soft: #eafaf0; --warn: #b97614; --warn-soft: #fff6e7;
+  --bad: #dc3f60; --bad-soft: #fff0f4; --info: #006bff; --info-soft: #edf5ff;
+  --muted-soft: #edf2f9; --focus: #006bff;
+  --shadow: 0 5px 22px rgb(36 65 109 / 5%);
+  --radius: 16px;
+  --sans: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", system-ui, "Helvetica Neue", Arial, sans-serif;
+  --serif: var(--sans);
+  --s0: #22b55d; --s1: #1677ff; --s2: #ef5675; --s3: #c2ccdf; --s4: #f4a13e; --s5: #9a60f9;
+  color-scheme: light;
+}
+:where(:root[data-theme="light"]) body { background: radial-gradient(ellipse at 70% 0%, #fff 0, transparent 65%), var(--bg); }
+:where(:root[data-theme="light"]) h1,
+:where(:root[data-theme="light"]) h2,
+:where(:root[data-theme="light"]) h3,
+:where(:root[data-theme="light"]) .brand-name,
+:where(:root[data-theme="light"]) .topbar .strong { letter-spacing: -.035em; }
+:where(:root[data-theme="light"]) h1 { font-weight: 750; font-size: 36px; }
+:where(:root[data-theme="light"]) h2,
+:where(:root[data-theme="light"]) h3 { font-weight: 650; }
+:where(:root[data-theme="light"]) .ui-icon { width: 20px; height: 20px; flex: none; vertical-align: middle; }
+:where(:root[data-theme="light"]) .sidebar { background: linear-gradient(160deg, #f5faff, #f8faff 65%, #f3f7fd); border-color: var(--rule); }
+:where(:root[data-theme="light"]) .brand { align-items: center; }
+:where(:root[data-theme="light"]) .brand-mark { width: 25px; height: 25px; background: linear-gradient(145deg, #263042, #0b101d); border-radius: 5px; box-shadow: 0 2px 4px #0c173c20; }
+:where(:root[data-theme="light"]) .brand-mark::after { color: #fff; font-family: Georgia, serif; }
+:where(:root[data-theme="light"]) .brand-name { font-weight: 720; font-size: 21px; color: var(--ink); }
+:where(:root[data-theme="light"]) .account-switch { color: var(--text-2); }
+:where(:root[data-theme="light"]) .nav { gap: 2px; }
+:where(:root[data-theme="light"]) .nav-label { color: #8d9ab3; font-weight: 700; }
+:where(:root[data-theme="light"]) .nav a { display: flex; align-items: center; gap: 14px; border-radius: 11px; border-left: 3px solid transparent; }
+:where(:root[data-theme="light"]) .nav a > .ui-icon { width: 21px; height: 21px; color: #657da5; }
+:where(:root[data-theme="light"]) .nav a.active { border-left-color: var(--accent); background: linear-gradient(100deg, #e3f0ff, #e8f3ff); color: var(--accent); }
+:where(:root[data-theme="light"]) .nav a.active > .ui-icon { color: var(--accent); }
+:where(:root[data-theme="light"]) .nav a[data-view="assistant"] > .ui-icon { width: 24px; }
+:where(:root[data-theme="light"]) .nav a[data-view="assistant"] > .ui-icon path { fill: currentColor; }
+:where(:root[data-theme="light"]) .sidebar-foot { color: var(--text-3); }
+:where(:root[data-theme="light"]) .topbar { background: rgb(255 255 255 / 88%); box-shadow: 0 1px 5px #244a7c03; }
+:where(:root[data-theme="light"]) .topbar .strong { font-weight: 650; }
+:where(:root[data-theme="light"]) .page-head { border-bottom: 1px solid #d4dfef; }
+:where(:root[data-theme="light"]) .page-head p { color: #7585a2; }
+:where(:root[data-theme="light"]) .page-head h1 .ui-icon { width: 38px; height: 36px; margin-right: 12px; vertical-align: -3px; }
+:where(:root[data-theme="light"]) .card,
+:where(:root[data-theme="light"]) .cmp,
+:where(:root[data-theme="light"]) .chat { box-shadow: var(--shadow); }
+:where(:root[data-theme="light"]) button,
+:where(:root[data-theme="light"]) .btn { border-radius: 11px; border-color: var(--border); box-shadow: 0 2px 5px #2a4c7a03; transition: background .15s, border-color .15s, box-shadow .15s; }
+:where(:root[data-theme="light"]) button:hover,
+:where(:root[data-theme="light"]) .btn:hover { background: var(--surface-2); border-color: var(--border-strong); }
+:where(:root[data-theme="light"]) button.primary,
+:where(:root[data-theme="light"]) .btn.primary { color: #fff; background: linear-gradient(110deg, #0879ff, #0062ff); border-color: #076cff; box-shadow: 0 4px 9px #006bff23, inset 0 1px 0 #ffffff35; }
+:where(:root[data-theme="light"]) button.primary:hover,
+:where(:root[data-theme="light"]) .btn.primary:hover { background: linear-gradient(110deg, #006bf4, #0056e8); box-shadow: 0 5px 12px #006bff30; }
+:where(:root[data-theme="light"]) button.ghost { box-shadow: none; }
+:where(:root[data-theme="light"]) button.sm,
+:where(:root[data-theme="light"]) .btn.sm { border-radius: 8px; }
+:where(:root[data-theme="light"]) input[type=text],
+:where(:root[data-theme="light"]) input[type=search],
+:where(:root[data-theme="light"]) input[type=url],
+:where(:root[data-theme="light"]) input[type=password],
+:where(:root[data-theme="light"]) input[type=number],
+:where(:root[data-theme="light"]) input[type=datetime-local],
+:where(:root[data-theme="light"]) input[type=date],
+:where(:root[data-theme="light"]) select,
+:where(:root[data-theme="light"]) textarea {
+  border-radius: 10px; border-color: var(--border); background: var(--paper); box-shadow: 0 2px 5px #284b8003;
+}
+:where(:root[data-theme="light"]) input:focus,
+:where(:root[data-theme="light"]) select:focus,
+:where(:root[data-theme="light"]) textarea:focus { outline: 3px solid #006bff12; border-color: #8bbcff; }
+:where(:root[data-theme="light"]) input::placeholder,
+:where(:root[data-theme="light"]) textarea::placeholder { color: #8190ab; }
+:where(:root[data-theme="light"]) input[type=checkbox] { accent-color: var(--accent); }
+:where(:root[data-theme="light"]) .pill { border-radius: 7px; font-weight: 600; }
+:where(:root[data-theme="light"]) .pill.muted { background: var(--surface-2); border-color: transparent; }
+:where(:root[data-theme="light"]) .banner { border-left-width: 3px; }
+:where(:root[data-theme="light"]) table.t th { border-bottom-color: var(--border-strong); }
+:where(:root[data-theme="light"]) .chip { border-radius: 999px; border-color: var(--border); }
+:where(:root[data-theme="light"]) .chip.on { color: var(--accent); background: var(--accent-soft); border-color: #cce2ff; }
+:where(:root[data-theme="light"]) .course-card { border-top-width: 1px; border-top-color: var(--rule); }
+:where(:root[data-theme="light"]) .course-card:hover { box-shadow: 0 8px 24px #3155800b; border-color: #b5d5ff; }
+:where(:root[data-theme="light"]) .tabs { border: 0; padding: 3px; border-radius: 15px; background: #f0f4f9; }
+:where(:root[data-theme="light"]) .tabs button { position: relative; border-radius: 12px; border-bottom: 0; margin-bottom: 0; padding: 9px 16px; }
+:where(:root[data-theme="light"]) .tabs button.active { color: var(--accent); background: var(--paper); box-shadow: 0 3px 12px #3056810d; }
+:where(:root[data-theme="light"]) .tabs button.active::after { content: ''; height: 3px; border-radius: 3px; background: var(--accent); position: absolute; bottom: 0; left: 10px; right: 10px; }
+:where(:root[data-theme="light"]) .tabs .ui-icon { margin-right: 3px; }
+:where(:root[data-theme="light"]) .tabs .tab-count { background: #e2efff; border-radius: 99px; color: #2762af; padding: 2px 7px; }
+:where(:root[data-theme="light"]) .main.fill > .tabs { background: #f2f6fbeF; backdrop-filter: blur(12px); }
+:where(:root[data-theme="light"]) .tabs .focus-toggle { background: var(--paper); border: 1px solid var(--rule); border-radius: 11px; box-shadow: 0 4px 10px #294d7a08; align-self: center; margin-right: 8px; }
+:where(:root[data-theme="light"]) .conv-list { border: 1px solid var(--rule); border-radius: 16px; background: var(--paper); padding: 9px; box-shadow: var(--shadow); }
+:where(:root[data-theme="light"]) .conv-list > .btn { background: linear-gradient(110deg, #0879ff, #0062ff); border-color: #076cff; color: #fff; box-shadow: 0 4px 9px #006bff1c; border-radius: 10px; }
+:where(:root[data-theme="light"]) .conv { border-radius: 9px; border-left-color: transparent; }
+:where(:root[data-theme="light"]) .conv.on { color: var(--accent); background: var(--accent-soft); border-left-color: var(--accent); }
+:where(:root[data-theme="light"]) .conv-title { color: var(--text); }
+:where(:root[data-theme="light"]) .chat { border-color: var(--rule); }
+:where(:root[data-theme="light"]) .chat-empty { flex: 1; display: flex; flex-direction: column; justify-content: center; align-items: center; }
+:where(:root[data-theme="light"]) .chat-empty > .empty-sparkles { width: 66px; height: 58px; margin-bottom: 22px; }
+:where(:root[data-theme="light"]) .chat-empty .e-title { font-weight: 720; letter-spacing: -.04em; font-size: 26px; margin-bottom: 22px; color: var(--ink); }
+:where(:root[data-theme="light"]) .chips.suggest { gap: 10px; }
+:where(:root[data-theme="light"]) .suggest .chip { padding: 10px 14px; min-height: 38px; font-size: 11px; box-shadow: 0 5px 12px #365a8410; }
+:where(:root[data-theme="light"]) .suggest .chip .ui-icon { width: 18px; height: 18px; margin-right: 3px; }
+:where(:root[data-theme="light"]) .suggest .prompt-green { background: #f0fbf6; border-color: #ddf4e8; color: #225f45; }
+:where(:root[data-theme="light"]) .suggest .prompt-green .ui-icon { color: #23b65d; }
+:where(:root[data-theme="light"]) .suggest .prompt-blue { background: #f0f7ff; border-color: #deedff; color: #0066e9; }
+:where(:root[data-theme="light"]) .suggest .prompt-pink { background: #fff2f7; border-color: #ffe1ed; color: #c52a63; }
+:where(:root[data-theme="light"]) .suggest .prompt-orange { background: #fff7ef; border-color: #ffead6; color: #c75a05; }
+:where(:root[data-theme="light"]) .suggest .prompt-purple { background: #f7f1ff; border-color: #eadfff; color: #7735d8; }
+:where(:root[data-theme="light"]) .suggest .chip:hover { filter: brightness(.98); box-shadow: 0 6px 14px #365a8418; }
+:where(:root[data-theme="light"]) .composer { background: color-mix(in srgb, var(--surface-2) 18%, var(--paper)); }
+:where(:root[data-theme="light"]) .composer textarea { border-radius: 12px; box-shadow: 0 2px 6px #284b8005; }
+:where(:root[data-theme="light"]) .composer-bar { gap: 9px; }
+:where(:root[data-theme="light"]) .select-icon-wrap { display: inline-flex; position: relative; min-width: 0; max-width: 260px; }
+:where(:root[data-theme="light"]) .select-icon-wrap:has(select[hidden]) { display: none; }
+:where(:root[data-theme="light"]) .select-icon-wrap > .ui-icon { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); pointer-events: none; color: #7184a5; width: 17px; height: 17px; }
+:where(:root[data-theme="light"]) .select-icon-wrap:first-child > .ui-icon { color: #1684ff; }
+:where(:root[data-theme="light"]) .select-icon-wrap:has(select[title="Codex model for the next message"]) > .ui-icon { color: #9d56df; }
+:where(:root[data-theme="light"]) .select-icon-wrap > select { width: 100%; padding: 7px 25px 7px 34px; border-radius: 11px; box-shadow: 0 3px 9px #31558006; }
+:where(:root[data-theme="light"]) .chat-foot { background: var(--paper); font-size: 11px; }
+:where(:root[data-theme="light"]) .chat-foot .ui-icon { width: 16px; height: 16px; color: #efad38; }
+:where(:root[data-theme="light"]) .chat-foot > span { flex: 1; min-width: 0; }
+:where(:root[data-theme="light"]) .msg.user .bubble { color: #fff; background: linear-gradient(120deg, #1683ff, #006bff); box-shadow: 0 3px 10px #006bff12; border-radius: 15px 15px 4px 15px; }
+:where(:root[data-theme="light"]) .toast { border-radius: 12px; color: #fff; background: #263b60; }
+:where(:root[data-theme="light"]) .progress { border-radius: 99px; }
+:where(:root[data-theme="light"]) .progress > span { background: var(--accent); }
+@media (max-width: 860px) {
+:where(:root[data-theme="light"]) .nav a { border-left: 0; border-radius: 9px; gap: 7px; }
+:where(:root[data-theme="light"]) .nav a.active { border-bottom-color: var(--accent); }
+:where(:root[data-theme="light"]) .nav a > .ui-icon { width: 17px; height: 17px; }
+:where(:root[data-theme="light"]) .page-head h1 .ui-icon { width: 30px; height: 30px; }
+:where(:root[data-theme="light"]) h1 { font-size: 27px; }
+:where(:root[data-theme="light"]) .chat-empty .e-title { font-size: 22px; }
+:where(:root[data-theme="light"]) .suggest .chip { padding: 7px 10px; }
+}
+@media (prefers-reduced-motion: reduce) {
+:where(:root[data-theme="light"]) button,
+:where(:root[data-theme="light"]) .btn { transition: none; }
+}
+
+:where(:root[data-theme="light"]) .ui-icon { display: inline-block; }
+:where(:root[data-theme="light"]) .select-icon-wrap { display: inline-flex; }
+:where(:root[data-theme="light"]) .bell-n { background: var(--bad); color: #fff; }
