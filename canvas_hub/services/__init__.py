@@ -12,6 +12,7 @@ from ..util import InvalidInput, NotFound
 from .annotations import AnnotationService
 from .components import ComponentService
 from .datefinder import DateFinder
+from .deadlines import DeadlineService
 from .files import SavedFileService
 from .grading import GradingRules
 from .identity import IdentityService
@@ -40,6 +41,7 @@ class Hub:
         self.resources = ResourceService(self.db, self.paths)
         self.search = SearchService(self.db)
         self.query = QueryService(self.db)
+        self.deadlines = DeadlineService(self.db)
         self.annotations = AnnotationService(self.db)
         self.importer = Importer(self.db, self.identity, self.jobs, self.search, self.resources)
         self.planner = PlannerService(self.db, self.query)

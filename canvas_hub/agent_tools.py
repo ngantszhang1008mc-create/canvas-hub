@@ -9,6 +9,7 @@ permission so a client only gets what the user enabled:
                under the same scope, read-only and view-to-complete rules as
                the UI)
     settings - change the remembered collection scope
+    deadlines - manage local deadline tabs, filters and archives (in-app setting)
     ui       - show_* tools that render interactive components in the app's
                assistant chat (in-app only; not offered over MCP)
     fulfil   - claim and complete requests to read external sites (MCP agents
@@ -32,9 +33,10 @@ from . import dates, projections
 from .htmltools import to_text
 from .model import CATEGORIES, ITEM_TYPES
 from .services.querylayer import VIEW_HELP
+from .services.deadlines import archived_sql
 from .util import HubError, InvalidInput
 
-PERMISSIONS = ("read", "notes", "collect", "settings", "ui", "fulfil")
+PERMISSIONS = ("read", "notes", "collect", "settings", "deadlines", "ui", "fulfil")
 MAX_RESULT_CHARS = 24000
 
 
@@ -189,7 +191,7 @@ def _item_view(ctx, aid, item_id, body_chars=8000):
         "item_id": it["id"], "type": it["item_type"], "title": it["title"], "course_id": it["course_canvas_id"],
         "course": it.get("course_title"), "source_url": it["source_url"], "presence": it["presence"],
         "presence_detail": it["presence_detail"], "first_seen": it["first_observed_at"], "last_read": it["last_observed_at"],
-        "freshness": it["freshness"], "fields": fields,
+        "freshness": it["freshness"], "fields": fields, "deadline_archived": it["deadline_archived"],
         "documents": [{"resource_id": r["resource_id"], "filename": r["filename"], "extraction": r["extraction_status"],
                        "chars": r["extracted_chars"],
                        **({"ocr_confidence": r["ocr_confidence"],
@@ -262,7 +264,9 @@ def h_deadlines(ctx, a):
     start = a.get("start") or (now - timedelta(days=1)).isoformat()
     end = a.get("end") or (now + timedelta(days=a.get("days_ahead", 14))).isoformat()
     r = ctx.api.deadlines(aid, start=start, end=end, time_zone=a.get("time_zone"), course_id=a.get("course_id"),
-                          include_calendar=a.get("include_calendar", True), limit=100)
+                          include_calendar=a.get("include_calendar", True), limit=100,
+                          archive=a.get("archive", "active"), item_type=a.get("item_type"),
+                          status=a.get("status", "all"), cursor=a.get("cursor"))
     out = []
     for d in r["deadlines"]:
         s = d.get("submission") or {}
@@ -272,8 +276,8 @@ def h_deadlines(ctx, a):
                     "submission": {k: s.get(k) for k in ("workflow_state", "submitted_at", "late", "missing", "excused",
                                                          "score", "grade", "grade_visible", "observed_at", "state") if k in s} or None,
                     "marked_done_locally": d.get("done_locally"), "my_local_tasks": d.get("local_tasks"),
-                    "source_url": d["source_url"]})
-    return {"time_zone": r["time_zone"], "range": r["range"], "deadlines": out,
+                    "source_url": d["source_url"], "archived": d["archived"]})
+    return {"time_zone": r["time_zone"], "range": r["range"], "deadlines": out, "next_cursor": r["next_cursor"],
             "unresolved_dates": [{"item_id": u["item_id"], "title": u["title"], "as_written": u["date"].get("raw")}
                                  for u in r["unresolved_dates"]],
             "note": "Submission states are Canvas-reported as of date_last_read/observed_at. Local tasks are the user's own markers."}
@@ -515,6 +519,30 @@ def h_decline_request(ctx, a):
 # ---- interactive components (rendered by the app's chat UI) --------------------------
 def _display(component: str, data: dict, summary: str) -> dict:
     return {"display": {"component": component, **data}, "summary": summary}
+
+
+def h_deadline_views(ctx, a):
+    return ctx.api.deadline_views(_account(ctx, a))
+
+
+def h_save_deadline_tab(ctx, a):
+    return ctx.api.save_deadline_tab(_account(ctx, a), {k: a[k] for k in ("id", "name", "filters") if k in a})
+
+
+def h_select_deadline_tab(ctx, a):
+    return ctx.api.select_deadline_tab(_account(ctx, a), a["id"])
+
+
+def h_delete_deadline_tab(ctx, a):
+    return ctx.api.delete_deadline_tab(_account(ctx, a), a["id"])
+
+
+def h_archive_deadline(ctx, a):
+    return ctx.api.archive_deadline(_account(ctx, a), a["item_id"], a["archived"])
+
+
+def h_archived_deadlines(ctx, a):
+    return ctx.api.archived_deadlines(_account(ctx, a))
 
 
 def h_show_deadlines(ctx, a):
@@ -820,6 +848,8 @@ def h_course_score_lines(ctx, a):
         due = dates.instant(f.get("due_at")) if f.get("due_at") else None
         line = {"id": f"a{r['canvas_id']}", "label": (r["title"] or "")[:120], "max": float(pts), "item_id": r["id"],
                 "group": f.get("assignment_group")}
+        line["deadline_archived"] = bool(hub.db.one(
+            f"SELECT ({archived_sql()}) AS archived FROM items i WHERE i.id=?", (r["id"],))["archived"])
         if due:
             line["due"] = due.isoformat()
         if sub.get("state") == "not_collected":
@@ -882,10 +912,10 @@ def course_dashboard(ctx, aid: int, days: int = 7) -> dict:
             pct, letter, weighted = proj["percent"], (proj["letter"] if rules.get("scale") else None), spec["weighted"]
         except InvalidInput:
             pass
-        upcoming = sorted((b for b in counted if b["status"] == "pending" and b.get("due") and not b.get("submitted")
+        upcoming = sorted((b for b in counted if not b.get("deadline_archived") and b["status"] == "pending" and b.get("due") and not b.get("submitted")
                            and now <= datetime.fromisoformat(b["due"]) <= now + timedelta(days=days)),
                           key=lambda b: b["due"])
-        nxt = min((b for b in counted if b["status"] == "pending" and b.get("due") and not b.get("submitted")
+        nxt = min((b for b in counted if not b.get("deadline_archived") and b["status"] == "pending" and b.get("due") and not b.get("submitted")
                    and datetime.fromisoformat(b["due"]) >= now), key=lambda b: b["due"], default=None)
         rows.append({"course_id": c["course_id"], "title": c["title"], "code": c.get("course_code"),
                      "assignments": len(counted),
@@ -1177,7 +1207,31 @@ TOOLS: list[AgentTool] = [
               "state. Default: from yesterday to days_ahead (14) days ahead.", "read",
               {"days_ahead": {"type": "integer", "minimum": 1, "maximum": 365}, "start": {"type": "string", "description": _DATE_DESC},
                "end": {"type": "string", "description": _DATE_DESC}, "time_zone": {"type": "string", "description": "IANA name"},
-               "course_id": {"type": "string"}, "include_calendar": {"type": "boolean"}}, [], h_deadlines),
+               "course_id": {"type": "string"}, "include_calendar": {"type": "boolean"},
+               "archive": {"type": "string", "enum": ["active", "all", "archived"]},
+               "item_type": {"type": "string", "enum": ["assignment", "quiz", "calendar_event"]},
+               "status": {"type": "string", "enum": ["all", "unfinished", "completed"]},
+               "cursor": {"type": "string"}}, [], h_deadlines),
+    AgentTool("get_deadline_views", "Read the user's saved deadline tabs, their filters and active tab. Archive filters: active, all (show archived), archived only.",
+              "read", handler=h_deadline_views),
+    AgentTool("get_archived_deadlines", "Explicitly list archived Canvas deadlines, without a date window. They are hidden from ordinary views.",
+              "read", handler=h_archived_deadlines),
+    AgentTool("save_deadline_tab", "Create a saved deadline tab, or modify its name and filters by id. Unspecified filters are retained. Same controls as the Deadlines page. Changes are local.",
+              "deadlines", {"id": {"type": "string"}, "name": {"type": "string"},
+              "filters": {"type": "object", "properties": {
+                  "range": {"type": "string", "enum": ["7", "14", "30", "120", "365", "past", "all"]},
+                  "include_calendar": {"type": "boolean"}, "course_id": {"type": "string"},
+                  "item_type": {"type": "string", "enum": ["", "assignment", "quiz", "calendar_event"]},
+                  "status": {"type": "string", "enum": ["all", "unfinished", "completed"]},
+                  "archive": {"type": "string", "enum": ["active", "all", "archived"]}},
+                  "additionalProperties": False}}, [], h_save_deadline_tab),
+    AgentTool("select_deadline_tab", "Select the deadline tab the user sees when opening Deadlines.", "deadlines",
+              {"id": {"type": "string"}}, ["id"], h_select_deadline_tab),
+    AgentTool("delete_deadline_tab", "Delete a saved deadline tab (keep at least one).", "deadlines",
+              {"id": {"type": "string"}}, ["id"], h_delete_deadline_tab),
+    AgentTool("archive_deadline", "Archive or restore a Canvas deadline locally. Its assignment/quiz/calendar mirrors share the archive state. Archived deadlines are hidden from ordinary views; Canvas and grade records are unchanged.",
+              "deadlines", {"item_id": {"type": "integer"}, "archived": {"type": "boolean"}},
+              ["item_id", "archived"], h_archive_deadline),
     AgentTool("get_changes", "What changed in Canvas since a cursor or time (edits, new items, items no longer listed). "
               "Pass next_cursor from a previous call to get only newer events.", "read",
               {"cursor": {"type": "string"}, "since": {"type": "string", "description": _DATE_DESC},

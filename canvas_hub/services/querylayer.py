@@ -21,15 +21,18 @@ import time
 from datetime import datetime, timedelta, timezone
 
 from ..util import InvalidInput
+from .deadlines import archived_sql
 
 MAX_ROWS = 500
 MAX_SECONDS = 3.0
 
 VIEWS = {
     "items": "SELECT id, item_type, course_canvas_id AS course_id, canvas_id, title, source_url, presence, "
-             "first_observed_at, last_observed_at FROM main.items WHERE account_id={a} AND current_revision>0",
+             "first_observed_at, last_observed_at FROM main.items i WHERE account_id={a} AND current_revision>0 "
+             f"AND NOT {archived_sql('i', 'main.')}",
     "fields": "SELECT f.item_id, f.field, f.value_json, f.last_observed_at FROM main.item_fields f "
-              "JOIN main.items i ON i.id=f.item_id WHERE i.account_id={a}",
+              "JOIN main.items i ON i.id=f.item_id WHERE i.account_id={a} "
+              f"AND NOT {archived_sql('i', 'main.')}",
     "courses": "SELECT canvas_id AS course_id, title, source_url FROM main.items WHERE account_id={a} AND item_type='course'",
     "changes": "SELECT id, item_id, kind, field, old_json, new_json, observed_at, baseline FROM main.change_events "
                "WHERE account_id={a}",

@@ -14,6 +14,7 @@ from ..db import Database
 from ..htmltools import absolutize
 from ..model import CATEGORIES, ITEM_TYPES, spec_for
 from ..util import InvalidInput, NotFound, clamp_limit, decode_cursor, encode_cursor, now_iso, parse_iso, to_utc_iso
+from .deadlines import archived_sql
 
 
 def _tz(name: str | None, fallback: str | None) -> tuple[ZoneInfo, str]:
@@ -141,11 +142,13 @@ class QueryService:
     # ---- items -----------------------------------------------------------
     def list_items(self, account_id: int, *, course_id: str | None = None, item_type: str | None = None,
                    presence: str | None = None, limit: int | None = None, cursor: str | None = None,
-                   include_stubs: bool = False) -> dict:
+                   include_stubs: bool = False, include_archived: bool = False) -> dict:
         lim = clamp_limit(limit, 50, 200)
         if item_type and item_type not in ITEM_TYPES:
             raise InvalidInput(f"unknown item type {item_type!r}")
         where, params = ["account_id=?"], [account_id]
+        if not include_archived:
+            where.append("NOT " + archived_sql("items"))
         if course_id:
             where.append("course_canvas_id=?")
             params.append(str(course_id))
@@ -171,6 +174,8 @@ class QueryService:
 
     def get_item(self, account_id: int, item_id: int) -> dict:
         item = self._item_row(account_id, item_id)
+        item["deadline_archived"] = bool(self.db.one(
+            f"SELECT ({archived_sql()}) AS archived FROM items i WHERE i.id=?", (item_id,))["archived"])
         acct = self.db.one("SELECT time_zone FROM accounts WHERE id=?", (account_id,))
         tzname = acct["time_zone"] if acct else None
         fields = self._field_rows(item["id"])
@@ -260,7 +265,12 @@ class QueryService:
     # ---- deadlines -------------------------------------------------------
     def deadlines(self, account_id: int, *, start: str, end: str, time_zone: str | None = None,
                   course_id: str | None = None, include_calendar: bool = True, limit: int | None = None,
-                  cursor: str | None = None) -> dict:
+                  cursor: str | None = None, archive: str = "active", item_type: str | None = None,
+                  status: str = "all") -> dict:
+        if archive not in ("active", "all", "archived") or status not in ("all", "unfinished", "completed"):
+            raise InvalidInput("invalid deadline archive or status filter")
+        if item_type and item_type not in ("assignment", "quiz", "calendar_event"):
+            raise InvalidInput("invalid deadline item type")
         s, e = parse_iso(start), parse_iso(end)
         if not s or not e:
             raise InvalidInput("start and end must be ISO-8601 timestamps with an offset, e.g. 2026-10-01T00:00:00+08:00")
@@ -274,12 +284,14 @@ class QueryService:
         types = ["assignment", "quiz"] + (["calendar_event"] if include_calendar else [])
         rows = self.db.query(
             f"""SELECT i.id, i.item_type, i.title, i.course_canvas_id, i.canvas_id, i.source_url, i.presence,
-                f.value_json, f.last_observed_at AS due_observed_at, f.field
+                f.value_json, f.last_observed_at AS due_observed_at, f.field, ({archived_sql()}) AS archived
                 FROM items i JOIN item_fields f ON f.item_id=i.id
                 WHERE i.account_id=? AND i.item_type IN ({','.join('?'*len(types))})
                   AND ((i.item_type IN ('assignment','quiz') AND f.field='due_at') OR (i.item_type='calendar_event' AND f.field='start_at'))
+                  {'AND NOT ' + archived_sql() if archive == 'active' else 'AND ' + archived_sql() if archive == 'archived' else ''}
+                  {'AND i.item_type=?' if item_type else ''}
                   {'AND i.course_canvas_id=?' if course_id else ''}""",
-            (account_id, *types, *([str(course_id)] if course_id else [])),
+            (account_id, *types, *([item_type] if item_type else []), *([str(course_id)] if course_id else [])),
         )
         dated, unresolved = [], []
         for r in rows:
@@ -290,8 +302,20 @@ class QueryService:
             entry = {"item_id": r["id"], "item_type": r["item_type"], "title": r["title"],
                      "course_id": r["course_canvas_id"], "course_title": courses.get(r["course_canvas_id"]),
                      "source_url": r["source_url"], "presence": r["presence"], "date_field": r["field"],
-                     "date": val, "date_local": _local(val, tz), "date_observed_at": r["due_observed_at"]}
+                     "date": val, "date_local": _local(val, tz), "date_observed_at": r["due_observed_at"],
+                     "archived": bool(r["archived"])}
             if inst is None:
+                if status != "all":
+                    fields = self._fields(r["id"])
+                    submission = self._submission(account_id, fields.get("assignment_id")
+                        if r["item_type"] == "quiz" else r["canvas_id"]) if r["item_type"] != "calendar_event" else None
+                    submission = submission or {}
+                    done = self.db.one("SELECT 1 FROM annotations WHERE account_id=? AND item_id=? AND kind='task' "
+                                       "AND task_state='done' AND local_due IS NULL", (account_id, r["id"]))
+                    completed = bool(done or submission.get("submitted_at") or submission.get("excused") or
+                                     submission.get("workflow_state") == "graded")
+                    if completed != (status == "completed"):
+                        continue
                 unresolved.append(entry)
                 continue
             iso = to_utc_iso(inst)
@@ -319,6 +343,10 @@ class QueryService:
             # deadline itself; dated ones (study blocks, "start on Saturday")
             # are steps towards it.
             entry["done_locally"] = any(t["task_state"] == "done" and not t["local_due"] for t in entry["local_tasks"])
+            sub = entry.get("submission") or {}
+            completed = entry["done_locally"] or bool(sub.get("submitted_at") or sub.get("excused") or
+                                                     sub.get("workflow_state") == "graded")
+            entry["completed"] = completed
             dated.append(entry)
         # A classic quiz is also an assignment; list it once (as the assignment,
         # which carries the submission state).
@@ -326,6 +354,9 @@ class QueryService:
         dated = [d for d in dated if not (d["item_type"] == "quiz" and d.get("_assignment_id") in listed_assignments)]
         # Calendar entries that merely mirror an assignment's due date are not listed twice.
         dated = [d for d in dated if not (d["item_type"] == "calendar_event" and d.get("assignment_ref") in listed_assignments)]
+        # Deduplicate before status filtering: an undated local task belongs to
+        # the assignment, not necessarily its quiz/calendar copies.
+        dated = [d for d in dated if status == "all" or d["completed"] == (status == "completed")]
         for d in dated:
             d.pop("_assignment_id", None)
         dated.sort(key=lambda d: (d["sort_key"], d["item_id"]))
@@ -335,8 +366,10 @@ class QueryService:
         page = dated[:lim]
         nxt = encode_cursor({"k": page[-1]["sort_key"], "id": page[-1]["item_id"]}) if len(dated) > lim else None
         tasks = [dict(x) for x in self.db.query(
-            """SELECT id, title, body, task_state, local_due, item_id, course_canvas_id FROM annotations
-               WHERE account_id=? AND kind='task' AND local_due IS NOT NULL ORDER BY local_due""", (account_id,))]
+            f"""SELECT id, title, body, task_state, local_due, item_id, course_canvas_id FROM annotations
+               WHERE account_id=? AND kind='task' AND local_due IS NOT NULL
+               AND NOT EXISTS (SELECT 1 FROM items i WHERE i.id=annotations.item_id AND {archived_sql()})
+               ORDER BY local_due""", (account_id,))]
         return {
             "range": {"start": s_iso, "end": e_iso}, "time_zone": tzname,
             "deadlines": page, "next_cursor": nxt,
@@ -387,6 +420,7 @@ class QueryService:
         cursor still advances so polling can resume from it later."""
         lim = clamp_limit(limit, 50, 500)
         where, params = ["e.account_id=?"], [account_id]
+        where.append("NOT " + archived_sql())
         after = 0
         if cursor:
             try:
@@ -504,9 +538,10 @@ class QueryService:
     def discrepancies(self, account_id: int) -> list[dict]:
         out = []
         for r in self.db.query(
-            """SELECT d.*, a.title AS item_title, a.item_type AS item_type, b.title AS other_title, a.course_canvas_id
+            f"""SELECT d.*, a.title AS item_title, a.item_type AS item_type, b.title AS other_title, a.course_canvas_id
                FROM discrepancies d JOIN items a ON a.id=d.item_id JOIN items b ON b.id=d.other_item_id
-               WHERE d.account_id=? ORDER BY d.last_detected_at DESC""", (account_id,)):
+               WHERE d.account_id=? AND NOT {archived_sql('a')} AND NOT {archived_sql('b')}
+               ORDER BY d.last_detected_at DESC""", (account_id,)):
             d = dict(r)
             d["detail"] = json.loads(d.pop("detail_json"))
             out.append(d)

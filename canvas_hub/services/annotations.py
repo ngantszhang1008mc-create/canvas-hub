@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from ..db import Database
 from ..util import InvalidInput, NotFound, now_iso, parse_iso
+from .deadlines import archived_sql
 
 _KINDS = ("note", "task")
 _TASK_STATES = ("open", "in_progress", "blocked", "done")
@@ -83,6 +84,8 @@ class AnnotationService:
     def list(self, account_id: int, *, item_id=None, course_id: str | None = None, kind: str | None = None,
              task_state: str | None = None) -> list[dict]:
         where, params = ["a.account_id=?"], [account_id]
+        if item_id is None:
+            where.append("(a.kind!='task' OR NOT " + archived_sql() + ")")
         if item_id is not None:
             where.append("a.item_id=?")
             params.append(int(item_id))
