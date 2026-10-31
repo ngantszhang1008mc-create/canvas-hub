@@ -215,9 +215,37 @@ def create_app(api: HubAPI, *, token: str, port: int) -> FastAPI:
 
     @app.get("/api/accounts/{aid}/deadlines")
     def deadlines(aid: int, start: str, end: str, tz: str | None = None, course_id: str | None = None,
-                  include_calendar: bool = True, limit: int | None = None, cursor: str | None = None):
+                  include_calendar: bool = True, limit: int | None = None, cursor: str | None = None,
+                  archive: str = "active", item_type: str | None = None, status: str = "all"):
         return api.deadlines(aid, start=start, end=end, time_zone=tz, course_id=course_id,
-                             include_calendar=include_calendar, limit=limit, cursor=cursor)
+                             include_calendar=include_calendar, limit=limit, cursor=cursor,
+                             archive=archive, item_type=item_type, status=status)
+
+    @app.get("/api/accounts/{aid}/deadlines/archived")
+    def archived_deadlines(aid: int):
+        return api.archived_deadlines(aid)
+
+    @app.patch("/api/accounts/{aid}/deadlines/{iid}/archive")
+    def archive_deadline(aid: int, iid: int, data: dict):
+        if set(data) != {"archived"}:
+            raise InvalidInput("give archived: true or false")
+        return api.archive_deadline(aid, iid, data["archived"])
+
+    @app.get("/api/accounts/{aid}/deadline-views")
+    def deadline_views(aid: int):
+        return api.deadline_views(aid)
+
+    @app.post("/api/accounts/{aid}/deadline-views")
+    def save_deadline_tab(aid: int, data: dict):
+        return api.save_deadline_tab(aid, data)
+
+    @app.put("/api/accounts/{aid}/deadline-views/active")
+    def select_deadline_tab(aid: int, data: dict):
+        return api.select_deadline_tab(aid, data.get("id"))
+
+    @app.delete("/api/accounts/{aid}/deadline-views/{tab_id}")
+    def delete_deadline_tab(aid: int, tab_id: str):
+        return api.delete_deadline_tab(aid, tab_id)
 
     @app.get("/api/accounts/{aid}/changes")
     def changes(aid: int, cursor: str | None = None, since: str | None = None, include_baseline: bool = False,

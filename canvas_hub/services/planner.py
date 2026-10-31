@@ -21,6 +21,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from .. import dates
 from ..db import Database
 from ..util import InvalidInput, NotFound, now_iso, parse_iso
+from .deadlines import archived_sql
 
 _HHMM = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
 WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
@@ -158,8 +159,9 @@ class PlannerService:
                 upcoming.append((when, entry, planned))
 
         for t in self.db.query(
-                """SELECT a.id, a.title, a.body, a.task_state, a.local_due, a.item_id FROM annotations a
-                   WHERE a.account_id=? AND a.kind='task' AND a.local_due IS NOT NULL""", (account_id,)):
+                f"""SELECT a.id, a.title, a.body, a.task_state, a.local_due, a.item_id FROM annotations a
+                   WHERE a.account_id=? AND a.kind='task' AND a.local_due IS NOT NULL
+                   AND NOT EXISTS (SELECT 1 FROM items i WHERE i.id=a.item_id AND {archived_sql()})""", (account_id,)):
             due = parse_iso(t["local_due"])
             if due and start <= due < end:
                 events.append({"kind": "task", "title": t["title"] or (t["body"] or "")[:60] or "To-do",
@@ -267,7 +269,8 @@ class PlannerService:
                 lines.append(f"URL:{d['source_url']}")
             lines.append("END:VEVENT")
         for t in self.db.query("SELECT id, title, body, local_due, task_state FROM annotations WHERE account_id=? AND kind='task' "
-                               "AND local_due IS NOT NULL AND task_state!='done'", (account_id,)):
+                               f"AND local_due IS NOT NULL AND task_state!='done' AND NOT EXISTS "
+                               f"(SELECT 1 FROM items i WHERE i.id=annotations.item_id AND {archived_sql()})", (account_id,)):
             due = parse_iso(t["local_due"])
             if not due or due.date() < today:
                 continue

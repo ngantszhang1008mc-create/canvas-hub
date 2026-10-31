@@ -13,6 +13,7 @@ from ..db import Database
 from ..htmltools import to_text
 from ..model import ITEM_TYPES, spec_for
 from ..util import InvalidInput, clamp_limit, decode_cursor, encode_cursor
+from .deadlines import archived_sql
 
 
 def _flatten_json_text(value) -> str:
@@ -94,7 +95,8 @@ class SearchService:
 
     def search(self, account_id: int, q: str, *, course_id: str | None = None, types: list[str] | None = None,
                observed_after: str | None = None, observed_before: str | None = None,
-               include_documents: bool = True, limit: int | None = None, cursor: str | None = None) -> dict:
+               include_documents: bool = True, limit: int | None = None, cursor: str | None = None,
+               include_archived: bool = False) -> dict:
         lim = clamp_limit(limit, 20, 100)
         offset = 0
         cur = decode_cursor(cursor)
@@ -108,6 +110,8 @@ class SearchService:
                 raise InvalidInput(f"unknown item types {bad}")
         where = ["search_fts MATCH ?", "d.account_id = ?"]
         params: list = [_fts_query(q), account_id]
+        if not include_archived:
+            where.append("NOT " + archived_sql())
         if course_id:
             where.append("i.course_canvas_id = ?")
             params.append(str(course_id))
