@@ -22,17 +22,32 @@ def test_switch_during_a_response_keeps_chat_and_scrolling_working(hub, account,
         page.get_by_role("button", name=theme.title(), exact=True).click()
         expect(page.locator("html")).to_have_attribute("data-theme", theme)
         expect(page.locator(".msg.assistant").last).to_have_text(ANSWER, timeout=15000)
+        expect(page.get_by_role("button", name="Stop", exact=True)).to_be_hidden()
         composer = page.locator(".composer").bounding_box()
         assert height - 120 < composer["y"] + composer["height"] < height
         page.evaluate("window.scrollTo(0,10000)")
         expect(page.get_by_role("button", name="⤢ Focus", exact=True)).to_be_in_viewport()
         page.evaluate("window.scrollTo(0,0)")
         page.wait_for_timeout(150)
-        chat = page.locator(".chat").bounding_box()
-        page.mouse.move(chat["x"] + 100, chat["y"] + 60)
-        page.mouse.wheel(0, 300)
-        page.wait_for_timeout(300)
-        assert page.evaluate("window.scrollY") > 0
+        # Font metrics change the size of the message viewport. Target that
+        # viewport, not a fixed offset that can land on the composer, and let
+        # its remaining inner scroll finish before expecting page scroll.
+        messages = page.locator(".chat-scroll")
+        area = messages.bounding_box()
+        assert area and area["height"] > 0
+        messages.evaluate("el => el.scrollTop = el.scrollHeight")
+        page.mouse.move(area["x"] + area["width"] / 2, area["y"] + area["height"] / 2)
+        for _ in range(5):
+            page.mouse.wheel(0, 300)
+            page.wait_for_timeout(200)
+            if page.evaluate("window.scrollY") > 0:
+                break
+        assert page.evaluate("window.scrollY") > 0, page.evaluate("""() => ({
+            pageScroll: scrollY, documentHeight: document.documentElement.scrollHeight,
+            messageHeight: document.querySelector('.chat-scroll').clientHeight,
+            messageScroll: document.querySelector('.chat-scroll').scrollTop,
+            messageScrollHeight: document.querySelector('.chat-scroll').scrollHeight
+        })""")
         assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
         browser.close()
 
