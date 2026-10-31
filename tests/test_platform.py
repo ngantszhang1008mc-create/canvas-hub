@@ -2,13 +2,16 @@
 
 import json
 import os
+import socket
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
 
 from canvas_hub.commands import command_for_process
+from canvas_hub.cli import _open_browser_when_ready
 from canvas_hub.paths import default_home
 from canvas_hub.web.app import _mcp_candidates
 
@@ -46,6 +49,23 @@ def test_mcp_console_script_candidates_are_platform_specific(tmp_path):
         "canvas-hub.exe", "canvas-hub.cmd", "canvas-hub.bat"
     ]
     assert [p.name for p in _mcp_candidates(tmp_path, "posix")] == ["canvas-hub"]
+
+
+def test_browser_opens_only_after_the_local_server_starts(monkeypatch):
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    port = server.getsockname()[1]
+    opened = []
+    monkeypatch.setattr("canvas_hub.cli.webbrowser.open", lambda url: opened.append(url))
+    try:
+        thread = _open_browser_when_ready("http://127.0.0.1/test", "127.0.0.1", port, timeout=3)
+        time.sleep(0.3)
+        assert opened == []
+        server.listen()
+        thread.join(3)
+        assert opened == ["http://127.0.0.1/test"]
+    finally:
+        server.close()
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows batch-file launch")
