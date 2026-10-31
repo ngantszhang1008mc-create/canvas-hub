@@ -227,11 +227,13 @@ def test_browser_archives_restores_and_remembers_edited_tabs(deadlines):
         page.get_by_label("Deadline tab name").fill("My saved view")
         page.get_by_role("button", name="Save as new tab").click()
         expect(page.get_by_role("tab", name="My saved view", exact=True)).to_have_attribute("aria-selected", "true")
-        page.get_by_label("Deadline status", exact=True).select_option("unfinished")
+        with page.expect_response(lambda r: r.url.endswith("/deadline-views") and r.request.method == "POST"):
+            page.get_by_label("Deadline status", exact=True).select_option("unfinished")
         page.reload()
         expect(page.get_by_label("Deadline status", exact=True)).to_have_value("unfinished")
         expect(page.get_by_role("tab", name="My saved view", exact=True)).to_have_attribute("aria-selected", "true")
-        page.get_by_label("Show archived", exact=True).uncheck()
+        with page.expect_response(lambda r: r.url.endswith("/deadline-views") and r.request.method == "POST"):
+            page.get_by_label("Show archived", exact=True).uncheck()
         card.get_by_role("button", name="Archive", exact=True).click()
         expect(card).to_have_count(0)
         page.get_by_role("link", name="Archive list", exact=True).click()
