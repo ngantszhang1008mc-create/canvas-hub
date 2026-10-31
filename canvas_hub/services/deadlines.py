@@ -58,6 +58,54 @@ class DeadlineService:
                           (account_id, row["deadline_key"]))
         return {"item_id": item_id, "archived": archived, "deadline_key": row["deadline_key"]}
 
+    def set_local_completion(self, account_id, item_id, completed):
+        """Set the shared local completion marker for an entire deadline group."""
+        if not isinstance(completed, bool):
+            raise InvalidInput("completed must be true or false")
+        now = now_iso()
+        with self.db.tx() as c:
+            row = c.execute(
+                f"SELECT i.id, i.item_type, ({deadline_key_sql()}) AS deadline_key "
+                "FROM items i WHERE i.account_id=? AND i.id=?", (account_id, item_id),
+            ).fetchone()
+            if not row:
+                raise NotFound("deadline not found", code="item_not_found")
+            if row["item_type"] not in ("assignment", "quiz", "calendar_event"):
+                raise InvalidInput("only deadline items have a local completion state")
+            related = c.execute(
+                f"""SELECT i.id, i.title, i.item_type, i.source_key, i.course_canvas_id,
+                           ({deadline_key_sql()}) AS deadline_key
+                    FROM items i WHERE i.account_id=?
+                    AND i.item_type IN ('assignment','quiz','calendar_event')
+                    ORDER BY CASE i.item_type WHEN 'assignment' THEN 0 WHEN 'quiz' THEN 1 ELSE 2 END, i.id""",
+                (account_id,),
+            ).fetchall()
+            group = [dict(i) for i in related if i["deadline_key"] == row["deadline_key"]]
+            ids = [i["id"] for i in group]
+            marks = c.execute(
+                f"""SELECT id FROM annotations WHERE account_id=? AND kind='task'
+                    AND local_due IS NULL AND item_id IN ({','.join('?'*len(ids))}) ORDER BY id""",
+                (account_id, *ids),
+            ).fetchall()
+            marked_ids = [m["id"] for m in marks]
+            if marked_ids:
+                c.execute(
+                    f"UPDATE annotations SET task_state=?, updated_at=? WHERE account_id=? AND id IN "
+                    f"({','.join('?'*len(marked_ids))})",
+                    (("done" if completed else "open"), now, account_id, *marked_ids),
+                )
+            elif completed:
+                canonical = group[0]
+                marked_ids = [c.execute(
+                    """INSERT INTO annotations(account_id, item_id, item_type, item_source_key, course_canvas_id,
+                       kind, title, body, task_state, local_due, created_at, updated_at)
+                       VALUES (?,?,?,?,?,'task',?,'',? ,NULL,?,?)""",
+                    (account_id, canonical["id"], canonical["item_type"], canonical["source_key"],
+                     canonical["course_canvas_id"], canonical["title"] or "Done locally", "done", now, now),
+                ).lastrowid]
+        return {"item_id": item_id, "completed": completed, "deadline_key": row["deadline_key"],
+                "task_ids": marked_ids}
+
     def archive_list(self, account_id):
         rows = self.db.query(f"""SELECT i.id AS item_id, i.item_type, i.title, i.course_canvas_id AS course_id,
             i.source_url, ({deadline_key_sql()}) AS deadline_key,
