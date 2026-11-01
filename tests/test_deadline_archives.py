@@ -88,7 +88,7 @@ def test_archive_covers_future_quiz_calendar_mirrors_and_account_isolation(deadl
     mirror_id = hub.db.one("SELECT id FROM items WHERE item_type='quiz'")["id"]
     api.archive_deadline(aid, mirror_id, False)
     assert len(api.deadlines(aid, **window)["deadlines"]) == 1
-    hub.annotations.create(aid, kind="task", item_id=iid, title="Done locally", task_state="done")
+    hub.annotations.create(aid, kind="task", item_id=iid, title="Done locally", task_role="completion", task_state="done")
     assert api.deadlines(aid, **window, status="unfinished")["deadlines"] == []
     assert [d["item_id"] for d in api.deadlines(aid, **window, status="completed")["deadlines"]] == [iid]
     assert api.deadlines(aid, **window, status="completed")["unresolved_dates"] == []
@@ -108,7 +108,7 @@ def test_status_filters_share_completion_across_assignment_mirrors(deadlines):
     api.hub.importer.import_package(newer)
 
     assignment_task = api.hub.annotations.create(
-        aid, kind="task", item_id=iid, title="Done locally", task_state="done"
+        aid, kind="task", item_id=iid, title="Done locally", task_role="completion", task_state="done"
     )
     window = {"start": (due-timedelta(days=1)).isoformat(), "end": (due+timedelta(days=1)).isoformat()}
     for item_type in ("quiz", "calendar_event"):
@@ -124,7 +124,7 @@ def test_status_filters_share_completion_across_assignment_mirrors(deadlines):
         "SELECT id FROM items WHERE account_id=? AND item_type='quiz' AND canvas_id='8101'", (aid,)
     )["id"]
     quiz_task = api.hub.annotations.create(
-        aid, kind="task", item_id=quiz_id, title="Done on quiz mirror", task_state="done"
+        aid, kind="task", item_id=quiz_id, title="Done on quiz mirror", task_role="completion", task_state="done"
     )
     completed = api.deadlines(aid, **window, status="completed")["deadlines"]
     assert [d["item_id"] for d in completed] == [iid]
@@ -291,7 +291,7 @@ def test_browser_local_completion_controls_the_shared_mirror_group(deadlines):
         aid, kind="task", item_id=iid, title="Open assignment marker", task_state="open"
     )
     quiz_task = api.hub.annotations.create(
-        aid, kind="task", item_id=quiz_id, title="Done quiz marker", task_state="done"
+        aid, kind="task", item_id=quiz_id, title="Done quiz marker", task_role="completion", task_state="done"
     )
 
     with serve(api.hub, []) as (base, tok, _), sync_playwright() as p:

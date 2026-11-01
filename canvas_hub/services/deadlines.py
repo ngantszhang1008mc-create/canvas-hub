@@ -84,7 +84,7 @@ class DeadlineService:
             ids = [i["id"] for i in group]
             marks = c.execute(
                 f"""SELECT id FROM annotations WHERE account_id=? AND kind='task'
-                    AND local_due IS NULL AND item_id IN ({','.join('?'*len(ids))}) ORDER BY id""",
+                    AND task_role='completion' AND item_id IN ({','.join('?'*len(ids))}) ORDER BY id""",
                 (account_id, *ids),
             ).fetchall()
             marked_ids = [m["id"] for m in marks]
@@ -98,8 +98,8 @@ class DeadlineService:
                 canonical = group[0]
                 marked_ids = [c.execute(
                     """INSERT INTO annotations(account_id, item_id, item_type, item_source_key, course_canvas_id,
-                       kind, title, body, task_state, local_due, created_at, updated_at)
-                       VALUES (?,?,?,?,?,'task',?,'',? ,NULL,?,?)""",
+                       kind, title, body, task_state, local_due, created_at, updated_at, task_role)
+                       VALUES (?,?,?,?,?,'task',?,'',? ,NULL,?,?,'completion')""",
                     (account_id, canonical["id"], canonical["item_type"], canonical["source_key"],
                      canonical["course_canvas_id"], canonical["title"] or "Done locally", "done", now, now),
                 ).lastrowid]

@@ -162,9 +162,10 @@ footer{margin-top:24px;font-size:12px;color:#8b8170}</style></head><body><h1>${h
   const afterRender = () => requestAnimationFrame(tickCountdowns);
 
   // ---------- detail drawer ----------
-  let drawer = null;
+  let drawer = null, drawerRequest = 0;
   async function openDrawer(itemId) {
     if (!itemId) return;
+    const request = ++drawerRequest;
     if (!drawer) {
       drawer = h("aside", { class: "drawer", role: "dialog", "aria-modal": "false", "aria-label": "Item details", tabindex: "-1" });
       document.body.append(drawer);
@@ -172,8 +173,16 @@ footer{margin-top:24px;font-size:12px;color:#8b8170}</style></head><body><h1>${h
     }
     mount(drawer, h("div", { class: "muted small", style: "padding:20px" }, "Loading…"));
     drawer.classList.add("open");
-    let it;
-    try { it = await api(A(`/items/${itemId}`)); } catch (e) { mount(drawer, h("div", { style: "padding:20px" }, String(e.message || e))); return; }
+    let it, linked;
+    try {
+      it = await api(A(`/items/${itemId}`));
+      if (request !== drawerRequest) return;
+      linked = await env.linkedStudy({ item_id: it.id });
+    } catch (e) {
+      if (request === drawerRequest) mount(drawer, h("div", { style: "padding:20px" }, String(e.message || e)));
+      return;
+    }
+    if (request !== drawerRequest) return;
     const fields = it.fields.filter((f) => f.field !== "title");
     const body = fields.filter((f) => f.kind === "html" && f.value);
     const other = fields.filter((f) => !(f.kind === "html" && f.value));
@@ -188,12 +197,14 @@ footer{margin-top:24px;font-size:12px;color:#8b8170}</style></head><body><h1>${h
         h("button", { class: "sm ghost", onclick: (e) => copyText(md, e.target) }, "Copy fields"),
         h("span", { class: "muted" }, `first seen ${fmtDate(it.first_observed_at)} · last read ${ago(it.last_observed_at)}`)),
       h("div", { class: "drawer-body" },
+        ["assignment", "quiz", "calendar_event"].includes(it.item_type) ? env.studyAction({ item_id: it.id }) : null,
+        linked,
         body.map((f) => h("div", { class: "drawer-sec" }, h("div", { class: "drawer-k" }, f.field, h("span", { class: "tiny muted" }, ` · read ${ago(f.last_observed_at)}`)), fieldValue(f.field, f, it))),
         other.length ? h("dl", { class: "drawer-fields" }, other.map((f) => [h("dt", null, f.field), h("dd", null, fieldValue(f.field, f, it),
           h("div", { class: "tiny muted" }, `read ${ago(f.last_observed_at)}`))])) : null));
     drawer.focus();
   }
-  function closeDrawer() { if (drawer) drawer.classList.remove("open"); }
+  function closeDrawer() { drawerRequest += 1; if (drawer) drawer.classList.remove("open"); }
   const itemLink = (id, label) => id ? h("a", { href: `#/item/${id}`, class: "cmp-link", onclick: (e) => { if (e.metaKey || e.ctrlKey) return; e.preventDefault(); openDrawer(id); } }, label) : label;
 
   // ---------- deadlines / items / timetable / choices (export added) ----------
@@ -625,7 +636,7 @@ footer{margin-top:24px;font-size:12px;color:#8b8170}</style></head><body><h1>${h
     // The chat holds the definition from when it was created, and a cached copy may be shown again after
     // edits elsewhere (Trackers, the assistant): load the latest, unless local changes are still unsaved.
     const reload = () => api(A(`/components/${v.id}`)).then((fresh) => {
-      if (edits === acked && !pending && fresh.version !== v.version) { v = fresh; seen = fresh.state; redraw(); }
+      if (edits === acked && !pending && fresh.version > v.version) { v = fresh; seen = fresh.state; redraw(); }
     }).catch(() => {});
     el.refresh = reload;
     redraw();

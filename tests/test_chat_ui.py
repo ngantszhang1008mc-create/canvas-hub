@@ -191,7 +191,7 @@ def test_switching_chats_keeps_the_page_where_it_is(hub, account, monkeypatch):
             assert not pg.locator(".composer textarea").evaluate("el => !!el.closest('[inert]')")
         # Another page, then back: an ordinary visit starts at the top again.
         pg.goto(f"{base}/#/deadlines")
-        expect(pg.locator(".main > .page-head")).to_be_visible()
+        expect(pg.locator(".main .page-head")).to_be_visible()
         pg.goto(f"{base}/#/assistant")
         expect(pg.locator(".composer")).to_be_visible()
         pg.wait_for_timeout(200)
@@ -261,7 +261,7 @@ def test_wide_screens_use_the_width(hub, account):
         assert box["width"] <= 930                                              # the composer stays readable
         assert abs((box["x"] - chat["x"]) - (chat["x"] + chat["width"] - box["x"] - box["width"])) < 4   # centred
         pg.goto(f"{base}/#/overview")
-        expect(pg.locator(".main > .page-head")).to_be_visible()
+        expect(pg.locator(".main .page-head")).to_be_visible()
         main = pg.locator("#main").bounding_box()
         left, right = main["x"] - col["x"], col["x"] + col["width"] - main["x"] - main["width"]
         assert main["width"] > 1300 and abs(left - right) < 4

@@ -1,3 +1,5 @@
+import { makeWorkspace } from "./workspace.js";
+import { makeContextAgent } from "./context-agent.js";
 import { makeComponents } from "./components.js";
 import { icon, decorateNavigation } from "./icons.js";
 import { currentTheme, themeSwitcher } from "./appearance.js";
@@ -197,6 +199,7 @@ function fieldValue(name, f, item) {
 
 // ---------- shell ----------
 function setActiveNav(view) {
+  document.querySelectorAll(`.nav [data-view="${view}"]`).forEach(el=>{for(let p=el.parentElement;p;p=p.parentElement)if(p.tagName==="DETAILS")p.open=true;});
   document.querySelectorAll("#nav a").forEach((a) => a.classList.toggle("active", a.dataset.view === view));
 }
 
@@ -307,9 +310,24 @@ function renderFoot() {
 }
 
 function selectAccount(id) {
+  const changed = S.accountId !== id;
   S.accountId = id;
   store.set("account", String(id));
   for (const i of S.identities) for (const a of i.accounts) if (a.id === id) S.account = a;
+  if(changed){ C.closeDrawer(); renderWorkspaceNavigation(); }
+}
+
+async function renderWorkspaceNavigation() {
+  const aid = S.accountId;
+  if(!aid)return;
+  const [courses,work] = await Promise.all([api(`/api/accounts/${aid}/courses`),api(`/api/accounts/${aid}/workspace`)]).catch(()=>[null,null]);
+  if(S.accountId!==aid || !courses)return;
+  document.querySelector("#workspace-course-links")?.remove();
+  const group=h("details",{id:"workspace-course-links",class:"nav-group"},h("summary",null,"Your courses"),
+    courses.courses.map(c=>h("a",{href:`#/course/${c.course_id}`,class:"tiny"},c.course_code || c.title)));
+  document.querySelector('.nav a[data-view="courses"]')?.parentElement.append(group);
+  document.querySelector("#workspace-active-link")?.remove();
+  if(work?.active)document.querySelector('.nav a[data-view="overview"]')?.after(h("a",{id:"workspace-active-link",href:`#/item/${work.active.item_id}`,class:"tiny"},"Continue · "+work.active.item.title));
 }
 
 async function loadIdentities() {
@@ -672,6 +690,23 @@ VIEWS.courses = async (main) => {
     sec("Current", by.current), sec("Future", by.future), sec("Past", by.past), sec("Other", by.unknown));
 };
 
+// A local draft only: provider calls still require Send in the existing assistant.
+function studyAction(links) {
+  const path = links.item_id ? `#/item/${links.item_id}` : `#/course/${links.course_id}`;
+  return W.launcher([
+    {id:"breakdown",label:links.item_id ? "Break down assignment" : "Interpret grading",icon:"sparkles",
+      description:"Use stored sources with this workspace's Agent.",run:()=>{C.closeDrawer();location.hash=path+"?agent="+(links.item_id?"breakdown":"grading");}},
+    {id:"ask",label:"Ask Agent",icon:"message",description:"Open the conversation for this work.",run:()=>{C.closeDrawer();location.hash=path+"?agent=1";}}
+  ]);
+}
+async function linkedStudy(links) {
+  const data = await api(A("/components") + qs(links));
+  return h("section", { class: "linked-study stack", "aria-label": "Linked study tools" },
+    h("h2", null, "Your study tools"),
+    data.components.length ? data.components.map((v) => h("div",null,W.sourceStatus(v),C.componentView({ component: v.kind, view: v }))) :
+      h("p", { class: "muted small" }, "No linked study tools yet. Create one with the assistant; your progress will stay here."));
+}
+
 VIEWS.course = async (main, parts, params) => {
   const cid = parts[0];
   const tab = params.get("tab") || "overview";
@@ -695,12 +730,12 @@ VIEWS.course = async (main, parts, params) => {
         syl ? h("p", null, h("a", { href: `#/item/${syl.id}` }, "Read the syllabus")) : null,
         pagesHome.items.length ? h("p", { class: "small" }, `${pagesHome.items.length} page(s) collected`) : null),
       h("div", { class: "card" }, h("h2", null, "Coverage for this course"), coverageTable(cov.records)),
-      await gradingCard(cid));
+      h("details", {class:"card grade-planning", style:"grid-column:1/-1"}, h("summary",null,"Grade planning"), await gradingCard(cid)));
   } else {
     const list = await api(A("/items") + qs({ course_id: cid, type: tab, limit: 200 }));
     body = h("div", { class: "card" }, itemTable(list.items));
   }
-  mount(main, head, tabs, body);
+  await W.courseView(main, c, [head, tabs, body]);
 };
 
 // Local grading rules: what Canvas leaves out (real group weights, pass mark). Never sent to Canvas.
@@ -752,6 +787,10 @@ async function gradingCard(cid) {
       } }, "Save rules"), rules.updated_at ? h("span", { class: "tiny muted" }, `saved ${ago(rules.updated_at)}`) : null));
   };
   try { draw(await api(A(`/courses/${cid}/grading`))); } catch (e) { mount(card, h("p", { class: "muted small" }, "Grading rules unavailable: " + e.message)); }
+  const proposal = await api(A(`/courses/${cid}/grading-proposal`));
+  if (proposal.after) card.prepend(h("details", {class:"grading-proposal",open:true},h("summary",null,"Agent proposed grading rules — review before applying"),
+    C.diffPair(JSON.stringify(proposal.before,null,2),JSON.stringify(proposal.after,null,2)),
+    h("button",{class:"primary",onclick:async()=>{if(await guard(()=>api(A(`/courses/${cid}/grading-proposal/approve`),{method:"POST",body:{base_hash:proposal.base_hash}})))route();}},"Approve grading rules")));
   return card;
 }
 
@@ -824,9 +863,12 @@ VIEWS.item = async (main, parts) => {
       l.collected ? null : pill("muted", "not read")))) : null,
     it.links_in.length ? h("div", { style: "margin-top:8px" }, h("div", { class: "small muted" }, "Referenced from"), h("ul", { class: "list" }, it.links_in.map((l) => h("li", null,
       h("a", { href: `#/item/${l.item_id}` }, l.title || TYPE_LABEL[l.item_type]), " ", h("span", { class: "muted small" }, relLabel(l.relation)))))) : null));
+
   cards.push(notesCard(it));
   cards.push(historyCard(hist));
-  mount(main, head, meta, banners, h("div", { class: "stack" }, cards));
+  const content = [head, meta, banners, h("div", { class: "stack" }, cards)];
+  if (["assignment", "quiz", "calendar_event"].includes(it.item_type)) await W.assignmentView(main, it, content);
+  else mount(main, content);
 };
 
 const relLabel = (r) => ({ body_link: "links to", module_item_content: "opens", module_contains: "contains", attachment: "attachment",
@@ -1443,6 +1485,7 @@ VIEWS.assistant = async (main, parts, params) => {
       reasoning: reasoningSel.hidden ? "" : reasoningSel.value, model: modelSel.hidden ? "" : modelSel.value } }));
     if (!r) { sendBtn.disabled = false; return; }
     input.value = "";
+    scroller.querySelector(".study-context")?.remove();
     const emptyEl = document.getElementById("chat-empty");
     if (emptyEl) emptyEl.remove();
     if (current !== r.conversation_id) { current = r.conversation_id; history.replaceState(null, "", `#/assistant/${current}`); reloadConvs(); }
@@ -1847,9 +1890,28 @@ VIEWS.requests = async (main) => {
 
 // ---------- assistant components (components.js) ----------
 const C = makeComponents({ h, mount, api, A, toast, guard, fmtDate, until, ago, pill, submissionPill, TYPE_LABEL, renderTimetable,
-  fieldValue, store, route: () => route() });
+  fieldValue, store, studyAction, linkedStudy, route: () => route() });
 const componentView = (d, ctx, key) => C.componentView(d, ctx, key);
 VIEWS.trackers = (main) => C.trackersView(main, pageHead, empty);
+
+const contextualAgent = makeContextAgent({h,mount,api,accountId:()=>S.accountId,renderMessages,guard,toast,onUpdated:()=>{window.dispatchEvent(new Event("workspace-updated"));renderWorkspaceNavigation();}});
+const W = makeWorkspace({ h,mount,api,A,fmtDate,ago,componentView,
+  setActive:async data=>{const r=await api(A("/workspace"),{method:"PUT",body:data});renderWorkspaceNavigation();return r;},
+  openAgent:(scope,panel)=>contextualAgent.open(scope,panel),
+  startAction:(scope,action,panel)=>contextualAgent.start(scope,action,panel),
+  approveSpec:async c=>{
+    const diff = C.diffPair(JSON.stringify(c.spec,null,2),JSON.stringify(c.pending_spec.spec,null,2));
+    const dialog=h("dialog",{class:"proposal-dialog"},h("h2",null,"Review study-tool changes"),diff,
+      h("div",{class:"row"},h("button",{class:"primary",onclick:async()=>{const result=await guard(()=>api(A(`/components/${c.id}/approve`),{method:"POST",body:{expected_version:c.version}}));if(result){dialog.close();dialog.remove();route();}}},"Approve changes"),
+        h("button",{onclick:()=>{dialog.close();dialog.remove();}},"Cancel")));
+    document.body.append(dialog);dialog.showModal();
+  },
+  followSource:async(c,target)=>{if(await guard(()=>api(A(`/components/${c.id}/source-override`),{method:"POST",body:{target,follow_source:true}})))route();},
+  reparse:c=>{if(c.item_id)location.hash=`#/item/${c.item_id}?agent=breakdown`;else if(c.course_id)location.hash=`#/course/${c.course_id}?agent=grading`;}
+});
+VIEWS.overview = main=>W.overallView(main);
+VIEWS.overall = VIEWS.overview;
+W.installNavigation();
 
 // ---------- boot ----------
 async function boot() {

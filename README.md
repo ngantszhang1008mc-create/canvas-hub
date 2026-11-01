@@ -112,6 +112,12 @@ to rename, copy or delete a tab. These views are saved per Canvas account and sh
 The in-app assistant can manage these tabs, filters and archives too. **Assistant → Settings → The assistant may →
 Manage deadline tabs, filters and archives** is on by default; switch it off to disable assistant changes.
 
+## Academic workspace
+
+Overall brings together upcoming work across courses and a saved Continue action. Assignment and course workspaces keep checklists beside requirements and source material, with an optional contextual Agent pane and a compact `>` action launcher. Checklist progress, local whole-assignment completion and Canvas submission state stay separate. Grade planning and optional hours tools remain secondary.
+
+Declared Canvas field bindings refresh trackers deterministically after collection, retaining user state and explicit overrides. Interpreted text or attachment changes flag rules for review; Agent reparsing is explicit. Definition/grading replacements are proposed for approval. Contextual actions disclose the provider/model and source scope before first use, and each assignment has its own persistent conversation. See [the implementation note](docs/WORKSPACE_REDESIGN.md) for the source schema, migration behavior and optional follow-up work.
+
 ## Assistant and other agents
 
 - **Assistant page:** chat with your Canvas data using your own API key. It has a **Chat** tab, where only the conversation scrolls, and a **Settings** tab, where you can save several setups (for example DeepSeek and Claude). Next to the message box you pick the setup and the reasoning effort for each message; the reasoning level is not part of a saved setup.

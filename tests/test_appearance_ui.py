@@ -1,4 +1,5 @@
 """Appearance selection, isolation of the original style, and real navigation."""
+import re
 import pytest
 
 from .test_components_ui import serve
@@ -105,7 +106,7 @@ def test_switch_preserves_draft_and_layout_and_remembers_selection(hub, account,
 def test_light_style_covers_every_app_section(hub, account, fixture_pkg):
     from playwright.sync_api import expect, sync_playwright
     hub.importer.import_package(fixture_pkg)
-    routes = [("overview", "Overview"), ("deadlines", "Deadlines"), ("planner", "Planner"),
+    routes = [("overview", "Overall"), ("deadlines", "Deadlines"), ("planner", "Planner"),
               ("trackers", "Trackers"), ("courses", "Courses"), ("search", "Search"),
               ("changes", "Changes"), ("coverage", "Coverage"), ("notes", "Notes & tasks"),
               ("collect", "Collection"), ("requests", "Agent requests"), ("settings", "Data & settings"),
@@ -146,13 +147,13 @@ def test_theme_syncs_between_tabs(hub, account):
         expect(first.locator("html")).to_have_attribute("data-theme", "dark")
         second.get_by_role("button", name="⤢ Focus", exact=True).click()
         second.goto(f"{base}/#/overview")
-        expect(second.locator(".page-head h1")).to_have_text("Overview")
+        expect(second.locator(".page-head h1")).to_have_text("Overall")
         assert second.evaluate("localStorage.getItem('ch.chatFocus')") == "1"
         first.get_by_role("button", name="Light", exact=True).click()
         expect(second.locator("html")).to_have_attribute("data-theme", "light")
         assert second.evaluate("localStorage.getItem('ch.chatFocus')") == "1"
         second.goto(f"{base}/#/assistant")
-        expect(second.locator("body")).to_have_class("chat-focus")
+        expect(second.locator("body")).to_have_class(re.compile(r"\bchat-focus\b"))
         browser.close()
 
 

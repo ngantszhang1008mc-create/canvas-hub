@@ -10,6 +10,7 @@
   <link rel="stylesheet" href="/static/styles.css">
   <link rel="stylesheet" href="/static/appearance.css">
   <link rel="stylesheet" href="/static/light-theme.css">
+  <link rel="stylesheet" href="/static/workspace.css">
   <script type="module" src="/static/app.js"></script>
 </head>
 <body>
@@ -21,21 +22,27 @@
       </div>
       <div class="account-switch" id="account-switch"></div>
       <nav class="nav" id="nav" aria-label="Sections">
-        <div class="nav-label">Read</div>
-        <a href="#/overview" data-view="overview">Overview</a>
-        <a href="#/assistant" data-view="assistant">Assistant</a>
-        <a href="#/deadlines" data-view="deadlines">Deadlines</a>
-        <a href="#/planner" data-view="planner">Planner</a>
-        <a href="#/trackers" data-view="trackers">Trackers</a>
-        <a href="#/courses" data-view="courses">Courses</a>
-        <a href="#/search" data-view="search">Search</a>
-        <a href="#/changes" data-view="changes">Changes</a>
-        <a href="#/coverage" data-view="coverage">Coverage</a>
+        <div class="nav-label">Workspace</div>
+        <a href="#/overview" data-view="overview">Overall</a>
+        <details class="nav-group" open><summary>Deadlines &amp; Planner</summary>
+          <a href="#/deadlines" data-view="deadlines">Deadlines</a>
+          <a href="#/planner" data-view="planner">Planner</a>
+        </details>
+        <details class="nav-group" open><summary>Courses &amp; Trackers</summary>
+          <a href="#/courses" data-view="courses">Courses</a>
+          <a href="#/trackers" data-view="trackers">Grade planning &amp; tools</a>
+        </details>
         <a href="#/notes" data-view="notes">Notes &amp; tasks</a>
-        <div class="nav-label">Manage</div>
-        <a href="#/collect" data-view="collect">Collection</a>
-        <a href="#/requests" data-view="requests">Agent requests</a>
-        <a href="#/settings" data-view="settings">Data &amp; settings</a>
+        <a href="#/assistant" data-view="assistant">Assistant</a>
+        <div class="nav-label">Find &amp; manage</div>
+        <a href="#/search" data-view="search">Search</a>
+        <details class="nav-group"><summary>System &amp; data</summary>
+          <a href="#/changes" data-view="changes">Changes</a>
+          <a href="#/coverage" data-view="coverage">Coverage</a>
+          <a href="#/collect" data-view="collect">Collection</a>
+          <a href="#/requests" data-view="requests">Agent requests</a>
+          <a href="#/settings" data-view="settings">Data &amp; settings</a>
+        </details>
       </nav>
       <div class="sidebar-foot" id="sidebar-foot"></div>
     </aside>

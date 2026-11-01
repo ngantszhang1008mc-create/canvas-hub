@@ -565,9 +565,55 @@ def create_app(api: HubAPI, *, token: str, port: int) -> FastAPI:
     def agents_seen():
         return api.connected_agents()
 
+    @app.get("/api/accounts/{aid}/workspace")
+    def workspace_get(aid: int):
+        return api.workspace(aid)
+
+    @app.put("/api/accounts/{aid}/workspace")
+    async def workspace_set(aid: int, request: Request):
+        return api.set_workspace(aid, await body(request))
+
+    @app.post("/api/accounts/{aid}/workspace/conversation")
+    async def workspace_conversation(aid: int, request: Request):
+        b = await body(request)
+        api.get_account(aid)
+        return api.hub.workspace.conversation(aid, item_id=b.get("item_id"), course_id=b.get("course_id"))
+
+    @app.post("/api/accounts/{aid}/workspace/action/prepare")
+    async def workspace_prepare(aid: int, request: Request):
+        return api.hub.workspace.prepare(api, _assistant(), aid, await body(request))
+
+    @app.post("/api/accounts/{aid}/workspace/action/start")
+    async def workspace_start(aid: int, request: Request):
+        return api.hub.workspace.start(api, _assistant(), aid, await body(request))
+
+    @app.get("/api/accounts/{aid}/courses/{cid}/grading-proposal")
+    def grading_proposal_get(aid: int, cid: str):
+        return api.grading_proposal(aid, cid)
+
+    @app.post("/api/accounts/{aid}/courses/{cid}/grading-proposal/approve")
+    async def grading_proposal_approve(aid: int, cid: str, request: Request):
+        return api.accept_grading_proposal(aid, cid, (await body(request)).get("base_hash"))
+
+    @app.put("/api/accounts/{aid}/components/{cid}/sources")
+    async def component_sources(aid: int, cid: int, request: Request):
+        return api.configure_component_sources(aid, cid, await body(request))
+
+    @app.post("/api/accounts/{aid}/components/{cid}/source-override")
+    async def component_override(aid: int, cid: int, request: Request):
+        return api.override_component_source(aid, cid, await body(request))
+
+    @app.post("/api/accounts/{aid}/components/{cid}/approve")
+    async def component_approve(aid: int, cid: int, request: Request):
+        return api.approve_component_spec(aid, cid, await body(request))
+
+    @app.get("/api/accounts/{aid}/study-context")
+    def study_context(aid: int, course_id: str | None = None, item_id: int | None = None):
+        return api.study_context(aid, course_id=course_id, item_id=item_id)
+
     @app.get("/api/accounts/{aid}/components")
-    def components_list(aid: int, pinned: str | None = None):
-        return api.list_components(aid, pinned)
+    def components_list(aid: int, pinned: str | None = None, course_id: str | None = None, item_id: int | None = None):
+        return api.list_components(aid, pinned, course_id, item_id)
 
     @app.get("/api/accounts/{aid}/components/{cid}")
     def component_get(aid: int, cid: int):

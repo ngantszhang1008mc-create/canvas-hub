@@ -143,6 +143,9 @@ class Importer:
         self.jobs.update_stats(job_id, **stats)
         if own_job:
             self.jobs.set_state(job_id, "completed", message="Observation package imported")
+        sync = getattr(self, "after_import", None)
+        if sync is not None:
+            sync(account_id)
         return {"status": "imported", "job_id": job_id, "account_id": account_id, "stats": stats}
 
     # ------------------------------------------------------------------
@@ -352,7 +355,7 @@ class Importer:
             had = c.execute("SELECT 1 FROM item_resources WHERE item_id=? AND resource_id=?", (iid, r.sha256)).fetchone()
             c.execute(
                 """INSERT INTO item_resources(item_id, resource_id, filename, revision, observed_at, job_id) VALUES (?,?,?,?,?,?)
-                   ON CONFLICT(item_id, resource_id) DO UPDATE SET observed_at=excluded.observed_at""",
+                   ON CONFLICT(item_id, resource_id) DO UPDATE SET observed_at=MAX(item_resources.observed_at,excluded.observed_at)""",
                 (iid, r.sha256, r.filename, new_rev, obs.observed_at, job_id),
             )
             if not had:

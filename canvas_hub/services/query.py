@@ -139,6 +139,20 @@ class QueryService:
                 c.execute("INSERT INTO course_links(account_id, course_canvas_id, other_canvas_id, relation, created_at) "
                           "VALUES (?,?,?,?,?)", (account_id, a, b, relation, now_iso()))
 
+    def completion_state(self, account_id, item_id):
+        row = self.db.one(f"SELECT i.*, ({deadline_key_sql()}) AS deadline_key FROM items i WHERE i.account_id=? AND i.id=?", (account_id, item_id))
+        if row is None:
+            raise NotFound("item not found")
+        fields = self._fields(item_id)
+        canvas_id = row["canvas_id"] if row["item_type"] == "assignment" else fields.get("assignment_id")
+        submission = self._submission(account_id, str(canvas_id)) if canvas_id else None
+        sub = submission or {}
+        local = self.db.one(f"""SELECT 1 FROM annotations a JOIN items i ON i.id=a.item_id
+            WHERE a.account_id=? AND a.kind='task' AND a.task_role='completion' AND a.task_state='done'
+            AND ({deadline_key_sql()})=?""", (account_id, row["deadline_key"])) is not None
+        canvas = bool(sub.get("submitted_at") or sub.get("excused") or sub.get("workflow_state") == "graded")
+        return {"submission": submission, "done_locally": local, "canvas_completed": canvas, "completed": local or canvas}
+
     # ---- items -----------------------------------------------------------
     def list_items(self, account_id: int, *, course_id: str | None = None, item_type: str | None = None,
                    presence: str | None = None, limit: int | None = None, cursor: str | None = None,
@@ -294,7 +308,7 @@ class QueryService:
         relation_by_id = {r["id"]: dict(r) for r in relation_rows}
         tasks_by_key = {}
         for task in self.db.query(
-            f"""SELECT a.id, a.title, a.task_state, a.local_due, a.item_id,
+            f"""SELECT a.id, a.title, a.task_state, a.task_role, a.local_due, a.item_id,
                        ({deadline_key_sql()}) AS deadline_key
                 FROM annotations a JOIN items i ON i.id=a.item_id
                 WHERE a.account_id=? AND a.kind='task'
@@ -310,7 +324,7 @@ class QueryService:
         def resolve_completion(item_id, item_type, canvas_id, fields):
             relation = relation_by_id.get(item_id, {})
             local_tasks = tasks_by_key.get(relation.get("deadline_key"), [])
-            done_locally = any(t["task_state"] == "done" and not t["local_due"] for t in local_tasks)
+            done_locally = any(t["task_state"] == "done" and t["task_role"] == "completion" for t in local_tasks)
             assignment_canvas_id = (fields.get("assignment_id")
                                     if item_type in ("quiz", "calendar_event") else canvas_id)
             submission = None
@@ -347,11 +361,14 @@ class QueryService:
                      "date": val, "date_local": _local(val, tz), "date_observed_at": r["due_observed_at"],
                      "archived": bool(r["archived"])}
             if inst is None:
-                if status != "all":
-                    fields = self._fields(r["id"])
-                    _, _, _, completed = resolve_completion(r["id"], r["item_type"], r["canvas_id"], fields)
-                    if completed != (status == "completed"):
-                        continue
+                fields = self._fields(r["id"])
+                local, tasks, submission, completed = resolve_completion(r["id"], r["item_type"], r["canvas_id"], fields)
+                entry.update(done_locally=local, local_tasks=tasks, submission=submission, completed=completed,
+                             canvas_completed=bool((submission or {}).get("submitted_at") or
+                                                   (submission or {}).get("excused") or
+                                                   (submission or {}).get("workflow_state") == "graded"))
+                if status != "all" and completed != (status == "completed"):
+                    continue
                 unresolved.append(entry)
                 continue
             iso = to_utc_iso(inst)
@@ -373,14 +390,15 @@ class QueryService:
             done_locally, local_tasks, submission, completed = resolve_completion(
                 r["id"], r["item_type"], r["canvas_id"], f
             )
-            if r["item_type"] in ("assignment", "quiz"):
-                entry["submission"] = submission
-            # Only an undated linked to-do ("Mark done locally") stands for the
-            # deadline itself; dated ones (study blocks, "start on Saturday")
-            # are steps towards it.
+            entry["submission"] = submission
+            # Only explicit whole-deadline markers count as local completion.
+            # Checklist ticks and ordinary tasks never imply Canvas submission.
             entry["local_tasks"] = local_tasks
             entry["done_locally"] = done_locally
             entry["completed"] = completed
+            entry["canvas_completed"] = bool((submission or {}).get("submitted_at") or
+                                             (submission or {}).get("excused") or
+                                             (submission or {}).get("workflow_state") == "graded")
             dated.append(entry)
         # A classic quiz is also an assignment; list it once (as the assignment,
         # which carries the submission state).
@@ -388,8 +406,8 @@ class QueryService:
         dated = [d for d in dated if not (d["item_type"] == "quiz" and d.get("_assignment_id") in listed_assignments)]
         # Calendar entries that merely mirror an assignment's due date are not listed twice.
         dated = [d for d in dated if not (d["item_type"] == "calendar_event" and d.get("assignment_ref") in listed_assignments)]
-        # Deduplicate before status filtering: an undated local task belongs to
-        # the assignment, not necessarily its quiz/calendar copies.
+        # Deduplicate before status filtering; completion markers are shared
+        # across the assignment and its quiz/calendar copies.
         dated = [d for d in dated if status == "all" or d["completed"] == (status == "completed")]
         for d in dated:
             d.pop("_assignment_id", None)

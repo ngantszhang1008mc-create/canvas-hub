@@ -120,7 +120,10 @@ class HubAPI:
             iid = int(item_id)
         except (TypeError, ValueError) as e:
             raise InvalidInput("item_id must be an integer") from e
-        return self.hub.query.get_item(a["id"], iid)
+        item = self.hub.query.get_item(a["id"], iid)
+        if item["item_type"] in ("assignment", "quiz", "calendar_event"):
+            item["deadline_status"] = self.hub.query.completion_state(a["id"], iid)
+        return item
 
     def item_history(self, account_id, item_id) -> dict:
         a = self._acct(account_id)
@@ -390,6 +393,35 @@ class HubAPI:
     def set_grading_rules(self, account_id, course_id, data: dict) -> dict:
         return self.hub.grading.set(self._acct(account_id)["id"], str(course_id), data)
 
+    def propose_grading_rules(self, account_id, course_id, rules):
+        from .services.grading import normalize_rules
+        from .util import sha256_bytes, canonical_json
+        aid = self._acct(account_id)["id"]
+        course_id, _ = self.hub.components.validate_links(aid, course_id)
+        before = self.hub.grading.get(aid, course_id)
+        proposal = {"before": before, "after": normalize_rules(rules),
+                    "base_hash": sha256_bytes(canonical_json(before).encode())}
+        self.hub.settings.set(aid, "grading_proposal:" + course_id, proposal)
+        return {"course_id": course_id, "pending_approval": True, "proposal": proposal,
+                "note": "Review and approve this grading-rule diff in the course workspace. Nothing replaced."}
+
+    def grading_proposal(self, account_id, course_id):
+        aid = self._acct(account_id)["id"]
+        self.hub.components.validate_links(aid, course_id)
+        return self.hub.settings.get(aid, "grading_proposal:" + str(course_id))
+
+    def accept_grading_proposal(self, account_id, course_id, base_hash):
+        from .util import sha256_bytes, canonical_json
+        aid = self._acct(account_id)["id"]
+        proposal = self.grading_proposal(aid, course_id)
+        current = sha256_bytes(canonical_json(self.hub.grading.get(aid, str(course_id))).encode())
+        if not proposal or base_hash != proposal.get("base_hash") or current != base_hash:
+            raise Conflict("grading rules changed; review a new proposal")
+        with self.hub.db.tx() as c:
+            result = self.hub.grading.set(aid, str(course_id), proposal["after"])
+            c.execute("DELETE FROM account_settings WHERE account_id=? AND key=?", (aid, "grading_proposal:" + str(course_id)))
+        return result
+
     # ---- reminders -----------------------------------------------------------------------------
     def list_reminders(self, account_id, status="pending") -> dict:
         return {"reminders": self.hub.reminders.list(self._acct(account_id)["id"], status or None)}
@@ -422,9 +454,33 @@ class HubAPI:
         return self.hub.files.delete(self._acct(account_id)["id"], file_id)
 
     # ---- interactive components ----------------------------------------------------
-    def list_components(self, account_id, pinned=None) -> dict:
+    def workspace(self, account_id):
+        return self.hub.workspace.get(self._acct(account_id)["id"])
+
+    def set_workspace(self, account_id, data):
+        return self.hub.workspace.save(self._acct(account_id)["id"], data)
+
+    def configure_component_sources(self, account_id, component_id, data):
+        return self.hub.components.configure_sources(self._acct(account_id)["id"], component_id, data)
+
+    def override_component_source(self, account_id, component_id, data):
+        if not isinstance(data, dict) or set(data) - {"target", "value", "follow_source"}:
+            raise InvalidInput("unknown source override fields")
+        if not isinstance(data.get("follow_source", False), bool):
+            raise InvalidInput("follow_source must be a boolean")
+        return self.hub.components.set_source_override(self._acct(account_id)["id"], component_id,
+            data.get("target"), data.get("value"), follow_source=data.get("follow_source", False))
+
+    def approve_component_spec(self, account_id, component_id, data):
+        return self.hub.components.accept_spec(self._acct(account_id)["id"], component_id, data.get("expected_version"))
+
+    def study_context(self, account_id, *, course_id=None, item_id=None):
+        from .services.study import prepare_study_context
+        return prepare_study_context(self, self._acct(account_id)["id"], course_id=course_id, item_id=item_id)
+
+    def list_components(self, account_id, pinned=None, course_id=None, item_id=None) -> dict:
         pin = None if pinned in (None, "") else self._bool(pinned)
-        return {"components": self.hub.components.list(self._acct(account_id)["id"], pinned=pin)}
+        return {"components": self.hub.components.list(self._acct(account_id)["id"], pinned=pin, course_id=course_id, item_id=item_id)}
 
     def get_component(self, account_id, component_id) -> dict:
         return self.hub.components.get(self._acct(account_id)["id"], component_id)
