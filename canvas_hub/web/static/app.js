@@ -1,4 +1,7 @@
 import { makeComponents } from "./components.js";
+import { icon, decorateNavigation } from "./icons.js";
+import { currentTheme, themeSwitcher } from "./appearance.js";
+decorateNavigation();
 // Canvas Hub UI. Vanilla JS, no build step.
 // Safety: everything is rendered with textContent except item HTML fields,
 // which the server has already sanitized (and the CSP blocks scripts).
@@ -217,13 +220,14 @@ function renderTopbar() {
       kids.push(h("span", { class: "muted small" }, `as ${sess.display_name}`));
   }
   kids.push(h("div", { class: "grow" }));
+  kids.push(themeSwitcher());
   if (inst && st !== "signed_in") {
     kids.push(h("span", { class: "muted small" }, "Showing stored data. New collection needs Canvas access."));
     if (st === "unknown") kids.push(h("button", { class: "ghost", onclick: () => refreshSession(true, true) }, "Check sign-in"));
     kids.push(h("button", { class: "primary", onclick: () => openLogin(inst.id) }, st === "login_open" ? "Show sign-in window" : "Sign in"));
   }
   if (inst && st === "signed_in" && S.accountId)
-    kids.push(h("button", { onclick: () => startJob("quick") }, "Quick check"));
+    kids.push(h("button", { onclick: () => startJob("quick") }, icon("search"), "Quick check"));
   if (S.accountId) kids.push(bell());
   mount($("#topbar"), kids);
 }
@@ -402,16 +406,20 @@ window.addEventListener("hashchange", route);
 // Assistant focus mode: the window holds just the chat list, the chat, its tabs and the composer (remembered in this browser).
 // The page's toggle buttons are kept here, so Esc pressed while the page is still drawing updates them too.
 let focusButtons = [];
+function renderFocusButtons(on, buttons = focusButtons) {
+  for (const b of buttons) { mount(b, icon("maximize"), on ? "Exit focus" : currentTheme() === "light" ? "Focus" : "⤢ Focus"); b.setAttribute("aria-label", on ? "Exit focus" : "⤢ Focus"); b.setAttribute("aria-pressed", on ? "true" : "false"); }
+}
 function setChatFocus(on, buttons = focusButtons) {
   focusButtons = buttons;
   store.set("chatFocus", on ? "1" : "0");
   document.body.classList.toggle("chat-focus", on);
-  for (const b of buttons) { b.textContent = on ? "Exit focus" : "⤢ Focus"; b.setAttribute("aria-pressed", on ? "true" : "false"); }
+  renderFocusButtons(on, buttons);
   window.dispatchEvent(new Event("resize"));          // the chat refits to the space it now has
 }
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && document.body.classList.contains("chat-focus") && !document.querySelector(".cmp.fullscreen")) setChatFocus(false);
 });
+window.addEventListener("ch-theme-change", () => renderFocusButtons(document.body.classList.contains("chat-focus")));
 
 function pageHead(title, sub, ...actions) {
   return h("div", { class: "page-head" }, h("div", null, h("h1", null, title), sub ? h("p", null, sub) : null),
@@ -1323,13 +1331,14 @@ VIEWS.assistant = async (main, parts, params) => {
   if (onSettings || !cfg.configured) main.classList.remove("fill");       // only the chat itself fills the window
   main.classList.add("wide");          // both tabs span the window, so the heading, tabs and Focus never move
   const head = pageHead("Assistant", "Ask about your courses. Answers come from your Canvas Hub data; with permission it can check Canvas for updates and keep your notes.");
+  head.querySelector("h1").prepend(icon("sparkles"));
   // Focus mode: the window holds just the chat list, the chat, these tabs and the composer (remembered in this browser).
   const focusBtn = h("button", { class: "sm ghost focus-toggle", title: "Show only the chat (Esc to leave)",
     onclick: () => setChatFocus(!document.body.classList.contains("chat-focus")) });
   const tabs = h("div", { class: "tabs" },
-    h("button", { class: onSettings ? "" : "active", onclick: () => { location.hash = "#/assistant"; } }, "Chat"),
+    h("button", { class: onSettings ? "" : "active", onclick: () => { location.hash = "#/assistant"; } }, icon("message"), "Chat"),
     h("button", { class: onSettings ? "active" : "", onclick: () => { location.hash = "#/assistant/settings"; } },
-      "Settings", cfg.profiles.length ? h("span", { class: "tab-count" }, String(cfg.profiles.length)) : null),
+      icon("settings"), "Settings", cfg.profiles.length ? h("span", { class: "tab-count" }, String(cfg.profiles.length)) : null),
     h("span", { class: "grow" }), focusBtn);
   setChatFocus(store.get("chatFocus") === "1", [focusBtn]);
   if (onSettings) return assistantSettingsView(main, head, tabs, cfg, params);
@@ -1351,7 +1360,7 @@ VIEWS.assistant = async (main, parts, params) => {
   const status = h("div", { class: "chat-status" });
   const scroller = h("div", { class: "chat-scroll" });
   const input = h("textarea", { rows: 2, placeholder: "Ask about deadlines, announcements, materials, grades…  (Enter to send, Shift+Enter for a new line)" });
-  const sendBtn = h("button", { class: "primary" }, "Send");
+  const sendBtn = h("button", { class: "primary" }, icon("send"), "Send");
   const stopBtn = h("button", { class: "danger", hidden: true }, "Stop");
   let current = convId; let lastSeq = 0; let all = []; let stick = true; let wasBusy = false;
   showConvs(convs);
@@ -1448,7 +1457,7 @@ VIEWS.assistant = async (main, parts, params) => {
   input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } });
 
   const suggestions = h("div", { class: "chips suggest" }, ["What's due in the next 7 days?", "Plan my study time this week",
-    "Anything new since yesterday?", "Check Canvas for new announcements", "Show my scores"].map((s) => h("button", { class: "chip", onclick: () => send(s) }, s)));
+    "Anything new since yesterday?", "Check Canvas for new announcements", "Show my scores"].map((s, i) => h("button", { class: "chip " + ["prompt-green", "prompt-blue", "prompt-pink", "prompt-orange", "prompt-purple"][i], onclick: () => send(s) }, icon(["calendar", "planner", "message", "megaphone", "chart"][i]), s)));
   // Setup and reasoning are chosen right here for each message. The reasoning
   // level is remembered per setup in this browser only; it is not a saved setting.
   const usable = cfg.profiles.filter((x) => x.configured);
@@ -1496,12 +1505,15 @@ VIEWS.assistant = async (main, parts, params) => {
   reasoningSel.addEventListener("change", () => store.set(`reasoning.${setupSel.value}`, reasoningSel.value));
   const perms = cfg.permissions;
   const footer = h("div", { class: "chat-foot tiny muted" },
+    icon("bulb"),
     h("span", null, `Can ${["read your data", perms.notes ? "edit your notes" : null, perms.collect ? "check Canvas" : null, perms.deadlines ? "manage deadlines" : null, perms.settings ? "change scope" : null].filter(Boolean).join(", ")}. Questions and the data it reads go to the chosen provider.`));
   scroller.append(log, status);
-  if (!current) scroller.append(h("div", { class: "chat-empty", id: "chat-empty" }, h("div", { class: "e-title" }, "What would you like to know?"), suggestions));
+  if (!current) scroller.append(h("div", { class: "chat-empty", id: "chat-empty" }, icon("sparkles", "empty-sparkles"), h("div", { class: "e-title" }, "What would you like to know?"), suggestions));
   const chat = h("div", { class: "chat" }, scroller,
     h("div", { class: "composer" }, input,
-      h("div", { class: "composer-bar" }, setupSel, modelSel, reasoningSel, h("span", { class: "grow" }), stopBtn, sendBtn)), footer);
+      h("div", { class: "composer-bar" }, h("span", { class: "select-icon-wrap" }, icon("cube"), setupSel),
+        h("span", { class: "select-icon-wrap" }, icon("brain"), modelSel),
+        h("span", { class: "select-icon-wrap" }, icon("sliders"), reasoningSel), h("span", { class: "grow" }), stopBtn, sendBtn)), footer);
   const layout = h("div", { class: "assistant-layout" }, sideList, chat);
   main.classList.add("fill");
   mount(main, head, tabs, layout);
