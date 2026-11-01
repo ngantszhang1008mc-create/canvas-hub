@@ -181,7 +181,7 @@ def test_account_course_url_identity_and_legacy_backfill(source,hub,account,fixt
 
 
 @pytest.mark.parametrize('url',['file:///etc/passwd','http://localhost/x','http://127.0.0.1/x',
-    'https://10.0.0.1/x','https://[::1]/x','https://user:pass@course.example.edu/x','https://foo.internal/x',
+    'https://10.0.0.1/x','https://224.0.0.1/x','https://[64:ff9b::7f00:1]/x','https://[::1]/x','https://user:pass@course.example.edu/x','https://foo.internal/x',
     'https://course.example.edu/logout','https://course.example.edu/%73ubmit','https://course.example.edu/a/../x',
     'https://course.example.edu/a%2f..%2fx','https://course.example.edu:9999/x','https://course.example.edu/x?action=delete'])
 def test_reject_unsafe_url(url):
@@ -265,3 +265,42 @@ def test_external_url_identity_survives_canvas_discovery():
     two=classify_link('https://course.example.edu/Term?x=2&x=1','https://canvas.example.edu')
     assert one.url=='https://course.example.edu/Term/?x=1&x=2'
     assert one.url!=two.url
+
+
+def test_schema12_migration_preserves_existing_context_and_progress(tmp_path,monkeypatch,fixture_pkg):
+    from canvas_hub import db
+    from canvas_hub.services import Hub
+    paths=tmp_path/'previous-store'
+    migrations=db._migration_files
+    monkeypatch.setattr(db,'_migration_files',lambda:[m for m in migrations() if m[0]<=12])
+    old=Hub.open(paths)
+    old.importer.after_discovery=None
+    fixture_pkg['items'][2].setdefault('links',[]).append({'relation':'body_link','to':{
+        'type':'external_link','course_id':'4242','url':URL,'title':'Legacy course website'}})
+    aid=old.importer.import_package(fixture_pkg,allow_new_account=True)['account_id']
+    iid=old.db.one("SELECT id FROM items WHERE item_type='assignment' LIMIT 1")['id']
+    cmp=old.components.create(aid,'checklist',{'sections':[{'id':'s','rows':[{'id':'r','label':'Keep my progress','item_id':iid}]}]},item_id=iid)
+    old.components.set_state(aid,cmp['id'],{'done':{'r':True}})
+    assert db.schema_version(old.db.conn)==12
+    old.close()
+    monkeypatch.setattr(db,'_migration_files',migrations)
+    new=Hub.open(paths)
+    try:
+        assert db.schema_version(new.db.conn)==13
+        assert new.components.get(aid,cmp['id'])['state']['done']['r']
+        assert new.query.get_item(aid,iid)['course_canvas_id']=='4242'
+        new.external_sources.backfill(aid)
+        sources=new.external_sources.list(aid)
+        assert len(sources)==1 and sources[0]['course_id']=='4242' and sources[0]['status']=='unclassified'
+        assert not new.requests.list(aid)
+        new.delete_account_data(aid,confirm='DELETE')
+        assert not new.db.query('SELECT * FROM external_sources')
+    finally:new.close()
+
+
+def test_collection_refresh_scope_and_manual_overlap(source,account,monkeypatch):
+    svc,sid,_=source;aid=account['id'];enable(svc,aid,sid)
+    assert svc.refresh_registered(aid,course_ids={'unselected'})==[]
+    def overlapping(*args):raise Conflict('manual refresh is in progress')
+    monkeypatch.setattr(svc,'refresh',overlapping)
+    assert svc.refresh_registered(aid,course_ids={'4242'})[0]['id']==sid

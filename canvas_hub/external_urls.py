@@ -10,6 +10,11 @@ MUTATION = re.compile(r'(^|/)(logout|signout|sign-out|sign_out|delete|remove|sub
 
 
 
+def public_address(value):
+    ip = ipaddress.ip_address(value)
+    return ip.is_global and not (ip.is_multicast or ip.is_reserved or ip.is_unspecified)
+
+
 def clean_url(raw: str) -> tuple[str, bool]:
     if not isinstance(raw, str) or len(raw) > 2000 or any(ord(c) < 33 for c in raw):
         raise InvalidInput('External URL must be a bounded HTTP(S) address')
@@ -23,7 +28,7 @@ def clean_url(raw: str) -> tuple[str, bool]:
         raise InvalidInput('External URL must use HTTP(S) without credentials')
     try:
         ip = ipaddress.ip_address(host)
-        if not ip.is_global:
+        if not public_address(ip):
             raise InvalidInput('Private/internal external targets are forbidden')
     except ValueError:
         if '.' not in host or host.endswith(('.local', '.internal', '.localhost', '.test', '.invalid')):

@@ -1,4 +1,5 @@
 """Real browser workflow; the connected Agent and network transport are local fakes."""
+import os
 from pathlib import Path
 
 import pytest
@@ -36,8 +37,8 @@ def test_one_click_analysis_review_approval_and_cached_reload(hub,account,source
         expect(panel).to_contain_text('SHA-256')
         # Long source URLs, exact spec and evidence remain inside the 380px layout.
         assert page.evaluate('document.documentElement.scrollWidth <= innerWidth + 1')
-        artifact=Path('/tmp/external-source-evidence')
-        artifact.mkdir(exist_ok=True)
+        artifact=Path(os.environ.get('CANVAS_HUB_SOURCE_SCREENSHOTS',str(tmp_path/'external-source-evidence')))
+        artifact.mkdir(parents=True,exist_ok=True)
         page.screenshot(path=str(artifact/f'proposal-{theme}-{width}.png'),full_page=True)
         approve.click()
         expect(panel.get_by_role('button',name='Refresh without Agent',exact=True)).to_be_visible(timeout=10000)
@@ -54,5 +55,8 @@ def test_one_click_analysis_review_approval_and_cached_reload(hub,account,source
         expect(panel).to_contain_text('course_website')
         assert len(hub.requests.list(aid))==1
         page.screenshot(path=str(artifact/f'enabled-{theme}-{width}.png'),full_page=True)
+        stored=next(r for r in svc.get(aid,sid)['records'] if r['item_type']=='external_link')
+        page.goto(f"{base}/#/item/{stored['id']}")
+        expect(page.get_by_role('heading',name='Content read by your local adapter',exact=True)).to_be_visible()
         assert not errors,errors
         browser.close()

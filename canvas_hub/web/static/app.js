@@ -843,9 +843,10 @@ VIEWS.item = async (main, parts) => {
     const content = (it.fields.find((f) => f.field === "content") || {}).value;
     const by = (it.fields.find((f) => f.field === "provided_by") || {}).value;
     const readAt = (it.fields.find((f) => f.field === "read_at") || {}).value;
-    if (content) cards.unshift(h("div", { class: "card" }, h("div", { class: "card-head" }, h("h2", null, "Content read by a connected agent"),
+    const adapterRead = by === "public declarative adapter";
+    if (content) cards.unshift(h("div", { class: "card" }, h("div", { class: "card-head" }, h("h2", null, adapterRead ? "Content read by your local adapter" : "Content read by a connected agent"),
       h("span", { class: "sub" }, `${by || "agent"} · ${readAt ? fmtDate(readAt) : ""}`)),
-      h("div", { class: "banner warn", style: "margin-bottom:10px" }, h("div", { class: "b-body small" }, "Provided by a connected agent, not reported by Canvas. Check the original site for anything important.")),
+      h("div", { class: "banner warn", style: "margin-bottom:10px" }, h("div", { class: "b-body small" }, adapterRead ? "Read from the approved public source. Check its evidence and read time below." : "Provided by a connected agent, not reported by Canvas. Check the original site for anything important.")),
       h("pre", { class: "text" }, content)));
 
   }

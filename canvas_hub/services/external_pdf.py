@@ -9,6 +9,7 @@ from io import BytesIO
 
 
 def main():
+    sys.stdout.reconfigure(encoding='utf-8')
     if sys.platform == 'linux':
         import resource
         resource.setrlimit(resource.RLIMIT_AS, (512 * 1024 * 1024, 512 * 1024 * 1024))

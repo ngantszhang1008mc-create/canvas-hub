@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import concurrent.futures
 import http.client
-import ipaddress
 import re
 import socket
 import ssl
@@ -20,7 +19,7 @@ from urllib.parse import urljoin, urlsplit
 
 from bs4 import BeautifulSoup
 
-from ..external_urls import clean_url
+from ..external_urls import clean_url, public_address
 from ..util import InvalidInput, parse_iso
 
 MAX_BYTES = 1_000_000
@@ -102,7 +101,7 @@ class _PinnedHTTPS(http.client.HTTPSConnection):
 def public_get(url):
     p = urlsplit(url)
     addresses = _DNS.submit(socket.getaddrinfo, p.hostname, p.port or (443 if p.scheme == 'https' else 80), type=socket.SOCK_STREAM).result(timeout=5)
-    if not addresses or any(not ipaddress.ip_address(a[4][0]).is_global for a in addresses):
+    if not addresses or any(not public_address(a[4][0]) for a in addresses):
         raise InvalidInput('DNS resolved to a private/internal address')
     ip = addresses[0][4][0]
     if p.scheme == 'https':

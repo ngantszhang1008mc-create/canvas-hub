@@ -29,7 +29,7 @@ export function makeExternalSources(env) {
     async function action(path, body={}) {
       const buttons = [...content.querySelectorAll('button')]; buttons.forEach(b=>b.disabled=true);
       try { source=await api(aidPath+path,{method:'POST',body}); if(!alive())return; await draw(); window.dispatchEvent(new Event('external-sources-updated')); }
-      catch(e) { content.append(h('p',{role:'alert'},e.message)); buttons.forEach(b=>b.disabled=false); }
+      catch(e) { if(!alive())return; content.append(h('p',{role:'alert'},e.message)); buttons.forEach(b=>b.disabled=false); }
     }
     async function draw() {
       if (!alive()) return;
@@ -68,19 +68,21 @@ export function makeExternalSources(env) {
       if(source.reads.length) content.append(h('details',null,h('summary',null,'Read history'),source.reads.map(r=>h('div',null,note(`${r.read_at} · ${r.status} · revision ${r.revision||'Agent'}`),h('pre',{class:'text'},JSON.stringify(r.evidence.map(p=>({url:p.url,content:p.content?.slice(0,3000)})),null,2))))));
     }
     source=await api(aidPath);
+    if(!alive())return;
     if(start) source=await api(aidPath+'/analyze',{method:'POST',body:{}});
     await draw();
     if(start)window.dispatchEvent(new Event('external-sources-updated'));
     if(matchMedia('(max-width:860px)').matches)target.scrollIntoView({block:'start'});
   }
   async function attach(main, scope) {
+    const route=location.hash, accountPath=A('/external-sources');
     const previous=bindings.get(main);
     if(previous)window.removeEventListener('external-sources-updated',previous);
     const refresh=()=>{if(main.querySelector('.external-source-list')?.isConnected)attach(main,scope).catch(()=>{});};
     bindings.set(main,refresh); window.addEventListener('external-sources-updated',refresh);
-    const path=A('/external-sources')+'?'+new URLSearchParams(scope);
+    const path=accountPath+'?'+new URLSearchParams(scope);
     const result=await api(path);
-    if(!main.isConnected||!result.sources.length)return;
+    if(!main.isConnected||bindings.get(main)!==refresh||location.hash!==route||A('/external-sources')!==accountPath||!result.sources.length)return;
     const list=h('details',{class:'workspace-evidence external-source-list',open:true},h('summary',null,'External sources'));
     for(const source of result.sources) {
       list.append(h('div',{class:'external-source-row'},h('div',null,h('a',{href:source.url,target:'_blank',rel:'noopener noreferrer'},source.title),

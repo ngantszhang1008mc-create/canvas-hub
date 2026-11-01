@@ -352,12 +352,24 @@ class ExternalSources:
             self.db.conn.execute('INSERT INTO external_records VALUES (?,?,?,?) ON CONFLICT(source_id,record_key) DO UPDATE SET last_seen_at=excluded.last_seen_at',(s['id'],it['source_key'],iid,when))
 
     def refresh_registered(self, aid, *, course_ids=None, should_stop=lambda:False):
-        rows = self.db.query("SELECT id,course_id FROM external_sources WHERE account_id=? AND decision='approved' AND enabled_revision IS NOT NULL AND status IN ('enabled','stale') ORDER BY id LIMIT 20",(aid,))
+        sql = "SELECT id,course_id FROM external_sources WHERE account_id=? AND decision='approved' AND enabled_revision IS NOT NULL AND status IN ('enabled','stale')"
+        args = [aid]
+        if course_ids is not None:
+            if not course_ids:
+                return []
+            sql += ' AND course_id IN (' + ','.join('?' for _ in course_ids) + ')'
+            args.extend(sorted(course_ids))
+        # Apply course scope before the bound; rotate older reads to avoid starving later registrations.
+        rows = self.db.query(sql + ' ORDER BY last_attempt_at,id LIMIT 20',args)
         results = []
         for row in rows:
             if should_stop():
                 break
-            if course_ids is not None and row['course_id'] not in course_ids:
+            try:
+                results.append(self.refresh(aid,row['id']))
+            except Conflict:
+                # An overlapping manual refresh, new proposal or disable must not fail Canvas collection.
+                results.append(self.get(aid,row['id']))
+            except NotFound:
                 continue
-            results.append(self.refresh(aid,row['id']))
         return results
