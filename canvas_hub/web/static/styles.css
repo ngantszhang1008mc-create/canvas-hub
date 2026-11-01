@@ -820,3 +820,26 @@ body.chat-focus .chat-scroll { overscroll-behavior: contain; }     /* the page i
 .main.fill .chat-foot { box-sizing: border-box; max-width: 960px; }     /* its own 20px padding lines it up with the composer */
 @media (min-width: 1600px) { .assistant-layout { grid-template-columns: 260px minmax(0, 1fr); } }
 @media (max-width: 860px) { body.chat-focus .main { padding: 8px 10px; } }
+
+/* Persistent study tools sit with their source material. */
+.linked-study { margin: 20px 0; min-width: 0; }
+.linked-study > h2 { margin: 0; }
+.study-action { margin: 14px 0; }
+.study-action p { max-width: 65ch; margin: 6px 0; }
+.study-context { margin: 12px; }
+.linked-study .cmp { min-width: 0; max-width: 100%; }
+@media (max-width: 480px) {
+  .study-action > button { width: 100%; white-space: normal; }
+  .linked-study { gap: 12px; }
+}
+
+.nav-group summary { padding: 8px 12px; font-size: 12px; color:var(--text-2); cursor:pointer; }
+.nav-group > a { margin-left: 12px; }
+.context-agent-log { min-height:100px; max-height:55vh; overflow:auto; overflow-wrap:anywhere; }
+.context-agent-controls select { min-width:0; max-width:100%; }
+.context-agent-log .msg { padding:8px 0; }
+.context-agent-log .steps { max-width:100%; overflow:auto; }
+.proposal-dialog { max-width:min(960px,95vw); max-height:90vh; overflow:auto; background:var(--paper); color:var(--ink); border:1px solid var(--border); border-radius:12px; }
+.proposal-dialog::backdrop { background:rgb(0 0 0 / 45%); }
+
+.nav details a { display:block; }

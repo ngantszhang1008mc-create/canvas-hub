@@ -46,6 +46,8 @@ class ToolContext:
     account_id: int | None = None  # fixed account (in-app assistant); None = take from args / single account
     worker: Any = None             # BrowserWorker when running inside the app
     conversation_id: int | None = None   # in-app chat the call belongs to (components link back to it)
+    scope_course_id: str | None = None
+    scope_item_id: int | None = None
     permissions: frozenset[str] | None = None   # set per call by run_tool_display; None = not restricted
 
 
@@ -414,9 +416,22 @@ def h_get_note(ctx, a):
             "next_offset": off + len(chunk) if off + len(chunk) < len(body) else None}
 
 
+def _scope_item(ctx, aid, item_id):
+    if ctx.scope_item_id is not None and item_id != ctx.scope_item_id:
+        raise InvalidInput("this conversation belongs to a different assignment")
+    item = ctx.api.read_item(aid, item_id)
+    if ctx.scope_course_id is not None and item["course_canvas_id"] != ctx.scope_course_id:
+        raise InvalidInput("this conversation belongs to a different course")
+    return item_id
+
+
 def h_create_note(ctx, a):
     aid = _account(ctx, a)
     data = {k: a[k] for k in ("kind", "title", "body", "item_id", "local_due", "task_state") if a.get(k) is not None}
+    if ctx.scope_item_id is not None:
+        data.setdefault("item_id", ctx.scope_item_id)
+    if data.get("item_id") is not None:
+        _scope_item(ctx, aid, data["item_id"])
     n = ctx.api.create_annotation(aid, data)
     return {"created": {"note_id": n["id"], "kind": n["kind"], "title": n["title"], "task_state": n["task_state"]},
             "note": "Stored locally only; nothing was sent to Canvas."}
@@ -425,6 +440,9 @@ def h_create_note(ctx, a):
 def h_update_note(ctx, a):
     aid = _account(ctx, a)
     data = {k: a[k] for k in ("title", "body", "task_state", "local_due") if k in a}
+    if ctx.scope_item_id is not None or ctx.scope_course_id is not None:
+        note = ctx.api.hub.annotations.get(aid, a["note_id"])
+        _scope_item(ctx, aid, note["item_id"])
     mode = a.get("mode") or "replace"
     if "body" in data and mode != "replace":
         cur = ctx.api.hub.annotations.get(aid, a["note_id"])["body"] or ""
@@ -642,7 +660,7 @@ def _component_display(ctx, view: dict, verb: str) -> dict:
                 + (f", {t['done_points']:g}/{t['points']:g} points" if t["points"] else ""))
     return {"display": {"component": view["kind"], "component_id": view["id"], "view": view},
             "summary": head + ". The user can change it in place; read it back with get_component.",
-            "component_id": view["id"]}
+            "component_id": view["id"], "pending_approval": bool(view.get("pending_spec"))}
 
 
 def view_account(ctx, view: dict) -> int:
@@ -650,10 +668,49 @@ def view_account(ctx, view: dict) -> int:
         "SELECT account_id FROM components WHERE id=?", (view["id"],))["account_id"]
 
 
+def _component_links(ctx, a):
+    course, item = a.get("course_id"), a.get("item_id")
+    if ctx.scope_item_id is not None:
+        if item is not None and item != ctx.scope_item_id:
+            raise InvalidInput("this conversation belongs to a different assignment")
+        item = ctx.scope_item_id
+    if ctx.scope_course_id is not None:
+        if course is not None and str(course) != ctx.scope_course_id:
+            raise InvalidInput("this conversation belongs to a different course")
+        course = ctx.scope_course_id
+    sources = a.get("sources")
+    if ctx.scope_item_id is not None or ctx.scope_course_id is not None:
+        # Contextual interpretations always retain their evidence, even if a
+        # provider omits an explicit recipe. Structured bindings remain explicit.
+        sources = dict(sources or {})
+        evidence = list(sources.get("review_sources") or [])
+        aid = _account(ctx, a)
+        ids = ([item] if item is not None else [r["id"] for r in ctx.api.hub.db.query(
+            "SELECT id FROM items WHERE account_id=? AND course_canvas_id=? AND item_type='syllabus'", (aid, course))])
+        for iid in ids:
+            if any(e.get("item_id") == iid for e in evidence):
+                continue
+            fields = ctx.api.hub.query._fields(iid)
+            evidence.append({"item_id": iid, "fields": [f for f in ("body", "description", "syllabus_body") if f in fields], "attachments": True})
+        sources["review_sources"] = evidence
+    return {"course_id": course, "item_id": item, "sources": sources,
+            "purpose_key": a.get("purpose_key") or ("primary" if item is not None or course is not None else None)}
+
+
+def _scoped_component(ctx, aid, cid):
+    view = ctx.api.hub.components.get(aid, cid)
+    if ctx.scope_item_id is not None and view["item_id"] != ctx.scope_item_id:
+        raise InvalidInput("this component belongs to a different assignment")
+    if ctx.scope_course_id is not None and view["course_id"] != ctx.scope_course_id:
+        raise InvalidInput("this component belongs to a different course")
+    return view
+
+
 def h_show_score_model(ctx, a):
     aid = _account(ctx, a)
     spec = {k: a[k] for k in ("title", "threshold", "unit_label", "buckets", "scenarios") if a.get(k) is not None}
-    v = ctx.api.hub.components.create(aid, "score_model", spec, conversation_id=ctx.conversation_id)
+    v = ctx.api.hub.components.create(aid, "score_model", spec, conversation_id=ctx.conversation_id,
+                                        **_component_links(ctx, a))
     if a.get("pin"):
         v = ctx.api.hub.components.pin(aid, v["id"], True)
     return _component_display(ctx, v, "Created")
@@ -671,7 +728,8 @@ def h_show_checklist(ctx, a):
     if a.get("sync_todos"):
         _need_notes_for_todos(ctx)
     spec = {k: a[k] for k in ("title", "sections", "sync_todos") if a.get(k) is not None}
-    v = ctx.api.hub.components.create(aid, "checklist", spec, conversation_id=ctx.conversation_id)
+    v = ctx.api.hub.components.create(aid, "checklist", spec, conversation_id=ctx.conversation_id,
+                                        **_component_links(ctx, a))
     if a.get("pin"):
         v = ctx.api.hub.components.pin(aid, v["id"], True)
     return _component_display(ctx, v, "Created")
@@ -686,7 +744,8 @@ def h_show_grade_projector(ctx, a):
         rules_scale = ctx.api.hub.grading.get(aid, str(a["course_id"])).get("scale")
         if rules_scale and not spec.get("scale"):
             spec["scale"] = rules_scale
-    v = ctx.api.hub.components.create(aid, "grade_projector", spec, conversation_id=ctx.conversation_id)
+    v = ctx.api.hub.components.create(aid, "grade_projector", spec, conversation_id=ctx.conversation_id,
+                                        **_component_links(ctx, a))
     if a.get("pin"):
         v = ctx.api.hub.components.pin(aid, v["id"], True)
     return _component_display(ctx, v, "Created")
@@ -714,7 +773,8 @@ def h_show_hours_tracker(ctx, a):
     aid = _account(ctx, a)
     spec = {k: a[k] for k in ("title", "target", "minimum", "points", "deadline", "source", "unit") if a.get(k) is not None}
     state = {"entries": a.get("entries") or [], "refreshed_at": a.get("refreshed_at")}
-    v = ctx.api.hub.components.create(aid, "hours_tracker", spec, conversation_id=ctx.conversation_id, state=state)
+    v = ctx.api.hub.components.create(aid, "hours_tracker", spec, conversation_id=ctx.conversation_id, state=state,
+                                        **_component_links(ctx, a))
     if a.get("pin"):
         v = ctx.api.hub.components.pin(aid, v["id"], True)
     return _component_display(ctx, v, "Created")
@@ -799,15 +859,37 @@ def h_show_heatmap(ctx, a):
                     + "; ".join(f"{k} ({v['count']})" for k, v in sorted(days.items(), key=lambda x: -x[1]["count"])[:5]) + ".")
 
 
+def h_configure_sources(ctx, a):
+    aid = _account(ctx, a)
+    current = _scoped_component(ctx, aid, a["component_id"])
+    if current.get("source_config") and current["source_config"] != a["sources"]:
+        raise InvalidInput("existing source declarations cannot be replaced by the Agent; keep the current declaration and propose rule changes for review")
+    return _component_display(ctx, ctx.api.hub.components.configure_sources(aid, a["component_id"], a["sources"]), "Linked sources for")
+
+
+def h_source_override(ctx, a):
+    aid = _account(ctx, a)
+    _scoped_component(ctx, aid, a["component_id"])
+    view = ctx.api.hub.components.set_source_override(aid, a["component_id"], a["target"], a.get("value"),
+                                                      follow_source=a.get("follow_source", False))
+    return _component_display(ctx, view, "Updated source choice for")
+
+
+def h_mark_assignment(ctx, a):
+    aid = _account(ctx, a)
+    _scope_item(ctx, aid, a["item_id"])
+    return ctx.api.set_deadline_local_completion(aid, a["item_id"], a["completed"])
+
+
 def h_get_component(ctx, a):
     return ctx.api.hub.components.describe(_account(ctx, a), a["component_id"])
 
 
 def h_list_components(ctx, a):
     aid = _account(ctx, a)
-    rows = ctx.api.hub.components.list(aid, pinned=a.get("pinned"), limit=50)
+    rows = ctx.api.hub.components.list(aid, pinned=a.get("pinned"), limit=50, course_id=a.get("course_id"), item_id=a.get("item_id"))
     return {"components": [{"component_id": v["id"], "kind": v["kind"], "title": v["title"], "pinned": v["pinned"],
-                            "updated_at": v["updated_at"]} for v in rows]}
+                            "updated_at": v["updated_at"], "course_id": v["course_id"], "item_id": v["item_id"]} for v in rows]}
 
 
 def h_update_component(ctx, a):
@@ -815,12 +897,12 @@ def h_update_component(ctx, a):
     svc = ctx.api.hub.components
     if a.get("spec") is None and a.get("state") is None and a.get("pin") is None:
         raise InvalidInput("give spec, state or pin")
-    v = svc.get(aid, a["component_id"])
+    v = _scoped_component(ctx, aid, a["component_id"])
     after = a["spec"] if isinstance(a.get("spec"), dict) else v["spec"]      # the spec in force after the call
     if v["kind"] == "checklist" and (a.get("spec") is not None or a.get("state") is not None) and after.get("sync_todos"):
         _need_notes_for_todos(ctx)
     if a.get("spec") is not None:
-        v = svc.update_spec(aid, v["id"], a["spec"], by="assistant")
+        v = svc.propose_spec(aid, v["id"], a["spec"])
     if a.get("state") is not None:
         v = svc.set_state(aid, v["id"], a["state"], by="assistant")
     if a.get("pin") is not None:
@@ -946,8 +1028,9 @@ def h_get_grading_rules(ctx, a):
 def h_set_grading_rules(ctx, a):
     aid = _account(ctx, a)
     rules = {k: a[k] for k in ("groups", "items", "threshold", "scale", "source") if a.get(k) is not None}
-    return {"course_id": str(a["course_id"]), "saved": ctx.api.hub.grading.set(aid, str(a["course_id"]), rules),
-            "note": "Stored on this computer only; replaces the course's previous local rules."}
+    if ctx.scope_course_id is not None and str(a["course_id"]) != ctx.scope_course_id:
+        raise InvalidInput("this conversation belongs to a different course")
+    return ctx.api.propose_grading_rules(aid, str(a["course_id"]), rules)
 
 
 def _num_or_text(v):
@@ -1147,6 +1230,7 @@ def _write_display(ctx, w: dict) -> dict:
 
 def h_prepare_submission(ctx, a):
     aid = _account(ctx, a)
+    _scope_item(ctx, aid, a["item_id"])
     kind = "submission_file" if a.get("file_id") is not None else "submission_text"
     w = ctx.api.hub.writes.prepare(aid, kind, prepared_by="assistant", item_id=a["item_id"], text=a.get("text"),
                                    file_id=a.get("file_id"), conversation_id=ctx.conversation_id)
@@ -1380,12 +1464,18 @@ TOOLS += [
     AgentTool("decline_view_request", "Decline a request you cannot fulfil (no access, login failed, ...), with a reason.",
               "fulfil", {"request_id": {"type": "integer"}, "agent_name": {"type": "string"}, "reason": {"type": "string"}},
               ["request_id", "agent_name", "reason"], h_decline_request),
+    AgentTool("set_assignment_done_locally", "Explicitly mark a whole assignment done locally, separate from checklist steps and Canvas submission. Never submits.", "deadlines",
+              {"item_id": {"type": "integer"}, "completed": {"type": "boolean"}}, ["item_id", "completed"], h_mark_assignment),
+    AgentTool("configure_component_sources", "Attach deterministic source bindings/assignment collection criteria to an existing tracker. No AI is needed on later collection refreshes.", "ui",
+              {"component_id": {"type": "integer"}, "sources": {"type": "object"}}, ["component_id", "sources"], h_configure_sources),
+    AgentTool("set_component_source_override", "Explicitly override a bound field, or follow its Canvas source again. User-owned state stays separate.", "ui",
+              {"component_id": {"type": "integer"}, "target": {"type": "string"}, "value": {}, "follow_source": {"type": "boolean"}}, ["component_id", "target"], h_source_override),
     # ---- saved components (readable from any agent)
     AgentTool("get_component", "Read back a saved score model or checklist: which lines are ticked or skipped, values the "
               "user entered, and the computed totals.", "read", {"component_id": {"type": "integer"}}, ["component_id"],
               h_get_component),
     AgentTool("list_components", "List saved interactive components (score models, checklists).", "read",
-              {"pinned": {"type": "boolean"}}, [], h_list_components),
+              {"item_id": {"type": "integer", "description": "Link this component to a collected item in this account"}, "course_id": {"type": "string", "description": "Link to a collected Canvas course ID"}, "pinned": {"type": "boolean"}}, [], h_list_components),
     AgentTool("course_score_lines", "Draft score-model buckets for a course from its assignments: points, due dates, "
               "assignment groups and status from the submission state.", "read", {"course_id": {"type": "string"}},
               ["course_id"], h_course_score_lines),
@@ -1468,7 +1558,7 @@ TOOLS += [
               "expected values; totals (booked, projected, ceiling, lost, margin to threshold, skip budget) update live. "
               "Draft buckets from Canvas with course_score_lines. Scenarios are named presets (e.g. conservative/target/max).",
               "ui",
-              {"title": {"type": "string"}, "threshold": {"type": "number", "description": "pass mark, same unit as the totals"},
+              {"sources": {"type": "object", "description": "Deterministic sources: bindings [{target stable-ID path,item_id,field}], collection {course_id,item_type:assignment,section_id}, review_sources [{item_id,fields,attachments}]. Source changes update fields without AI; interpreted rule changes require review."}, "purpose_key": {"type": "string", "description": "Stable purpose; repeated calls reuse existing component. Default primary for scoped components."}, "item_id": {"type": "integer", "description": "Link this component to a collected item in this account"}, "course_id": {"type": "string", "description": "Link to a collected Canvas course ID"}, "title": {"type": "string"}, "threshold": {"type": "number", "description": "pass mark, same unit as the totals"},
                "unit_label": {"type": "string", "description": "e.g. pts"},
                "buckets": {"type": "array", "items": {"type": "object", "properties": {
                    "id": {"type": "string"}, "label": {"type": "string"}, "max": {"type": "number"},
@@ -1492,7 +1582,7 @@ TOOLS += [
     AgentTool("show_checklist", "Create an interactive checklist (saved): sections of rows with optional points, due date "
               "and linked item; ticks persist, sections show subtotals and progress. sync_todos links each row to a local "
               "to-do (ticking one ticks the other; needs the notes permission).", "ui",
-              {"title": {"type": "string"}, "sync_todos": {"type": "boolean"}, "pin": {"type": "boolean"},
+              {"sources": {"type": "object", "description": "Deterministic sources: bindings [{target stable-ID path,item_id,field}], collection {course_id,item_type:assignment,section_id}, review_sources [{item_id,fields,attachments}]. Source changes update fields without AI; interpreted rule changes require review."}, "purpose_key": {"type": "string", "description": "Stable purpose; repeated calls reuse existing component. Default primary for scoped components."}, "item_id": {"type": "integer", "description": "Link this component to a collected item in this account"}, "course_id": {"type": "string", "description": "Link to a collected Canvas course ID"}, "title": {"type": "string"}, "sync_todos": {"type": "boolean"}, "pin": {"type": "boolean"},
                "sections": {"type": "array", "items": {"type": "object", "properties": {
                    "id": {"type": "string"}, "title": {"type": "string"},
                    "rows": {"type": "array", "items": {"type": "object", "properties": {
@@ -1505,7 +1595,7 @@ TOOLS += [
               "sees the course percentage, the letter grade and what is needed on the remaining work for each letter. "
               "Give course_id alone to draft it from Canvas assignment groups (weights are often 0 in Canvas: ask the user "
               "for the syllabus weights and pass categories instead).", "ui",
-              {"title": {"type": "string"}, "course_id": {"type": "string"}, "pin": {"type": "boolean"},
+              {"sources": {"type": "object", "description": "Deterministic sources: bindings [{target stable-ID path,item_id,field}], collection {course_id,item_type:assignment,section_id}, review_sources [{item_id,fields,attachments}]. Source changes update fields without AI; interpreted rule changes require review."}, "purpose_key": {"type": "string", "description": "Stable purpose; repeated calls reuse existing component. Default primary for scoped components."}, "item_id": {"type": "integer", "description": "Link this component to a collected item in this account"}, "title": {"type": "string"}, "course_id": {"type": "string"}, "pin": {"type": "boolean"},
                "categories": {"type": "array", "items": {"type": "object", "properties": {
                    "id": {"type": "string"}, "name": {"type": "string"}, "weight": {"type": "number"},
                    "drop_lowest": {"type": "integer"},
@@ -1519,7 +1609,7 @@ TOOLS += [
     AgentTool("show_hours_tracker", "Create an hours tracker (saved) for hour-based requirements such as service hours: "
               "nothing counts until `minimum` hours, points scale up to `target`; if the deadline passes below the "
               "minimum the line is lost. The user logs entries and records when they last checked the source portal.", "ui",
-              {"title": {"type": "string"}, "target": {"type": "number"}, "minimum": {"type": "number"},
+              {"sources": {"type": "object", "description": "Deterministic sources: bindings [{target stable-ID path,item_id,field}], collection {course_id,item_type:assignment,section_id}, review_sources [{item_id,fields,attachments}]. Source changes update fields without AI; interpreted rule changes require review."}, "purpose_key": {"type": "string", "description": "Stable purpose; repeated calls reuse existing component. Default primary for scoped components."}, "item_id": {"type": "integer", "description": "Link this component to a collected item in this account"}, "course_id": {"type": "string", "description": "Link to a collected Canvas course ID"}, "title": {"type": "string"}, "target": {"type": "number"}, "minimum": {"type": "number"},
                "points": {"type": "number"}, "deadline": {"type": "string", "description": _DATE_DESC},
                "source": {"type": "string", "description": "where the official count lives, e.g. the Engage portal"},
                "entries": {"type": "array", "items": {"type": "object", "properties": {
@@ -1534,8 +1624,8 @@ TOOLS += [
     AgentTool("show_heatmap", "Show a calendar heatmap of workload (deadlines per day, weighted by points) for the next "
               "weeks across all courses.", "ui", {"weeks": {"type": "integer", "minimum": 2, "maximum": 26},
                                                   "title": {"type": "string"}}, [], h_show_heatmap),
-    AgentTool("update_component", "Change a saved score model or checklist: replace its definition (spec, same shape as "
-              "when created), set its state, or pin it to Trackers.", "ui",
+    AgentTool("update_component", "Propose a definition change for user approval, or update saved state/pinning. Definition (spec, same shape as "
+              "when created) is never overwritten until the user approves the diff.", "ui",
               {"component_id": {"type": "integer"}, "spec": {"type": "object"}, "state": {"type": "object"},
                "pin": {"type": "boolean"}}, ["component_id"], h_update_component),
     AgentTool("show_grades", "Show visible assignment scores as a chart (% of points); hidden grades are listed, not zero.",

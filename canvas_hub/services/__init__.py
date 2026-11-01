@@ -47,6 +47,9 @@ class Hub:
         self.planner = PlannerService(self.db, self.query)
         self.requests = RequestService(self.db, self.identity, self.importer)
         self.components = ComponentService(self.db, self.annotations)
+        self.importer.after_import = self.components.sync_sources
+        from .workspace import WorkspaceService
+        self.workspace = WorkspaceService(self)
         self.settings = AccountSettings(self.db)
         self.files = SavedFileService(self.db)
         self.writes = WriteService(self.db, self.identity, self.query, self.files, self.settings)
