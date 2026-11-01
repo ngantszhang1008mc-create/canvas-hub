@@ -286,7 +286,7 @@ def test_schema12_migration_preserves_existing_context_and_progress(tmp_path,mon
     monkeypatch.setattr(db,'_migration_files',migrations)
     new=Hub.open(paths)
     try:
-        assert db.schema_version(new.db.conn)==13
+        assert db.schema_version(new.db.conn)==max(version for version, *_ in migrations())
         assert new.components.get(aid,cmp['id'])['state']['done']['r']
         assert new.query.get_item(aid,iid)['course_canvas_id']=='4242'
         new.external_sources.backfill(aid)
