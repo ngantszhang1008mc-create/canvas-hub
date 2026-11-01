@@ -1,3 +1,4 @@
+import { makeExternalSources } from "./external-sources.js";
 import { makeWorkspace } from "./workspace.js";
 import { makeContextAgent } from "./context-agent.js";
 import { makeComponents } from "./components.js";
@@ -736,6 +737,7 @@ VIEWS.course = async (main, parts, params) => {
     body = h("div", { class: "card" }, itemTable(list.items));
   }
   await W.courseView(main, c, [head, tabs, body]);
+  await E.attach(main, {course_id: String(cid)});
 };
 
 // Local grading rules: what Canvas leaves out (real group weights, pass mark). Never sent to Canvas.
@@ -814,7 +816,7 @@ VIEWS.item = async (main, parts) => {
   const id = parts[0];
   const [it, hist] = await Promise.all([api(A(`/items/${id}`)), api(A(`/items/${id}/history`))]);
   const head = pageHead(it.title || "(untitled)", null,
-    it.source_url ? h("a", { class: "btn", href: it.source_url, target: "_blank", rel: "noopener noreferrer" }, "Open in Canvas") : null,
+    it.source_url ? h("a", { class: "btn", href: it.source_url, target: "_blank", rel: "noopener noreferrer" }, it.source_key?.startsWith("external:") || ["external_link","external_tool"].includes(it.item_type) ? "Open source" : "Open in Canvas") : null,
     ["assignment", "quiz", "calendar_event"].includes(it.item_type) ? archiveDeadlineButton({ item_id: it.id, archived: it.deadline_archived }) : null);
   const meta = h("div", { class: "row", style: "margin:-8px 0 14px" }, pill("muted plain", TYPE_LABEL[it.item_type]),
     it.course_canvas_id ? h("a", { href: `#/course/${it.course_canvas_id}`, class: "small" }, it.course_title || "Course " + it.course_canvas_id) : null,
@@ -845,11 +847,7 @@ VIEWS.item = async (main, parts) => {
       h("span", { class: "sub" }, `${by || "agent"} · ${readAt ? fmtDate(readAt) : ""}`)),
       h("div", { class: "banner warn", style: "margin-bottom:10px" }, h("div", { class: "b-body small" }, "Provided by a connected agent, not reported by Canvas. Check the original site for anything important.")),
       h("pre", { class: "text" }, content)));
-    const url = (it.fields.find((f) => f.field === "url") || {}).value || it.source_url;
-    if (url) cards.unshift(h("div", { class: "card" }, h("div", { class: "spread" },
-      h("div", { class: "small" }, "Canvas Hub doesn't open external sites itself. A connected agent with its own access can read this page for you."),
-      h("button", { onclick: async () => { const r = await guard(() => api(A("/requests"), { method: "POST", body: { url, title: it.title || undefined, course_id: it.course_canvas_id || undefined } }));
-        if (r) { toast("Request left for connected agents"); location.hash = "#/requests"; } } }, content ? "Ask an agent to re-read" : "Ask a connected agent to read this"))));
+
   }
   if (it.submission_item_id) cards.push(h("div", { class: "card" }, h("a", { href: `#/item/${it.submission_item_id}` }, "View your submission and feedback →")));
   if (it.resources.length) cards.push(h("div", { class: "card" }, h("h2", null, "Document"), it.resources.map((r) => resourceBlock(r))));
@@ -869,7 +867,10 @@ VIEWS.item = async (main, parts) => {
   const content = [head, meta, banners, h("div", { class: "stack" }, cards)];
   if (["assignment", "quiz", "calendar_event"].includes(it.item_type)) await W.assignmentView(main, it, content);
   else mount(main, content);
+  await E.attach(main, {item_id: String(it.id)});
 };
+
+const E = makeExternalSources({h, mount, api, A, launcher: actions => W.launcher(actions)});
 
 const relLabel = (r) => ({ body_link: "links to", module_item_content: "opens", module_contains: "contains", attachment: "attachment",
   folder_contains: "contains", submission_for: "submission for", home_page: "home page", calendar_for: "calendar entry for" }[r] || r);

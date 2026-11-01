@@ -405,9 +405,16 @@ class CollectionRun:
                                (self.job_id,))["n"]
         partial = self.hub.db.one("SELECT COUNT(*) n FROM coverage WHERE job_id=? AND status IN ('partial','blocked')",
                                   (self.job_id,))["n"]
-        state = "completed_with_gaps" if gaps or partial else "completed"
-        msg = ("Finished. Some content could not be read; see Coverage for the specific gaps."
+        external = self.hub.external_sources.refresh_registered(
+            self.account["id"], course_ids=set(self.scoped_courses),
+            should_stop=self.should_stop)
+        if self.should_stop():
+            return self._stopped()
+        external_gaps = any(s['status'] != 'enabled' for s in external)
+        state = "completed_with_gaps" if gaps or partial or external_gaps else "completed"
+        msg = ("Finished. Some content could not be read; see Coverage and external source details for the specific gaps."
                if state == "completed_with_gaps" else "Finished; every in-scope surface was read.")
+        self.hub.jobs.update_stats(self.job_id, external_sources=[{"id": s["id"], "status": s["status"]} for s in external])
         self.hub.jobs.update_stats(self.job_id, current_task=None)
         self.hub.jobs.set_state(self.job_id, state, message=msg)
         return state
@@ -728,8 +735,9 @@ class CollectionRun:
                         self.enqueue(f"fetch:{kind}:{cid}:{it['content_id']}", f"fetch_{kind}", course_id=cid,
                                      category="linked_content", payload={"id": str(it["content_id"]), "depth": 1})
                 elif itype == "ExternalUrl" and it.get("external_url"):
-                    url = canonical_url(it["external_url"])
-                    fields["external_url"] = it["external_url"]
+                    from ..external_urls import external_url
+                    url = external_url(it["external_url"])
+                    fields["external_url"] = url
                     links.append({"relation": "module_item_content", "label": "",
                                   "to": ref("external_link", cid, url=url, title=it.get("title"))})
                     pkg.item("external_link", course_id=cid, url=url, title=it.get("title"),

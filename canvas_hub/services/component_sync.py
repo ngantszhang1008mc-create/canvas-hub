@@ -174,6 +174,10 @@ class ComponentSourceSync:
         item = self.db.one("SELECT * FROM items WHERE account_id=? AND id=?", (account_id, item_id))
         if not item or item["presence"] != "observed":
             return None, "source_unavailable"
+        external = self.db.one("""SELECT s.status,s.last_success_at,r.last_seen_at FROM external_records r
+            JOIN external_sources s ON s.id=r.source_id WHERE r.item_id=? AND s.account_id=?""", (item_id,account_id))
+        if external and (external['status'] != 'enabled' or external['last_seen_at'] < (external['last_success_at'] or '')):
+            return None, 'external_source_stale'
         if field == "score_status":
             return self._read_score_status(item)
         observed = self.db.one("SELECT value_json,last_observed_at FROM item_fields WHERE item_id=? AND field=?", (item_id, field))

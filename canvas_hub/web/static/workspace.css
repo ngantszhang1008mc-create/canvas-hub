@@ -166,3 +166,15 @@ button.workspace-attention-link:hover { color: var(--accent); background: transp
  .workspace-schedule-controls { flex-direction:column; align-items:flex-start; }
  .workspace-schedule-controls .check { white-space:normal; }
 }
+
+/* Contextual external-source review, using the same compact launcher. */
+.external-source-row { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:12px 0; border-bottom:1px solid var(--rule); }
+.external-source-row > div:first-child { min-width:0; overflow-wrap:anywhere; }
+.external-agent { padding:16px; min-width:0; overflow-wrap:anywhere; }
+.external-agent-content { display:grid; gap:12px; }
+.external-agent-content pre { white-space:pre-wrap; overflow-wrap:anywhere; max-height:360px; overflow:auto; }
+.external-agent-content .row { flex-wrap:wrap; }
+.external-proposal { border:1px solid var(--rule); border-radius:12px; padding:12px; }
+.external-agent:not(.workspace-context .external-agent) { margin-top:20px; }
+.workspace-context.external-open .workspace-content .cols-2 { grid-template-columns:minmax(0,1fr); }
+.external-proposal li { overflow-wrap:anywhere; }
