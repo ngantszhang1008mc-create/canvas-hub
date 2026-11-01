@@ -565,6 +565,9 @@ def create_app(api: HubAPI, *, token: str, port: int) -> FastAPI:
     def agents_seen():
         return api.connected_agents()
 
+    from .widgets import install_widget_routes
+    install_widget_routes(app, api, body)
+
     @app.get("/api/accounts/{aid}/workspace")
     def workspace_get(aid: int):
         return api.workspace(aid)

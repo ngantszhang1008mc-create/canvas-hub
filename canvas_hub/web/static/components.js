@@ -567,7 +567,20 @@ footer{margin-top:24px;font-size:12px;color:#8b8170}</style></head><body><h1>${h
     let userEdits = 0;                     // changes the user made (undo replies are not counted here)
     const el = h("div", { class: "saved-cmp" });
     const status = h("span", { class: "tiny muted save-state", "aria-live": "polite" });
-    const redraw = () => { mount(el, render(v, api_)); };
+    const redraw = () => {
+      const focused = document.activeElement;
+      const selector = 'input,select,textarea,button,summary,a[href]';
+      const controls = [...el.querySelectorAll(selector)];
+      const at = controls.indexOf(focused);
+      const key = n => n.getAttribute('aria-label') || (n.tagName + ':' + (n.closest('label')?.textContent || n.textContent));
+      const identity = at >= 0 ? key(focused) : null;
+      const selection = at >= 0 && typeof focused.selectionStart === 'number' ? [focused.selectionStart,focused.selectionEnd] : null;
+      mount(el, render(v, api_));
+      if (identity !== null) {
+        const next = [...el.querySelectorAll(selector)].find(n=>key(n)===identity);
+        if (next && !next.disabled) { next.focus({preventScroll:true}); if(selection)next.setSelectionRange(...selection); }
+      }
+    };
     const queue = (fn) => (saving = saving.then(fn, fn));
     // Edits made while a save was in flight are re-applied on top of the server's answer (which may hold
     // changes from elsewhere, e.g. a linked to-do finished meanwhile): per key, and per entry for maps.
@@ -644,8 +657,9 @@ footer{margin-top:24px;font-size:12px;color:#8b8170}</style></head><body><h1>${h
     return el;
   }
   const savedTools = (v, ctl) => [ctl.status,
+    env.manageWidget ? h("button", {class:"sm ghost cmp-home-placement", title:"Place on Overall", "aria-label":`Place ${v.title} on Overall`, onclick:()=>guard(()=>env.manageWidget(v.id))}, "⌂") : null,
     h("button", { class: "sm ghost", title: "Undo the last change", disabled: v.can_undo ? null : true, onclick: () => ctl.undo() }, "↶ Undo"),
-    h("button", { class: "sm ghost", "aria-pressed": v.pinned ? "true" : "false", onclick: () => ctl.pin() }, v.pinned ? "★ Pinned" : "☆ Pin")];
+    h("button", { class: "sm ghost cmp-tracker-pin", title:"Pin to the Trackers page", "aria-pressed": v.pinned ? "true" : "false", onclick: () => ctl.pin() }, v.pinned ? "★ Trackers" : "☆ Trackers")];
 
   function scoreModelView(view) {
     return savedComponent(view, (v, ctl) => {
