@@ -145,7 +145,8 @@ def classify_link(href: str, origin: str, base_url: str | None = None) -> Canvas
         return None
     url = canonical_url(absolute)
     if not same_origin(absolute, origin):
-        return CanvasLink("external", None, None, url)
+        from .external_urls import external_url
+        return CanvasLink("external", None, None, external_url(absolute))
     path = p.path
     for pat, kind in _COURSE_PATTERNS:
         m = pat.match(path)

@@ -393,6 +393,7 @@ export function makeWorkspace(env) {
       h("div", { class: "workspace-agent-heading" }, h("h2", null, "Agent"), close), agentBody);
     const layout = h("div", { class: "workspace workspace-context" }, center, pane);
     const showAgent = async (action) => {
+      layout.querySelector(".external-agent")?.setAttribute("hidden", ""); layout.classList.remove("external-open");
       pane.hidden = false; layout.classList.add("agent-open");
       if (scope.item_id) await remember({ item_id: scope.item_id, view: "assistant" });
       if (action && env.startAction) await env.startAction(scope, action, agentBody);

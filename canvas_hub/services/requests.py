@@ -59,14 +59,14 @@ class RequestService:
         return r
 
     def create(self, account_id: int, *, url: str, title: str | None = None, note: str | None = None,
-               course_id: str | None = None, requested_by: str = "user") -> dict:
+               course_id: str | None = None, requested_by: str = "user", external_source_id: int | None = None) -> dict:
         u = _check_url(url)
         if requested_by not in ("user", "assistant"):
             raise InvalidInput("requested_by must be user or assistant")
         if len(note or "") > 2000 or len(title or "") > 300:
             raise InvalidInput("title or note too long")
-        dup = self.db.one("SELECT id FROM view_requests WHERE account_id=? AND url=? AND status IN ('open','claimed')",
-                          (account_id, u))
+        dup = self.db.one("SELECT id FROM view_requests WHERE account_id=? AND url=? AND external_source_id IS ? AND status IN ('open','claimed')",
+                          (account_id, u, external_source_id))
         if dup:
             return self.view(account_id, dup["id"])
         if self.db.one("SELECT COUNT(*) n FROM view_requests WHERE account_id=? AND status IN ('open','claimed')",
@@ -75,9 +75,9 @@ class RequestService:
         now = now_iso()
         with self.db.tx() as c:
             rid = c.execute(
-                """INSERT INTO view_requests(account_id, url, title, note, course_canvas_id, requested_by, created_at, updated_at)
-                   VALUES (?,?,?,?,?,?,?,?)""",
-                (account_id, u, (title or "").strip() or None, (note or "").strip() or None, course_id, requested_by, now, now)).lastrowid
+                """INSERT INTO view_requests(account_id, url, title, note, course_canvas_id, requested_by, created_at, updated_at, external_source_id)
+                   VALUES (?,?,?,?,?,?,?,?,?)""",
+                (account_id, u, (title or "").strip() or None, (note or "").strip() or None, course_id, requested_by, now, now, external_source_id)).lastrowid
         return self.view(account_id, rid)
 
     def list(self, account_id: int, status: str | None = None) -> list[dict]:
@@ -139,6 +139,8 @@ class RequestService:
             raise InvalidInput(f"request is {r['status']}", code="request_closed")
         if r["status"] == "claimed" and r["claimed_by"] != agent:
             raise InvalidInput(f"claimed by {r['claimed_by']}", code="request_claimed")
+        if r.get("external_source_id"):
+            raise InvalidInput("Use submit_source_analysis for classified source requests")
         text = content or ""
         if not text.strip():
             raise InvalidInput("content is empty")

@@ -143,6 +143,9 @@ class Importer:
         self.jobs.update_stats(job_id, **stats)
         if own_job:
             self.jobs.set_state(job_id, "completed", message="Observation package imported")
+        discovery = getattr(self, "after_discovery", None)
+        if discovery is not None:
+            discovery(account_id, pkg)
         sync = getattr(self, "after_import", None)
         if sync is not None:
             sync(account_id)
@@ -414,7 +417,7 @@ class Importer:
         params = [account_id, *types] + ([cov.course_id] if cov.course_id else [])
         rows = c.execute(
             f"""SELECT id, presence, last_observed_at FROM items WHERE account_id=? AND item_type IN ({','.join('?'*len(types))})
-                AND {course_clause} AND current_revision>0 AND presence='observed'
+                AND {course_clause} AND source_key NOT LIKE 'external:%' AND current_revision>0 AND presence='observed'
                 AND NOT EXISTS (SELECT 1 FROM item_observations o WHERE o.item_id=items.id AND o.job_id=? AND o.fields_json!='[]')""",
             (*params, job_id),
         ).fetchall()

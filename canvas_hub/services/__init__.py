@@ -48,6 +48,9 @@ class Hub:
         self.requests = RequestService(self.db, self.identity, self.importer)
         self.components = ComponentService(self.db, self.annotations)
         self.importer.after_import = self.components.sync_sources
+        from .external_sources import ExternalSources
+        self.external_sources = ExternalSources(self)
+        self.importer.after_discovery = self.external_sources.discover
         from .workspace import WorkspaceService
         self.workspace = WorkspaceService(self)
         from .widgets import WidgetService
