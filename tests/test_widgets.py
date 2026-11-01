@@ -192,7 +192,11 @@ def test_timezone_setting_and_reorder_validation(hub,examples):
 
 
 def test_migration_14_applies_without_13_retains_data_and_allows_later_13(monkeypatch):
-    files=database._migration_files();c=database.connect(':memory:')
+    # Deliberately omit the sibling adapter migration, even after both features
+    # land together. This verifies the independently deployable widget upgrade.
+    files=[f for f in database._migration_files() if f[0]<=14 and f[0]!=13]
+    monkeypatch.setattr(database,'_migration_files',lambda:files)
+    c=database.connect(':memory:')
     with monkeypatch.context() as m:
         m.setattr(database,'_migration_files',lambda:[f for f in files if f[0]<=12])
         assert database.migrate(c)[-1]==12
