@@ -1,8 +1,10 @@
 // Daily work and contextual workspaces. Rendering never starts an Agent request.
+import { makeWidgets } from "./widgets.js";
 import { icon } from "./icons.js";
 
 export function makeWorkspace(env) {
   const { h, mount, api, A, fmtDate, ago, componentView } = env;
+  const widgets = makeWidgets({...env, launcher, sourceStatus});
   let sequence = 0;
   let localActive = null;
   const query = (params) => "?" + new URLSearchParams(Object.entries(params).filter(([, v]) => v != null && v !== ""));
@@ -177,9 +179,9 @@ export function makeWorkspace(env) {
     mount(main, loading);
     const results = await Promise.allSettled([
       allDeadlines(), api(A("/courses")), api(A("/freshness")), api(A("/workspace")),
-      api(A("/components")), api(A("/annotations") + "?kind=task"), recentChanges(),
+      api(A("/components")), api(A("/annotations") + "?kind=task"), recentChanges(), api(A("/widgets")),
     ]);
-    const [deadlines, courses, freshness, saved, components, annotations, changes] = results.map((r) => r.status === "fulfilled" ? r.value : null);
+    const [deadlines, courses, freshness, saved, components, annotations, changes, widgetBoard] = results.map((r) => r.status === "fulfilled" ? r.value : null);
     if (!main.isConnected) return;
     localActive = saved?.active || null;
     const allComponents = components?.components || [];
@@ -364,14 +366,16 @@ export function makeWorkspace(env) {
     if (issues.length) { attention.hidden = false; attention.append(h("h2", null, "Needs attention"), h("div", { class: "workspace-attention-list" }, issues)); }
     const health = h("div", { class: "workspace-health" }, h("span", { class: "workspace-health-dot", "aria-hidden": "true" }),
       h("a", { href: "#/collect", title: "View collection and data freshness" }, !freshness ? "Collection status unavailable" : freshness.newest_item_observation ? `Last read ${ago(freshness.newest_item_observation)}` : "Canvas has not been collected"));
-    const failures = results.map((r, i) => r.status === "rejected" ? notice(`${["Work", "Courses", "Data freshness", "Continue state", "Checklists", "Local tasks", "Recent changes"][i]} unavailable: ${errorText(r.reason)}`, () => overallView(main)) : null).filter(Boolean);
+    const failures = results.map((r, i) => r.status === "rejected" ? notice(`${["Work", "Courses", "Data freshness", "Continue state", "Checklists", "Local tasks", "Recent changes", "Widget settings"][i]} unavailable: ${errorText(r.reason)}`, () => overallView(main)) : null).filter(Boolean);
+    const deadlinesCard = h("section", { class: "workspace-today", "aria-label": "Today and upcoming work" },
+      h("div", { class: "workspace-section-heading" }, heading, count),
+      h("div", { class: "workspace-view-switch" }, modes), listControls, scheduleControls, work);
+    draw();
+    const boardUI = widgetBoard ? widgets.boardView(widgetBoard, {deadlines:deadlinesCard, continue:continueZone, attention}) : null;
     const root = h("div", { class: "workspace workspace-overall" },
-      h("header", { class: "page-head workspace-page-head" }, h("div", null, h("h1", null, "Overall"), h("p", null, "Your work, across courses.")), health),
-      failures, continueZone,
-      h("section", { class: "workspace-today", "aria-label": "Today and upcoming work" },
-        h("div", { class: "workspace-section-heading" }, heading, count),
-        h("div", { class: "workspace-view-switch" }, modes), listControls, scheduleControls, work), attention);
-    draw(); mount(main, root);
+      h("header", { class: "page-head workspace-page-head" }, h("div", null, h("h1", null, "Overall"), h("p", null, "A little space for what matters today.")), health),
+      failures, boardUI?.toolbar, boardUI?.root || h("div", null, continueZone, deadlinesCard, attention));
+    mount(main, root);
   }
 
   function contentNodes(content) {
@@ -582,5 +586,5 @@ export function makeWorkspace(env) {
     narrow.addEventListener("change", () => { open = !narrow.matches; update(); });
     document.body.append(toggle, scrim); update();
   }
-  return { overallView, assignmentView, courseView, launcher, sourceStatus, installNavigation };
+  return { manageWidget: componentId => widgets.manager({componentId}), overallView, assignmentView, courseView, launcher, sourceStatus, installNavigation };
 }

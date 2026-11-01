@@ -1890,7 +1890,7 @@ VIEWS.requests = async (main) => {
 
 // ---------- assistant components (components.js) ----------
 const C = makeComponents({ h, mount, api, A, toast, guard, fmtDate, until, ago, pill, submissionPill, TYPE_LABEL, renderTimetable,
-  fieldValue, store, studyAction, linkedStudy, route: () => route() });
+  fieldValue, store, studyAction, linkedStudy, manageWidget: cid=>W.manageWidget(cid), route: () => route() });
 const componentView = (d, ctx, key) => C.componentView(d, ctx, key);
 VIEWS.trackers = (main) => C.trackersView(main, pageHead, empty);
 

@@ -50,6 +50,8 @@ class Hub:
         self.importer.after_import = self.components.sync_sources
         from .workspace import WorkspaceService
         self.workspace = WorkspaceService(self)
+        from .widgets import WidgetService
+        self.widgets = WidgetService(self)
         self.settings = AccountSettings(self.db)
         self.files = SavedFileService(self.db)
         self.writes = WriteService(self.db, self.identity, self.query, self.files, self.settings)

@@ -1634,6 +1634,8 @@ TOOLS += [
               {"question": {"type": "string"}, "options": {"type": "array", "items": {"type": "string"}}},
               ["question", "options"], h_show_choices),
 ]
+from .widget_tools import widget_tools
+TOOLS.extend(widget_tools(AgentTool, _account, _scoped_component))
 TOOLS_BY_NAME = {t.name: t for t in TOOLS}
 
 

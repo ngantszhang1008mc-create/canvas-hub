@@ -99,6 +99,10 @@ Use **Light / Dark** in the top bar on any page. **Dark** keeps the original dar
 remembered in this browser and shared between its tabs. Switching does not clear a chat draft
 or stop an assistant response.
 
+## Your Overall workbench
+
+Overall holds directly interactive widgets: deadlines/tasks and optional Schedule, saved checklists, course score calculators and other useful tools. Use **> → Manage widgets** to pin, hide, reorder or set an explicit date/event/active-work condition. Ticks and sliders edit the same saved component you see in course/chat views, with undo. The Agent can propose placements for your review; opening Overall never runs a paid Agent request. See [widget behavior and synthetic preview](docs/OVERALL_WIDGETS.md).
+
 ## Organize deadlines
 
 On **Deadlines**, use **Archive** to hide a Canvas deadline from active lists, search, the overview, planner,
@@ -154,7 +158,7 @@ Declared Canvas field bindings refresh trackers deterministically after collecti
 - **Reminders:** the ⏰ button on a deadline or to-do reminds you inside the app (and optionally with a desktop notification) while it is open.
 - **More views:** a term timeline of modules and exams, and a workload heatmap. Anything with dates can be exported as `.ics`; any component can be saved as an HTML snapshot or printed to PDF.
 - **Grading rules and formulas:** Canvas usually reports 0 for every group weight. Each course page has a **Grading rules** card for the syllabus weights and the pass mark, and the assistant can also save rules Canvas lacks (minimum hours, all-or-nothing lines, a formula such as `if(hours >= 10, 20 * min(1, hours / 20), 0)`). Score models and projections use them; they stay on this computer.
-- **All courses at a glance:** the Overview shows every course on one scale: grade so far, work done, what is lost, and what is due next.
+- **All courses at a glance:** the optional course dashboard shows every course on one scale: grade so far, work done, what is lost, and what is due next.
 - **Custom blocks (advanced, off by default):** when no built-in view fits, the assistant can write its own HTML. It runs only when you press **Run**, in an isolated frame with no network access.
 - **Text from scans and photos (optional):** with [Tesseract](https://tesseract-ocr.github.io/) and [Poppler](https://poppler.freedesktop.org/) installed, Canvas Hub can read photographed forms and scanned PDFs. Install `tesseract poppler` with Homebrew on macOS, or the Windows builds and add their program folders to `PATH` on Windows. Each document shows a confidence score, and low-confidence text is flagged.
 - **Planner page:** add your class times, see your week with deadlines and to-dos, get suggested study blocks, and export to Apple Calendar (`.ics`). It's a local plan only.
