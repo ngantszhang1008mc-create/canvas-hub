@@ -90,7 +90,7 @@ class Read:
 
 class _PinnedHTTPS(http.client.HTTPSConnection):
     def __init__(self, host, ip):
-        super().__init__(host, timeout=8, context=ssl.create_default_context())
+        super().__init__(host, port=443, timeout=8, context=ssl.create_default_context())
         self.ip = ip
 
     def connect(self):
@@ -107,7 +107,7 @@ def public_get(url):
     if p.scheme == 'https':
         conn = _PinnedHTTPS(p.hostname, ip)
     else:
-        conn = http.client.HTTPConnection(ip, timeout=8)
+        conn = http.client.HTTPConnection(ip, port=80, timeout=8)
     started = time.monotonic()
     try:
         conn.request('GET', (p.path or '/') + ('?' + p.query if p.query else ''), headers={

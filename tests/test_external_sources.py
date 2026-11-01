@@ -304,3 +304,27 @@ def test_collection_refresh_scope_and_manual_overlap(source,account,monkeypatch)
     def overlapping(*args):raise Conflict('manual refresh is in progress')
     monkeypatch.setattr(svc,'refresh',overlapping)
     assert svc.refresh_registered(aid,course_ids={'4242'})[0]['id']==sid
+
+
+def test_public_ipv6_connections_keep_standard_ports_and_no_auth(monkeypatch):
+    import canvas_hub.services.external_reader as reader
+    ip='2001:4860:4860::8888'
+    tls=reader._PinnedHTTPS(ip,ip)
+    assert tls.host==ip and tls.port==443
+    monkeypatch.setattr(socket,'getaddrinfo',lambda *a,**k:[(socket.AF_INET6,socket.SOCK_STREAM,6,'',(ip,80,0,0))])
+    calls=[]
+    class Response:
+        status=200
+        def getheader(self,name,default=None):return 'text/plain' if name=='Content-Type' else default
+        def read1(self,n):return b''
+    class Connection:
+        def __init__(self,host,port,timeout):calls.append((host,port,timeout))
+        def request(self,method,path,headers):calls.append((method,path,headers))
+        def getresponse(self):return Response()
+        def close(self):pass
+    monkeypatch.setattr(reader.http.client,'HTTPConnection',Connection)
+    public_get('http://course.example.edu/public')
+    assert calls[0]==(ip,80,8)
+    assert calls[1][0:2]==('GET','/public')
+    assert calls[1][2]['Host']=='course.example.edu'
+    assert not {'Authorization','Cookie','Proxy-Authorization'} & set(calls[1][2])
