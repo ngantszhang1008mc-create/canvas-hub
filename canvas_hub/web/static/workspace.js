@@ -195,7 +195,8 @@ export function makeWorkspace(env) {
       localTask: true, item_id: a.item_id, title: a.title || a.body?.slice(0, 100) || "Untitled task", course_id: a.course_canvas_id,
       date: a.local_due ? { iso: a.local_due } : null, completed: a.task_state === "done" }));
     const entries = [...(deadlines?.deadlines || []), ...taskRows].sort((a, b) => String(a.date?.iso || "9999").localeCompare(String(b.date?.iso || "9999")));
-    let filter = "upcoming", selectedCourse = "";
+    let filter = "upcoming", selectedCourse = "", presentation = "tasks";
+    let weekAnchor = "", displayedWeek = "", suggested = false, scheduleRequest = 0;
     const work = h("div", { class: "workspace-work" });
     const attention = h("section", { class: "workspace-attention", "aria-label": "Needs attention", hidden: true });
     const count = h("span", { class: "workspace-count", "aria-live": "polite" });
@@ -207,6 +208,73 @@ export function makeWorkspace(env) {
     }
     const courseSelect = h("select", { "aria-label": "Filter by course", onchange: (e) => { selectedCourse = e.target.value; draw(); } },
       h("option", { value: "" }, "All courses"), courseList.map((c) => h("option", { value: c.course_id }, c.course_code || c.title)));
+    const heading = h("h2", null, "Today & upcoming");
+    const listControls = h("div", { class: "workspace-controls" }, controls, courseSelect);
+    const modes = h("div", { class: "workspace-filters", role: "group", "aria-label": "Work view" });
+    const modeButtons = new Map();
+    for (const [mode, label] of [["tasks", "Tasks"], ["schedule", "Schedule"]]) {
+      const button = h("button", { class: "workspace-filter", "aria-pressed": String(mode === presentation),
+        onclick: () => { if (presentation !== mode) { presentation = mode; scheduleRequest++; draw(); } } }, label);
+      modeButtons.set(mode, button); modes.append(button);
+    }
+    const weekLabel = h("span", { class: "small workspace-week-label", "aria-live": "polite" });
+    function shiftWeek(delta) {
+      const date = new Date((displayedWeek || today) + "T12:00:00Z");
+      date.setUTCDate(date.getUTCDate() + delta); weekAnchor = date.toISOString().slice(0, 10); draw();
+    }
+    const suggestionToggle = h("input", { type: "checkbox", onchange: (e) => { suggested = e.target.checked; draw(); } });
+    const plannerLink = h("a", { href: "#/planner", class: "small" }, "Edit in Planner");
+    const scheduleControls = h("div", { class: "workspace-schedule-controls", hidden: true },
+      h("div", { class: "row" },
+        h("button", { class: "sm", "aria-label": "Previous schedule week", onclick: () => shiftWeek(-7) }, "‹"),
+        h("button", { class: "sm", onclick: () => { weekAnchor = ""; draw(); } }, "This week"),
+        h("button", { class: "sm", "aria-label": "Next schedule week", onclick: () => shiftWeek(7) }, "›"), weekLabel),
+      h("div", { class: "row" }, h("label", { class: "check small" }, suggestionToggle, "Show suggested study blocks"), plannerLink));
+    async function drawSchedule() {
+      const request = ++scheduleRequest;
+      mount(work, h("p", { class: "small muted", role: "status" }, "Loading this week's schedule…"));
+      count.textContent = "";
+      try {
+        const week = await api(A("/planner/week") + query({ week_of: weekAnchor, suggest: suggested, hours: 3 }));
+        if (request !== scheduleRequest || presentation !== "schedule" || !main.isConnected) return;
+        displayedWeek = week.week_start;
+        weekLabel.textContent = `${week.week_start} – ${week.week_end} · ${week.time_zone}`;
+        plannerLink.href = "#/planner" + query({ week: week.week_start, suggest: suggested ? "1" : "" });
+        const events = week.days.flatMap(d => d.events);
+        count.textContent = `${events.length} ${events.length === 1 ? "event" : "events"}`;
+        const time = iso => new Intl.DateTimeFormat(undefined, { timeZone: week.time_zone, hour: "2-digit", minute: "2-digit", hour12: false }).format(new Date(iso));
+        function scheduleEntry(event) {
+          // Planner's zero/placeholder lengths for due dates are never presented as planned work durations.
+          const due = ["deadline", "task"].includes(event.kind);
+          const label = event.kind === "deadline" ? "Deadline due" : event.kind === "task" ? "Task due" : event.kind === "study" ? "Suggested start" : "Starts";
+          const timeText = `${label} ${time(event.start)}${!due && event.end ? `–${time(event.end)}` : ""}`;
+          const target = event.item_id || event.for_item_id;
+          const title = target ? h("a", { href: `#/item/${target}`, class: "workspace-work-title" }, event.title) :
+            event.annotation_id ? h("a", { href: "#/notes", class: "workspace-work-title" }, event.title) : h("span", { class: "workspace-work-title" }, event.title);
+          const provenance = event.kind === "study" ? "Suggestion · not saved" : event.kind === "class" ? "Your saved timetable" : event.kind === "task" ? "Your local task date" : "Stored Canvas date";
+          return h("li", { class: `workspace-schedule-event ${event.kind}`, dataset: { eventKind: event.kind } },
+            h("div", { class: "workspace-row-main" }, title,
+              h("div", { class: "workspace-row-meta" }, h("span", { class: due ? "workspace-due-time" : "" }, timeText),
+                event.course ? h("span", null, event.course) : null, event.location ? h("span", null, event.location) : null)),
+            h("span", { class: "workspace-schedule-origin" }, provenance,
+              due && event.done ? h("span", { class: "workspace-local-done" }, " · Already completed; see Tasks for submission state") : null));
+        }
+        const freshnessText = freshness?.newest_item_observation ? `Canvas last read ${ago(freshness.newest_item_observation)}; stored dates may be stale.` :
+          "Canvas freshness is unavailable; this is not a live schedule.";
+        const note = h("p", { class: "workspace-schedule-note small" },
+          "All courses. Due times are deadlines, not planned starts. Class/event starts and unsaved study suggestions are labeled separately. ", freshnessText);
+        const days = week.days.filter(d => d.events.length).map(day => h("section", { class: "workspace-schedule-day" },
+          h("h3", null, `${day.weekday} · ${day.date}`), h("ul", { class: "workspace-work-list" }, day.events.map(scheduleEntry))));
+        mount(work, note, !week.classes_defined ? h("p", { class: "small muted" }, "No class times saved yet. ", h("a", { href: "#/planner" }, "Add your timetable in Planner")) : null,
+          days.length ? days : h("div", { class: "workspace-empty" }, h("h3", null, "Nothing scheduled this week"),
+            h("p", null, "There may still be undated tasks or uncollected Canvas dates. ", h("a", { href: "#/planner" }, "Open Planner"))));
+      } catch (error) {
+        if (request === scheduleRequest && presentation === "schedule" && main.isConnected) {
+          mount(work, notice(`Schedule unavailable: ${errorText(error)}`, () => drawSchedule()),
+            h("p", { class: "small" }, "Your task list is still available. Switch back to Tasks or open ", h("a", { href: "#/planner" }, "Planner"), "."));
+        }
+      }
+    }
     function entryRow(d) {
       const iso = d.date?.iso;
       const date = iso ? dayKey(iso) : null;
@@ -238,6 +306,10 @@ export function makeWorkspace(env) {
       return row;
     }
     function draw() {
+      modeButtons.forEach((button, key) => button.setAttribute("aria-pressed", String(key === presentation)));
+      listControls.hidden = presentation !== "tasks"; scheduleControls.hidden = presentation !== "schedule";
+      heading.textContent = presentation === "schedule" ? "This week's schedule" : "Today & upcoming";
+      if (presentation === "schedule") { drawSchedule(); return; }
       buttons.forEach((button, key) => button.setAttribute("aria-pressed", String(key === filter)));
       const visible = entries.filter((d) => {
         if (selectedCourse && String(d.course_id) !== selectedCourse) return false;
@@ -266,7 +338,7 @@ export function makeWorkspace(env) {
     }
     const issues = [];
     const overdue = entries.filter((d) => d.date?.iso && dayKey(d.date.iso) < today && !d.completed && !d.canvas_completed && !d.done_locally).length;
-    if (overdue) issues.push(h("button", { class: "workspace-attention-link", onclick: () => { filter = "overdue"; selectedCourse = ""; courseSelect.value = ""; draw(); work.scrollIntoView({ block: "nearest", behavior: "smooth" }); } }, `${overdue} overdue ${overdue === 1 ? "item" : "items"}`, h("span", { "aria-hidden": "true" }, " →")));
+    if (overdue) issues.push(h("button", { class: "workspace-attention-link", onclick: () => { presentation = "tasks"; scheduleRequest++; filter = "overdue"; selectedCourse = ""; courseSelect.value = ""; draw(); work.scrollIntoView({ block: "nearest", behavior: "smooth" }); } }, `${overdue} overdue ${overdue === 1 ? "item" : "items"}`, h("span", { "aria-hidden": "true" }, " →")));
     for (const c of allComponents.filter((c) => c.pending_spec || c.source_status?.needs_review || unavailable(c.source_status)).slice(0, 4)) {
       issues.push(h("a", { class: "workspace-attention-link", href: c.item_id ? `#/item/${c.item_id}` : c.course_id ? `#/course/${c.course_id}` : "#/trackers" },
         `${c.title} · ${unavailable(c.source_status) ? "source unavailable" : "review source changes"}`, h("span", { "aria-hidden": "true" }, " →")));
@@ -297,8 +369,8 @@ export function makeWorkspace(env) {
       h("header", { class: "page-head workspace-page-head" }, h("div", null, h("h1", null, "Overall"), h("p", null, "Your work, across courses.")), health),
       failures, continueZone,
       h("section", { class: "workspace-today", "aria-label": "Today and upcoming work" },
-        h("div", { class: "workspace-section-heading" }, h("h2", null, "Today & upcoming"), count),
-        h("div", { class: "workspace-controls" }, controls, courseSelect), work), attention);
+        h("div", { class: "workspace-section-heading" }, heading, count),
+        h("div", { class: "workspace-view-switch" }, modes), listControls, scheduleControls, work), attention);
     draw(); mount(main, root);
   }
 

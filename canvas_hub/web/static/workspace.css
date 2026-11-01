@@ -148,3 +148,21 @@ button.workspace-attention-link:hover { color: var(--accent); background: transp
   .workspace-requirements { font-size: 14px; }
 }
 @media (prefers-reduced-motion: reduce) { .workspace * { scroll-behavior: auto !important; } }
+
+/* The optional agenda replaces the task list inside the same central zone. */
+.workspace-view-switch { margin-bottom:12px; display:flex; }
+.workspace-schedule-controls { display:flex; flex-wrap:wrap; justify-content:space-between; gap:12px; margin:12px 0; }
+.workspace-schedule-controls .row { flex-wrap:wrap; }
+.workspace-week-label { overflow-wrap:anywhere; }
+.workspace-schedule-note { padding:12px 0; color:var(--text-2); border-top:1px solid var(--rule); line-height:1.6; }
+.workspace-schedule-day { margin:18px 0; }
+.workspace-schedule-day h3 { font-size:14px; margin:0 0 8px; }
+.workspace-schedule-event { display:flex; flex-wrap:wrap; align-items:center; gap:8px 16px; padding:14px 2px; }
+.workspace-schedule-event + .workspace-schedule-event { border-top:1px solid var(--rule); }
+.workspace-schedule-origin { font-size:11px; color:var(--text-2); max-width:220px; }
+.workspace-due-time { color:var(--accent); }
+@media(max-width:860px) {
+ .workspace-schedule-origin { width:100%; max-width:none; }
+ .workspace-schedule-controls { flex-direction:column; align-items:flex-start; }
+ .workspace-schedule-controls .check { white-space:normal; }
+}

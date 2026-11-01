@@ -1,6 +1,6 @@
 # Academic workspace
 
-The default Overall workspace is for daily academic work across courses. It has a compact Continue card when work has been selected, a central Today/Upcoming/Overdue/All list with course filtering, and an actionable Needs attention area when needed. Collection health is secondary. Grade planning and optional hours tools remain available in course/tool views; they are not permanent Overall panels. Existing hash links remain valid.
+The default Overall workspace is for daily academic work across courses. It has a compact Continue card when work has been selected, a central Today/Upcoming/Overdue/All list with course filtering, and an actionable Needs attention area when needed. Collection health is secondary. The central area also offers an optional Schedule agenda backed by the existing Planner; Tasks remains the default. Week navigation, saved class/event starts and an opt-in unsaved study-suggestion display stay inside that same zone. Assignment/task due times are labeled as due times, never planned starts or invented durations; stored Canvas freshness remains visible. Grade planning and optional hours tools remain available in course/tool views; they are not permanent Overall panels. Existing hash links remain valid.
 
 Each assignment workspace has its own stored conversation, checklist progress, requirements and expandable source material. A course has a separate scoped conversation. Global Assistant remains available for cross-course questions. The left navigation can collapse; the optional Agent pane opens beside the work area. At phone widths navigation and Agent start closed. This is browser responsiveness, not OS window pinning.
 
@@ -24,6 +24,10 @@ Relevant operations: `configure_component_sources`, `set_component_source_overri
 
 ## Optional follow-up work
 
-No new GPA engine, shared time-tracking ledger or OS always-on-top window is included. Existing grade projectors remain single-course planning tools. Existing hours entries retain their tracker context; Overall does not add study and service hours together. Automatic collection, desktop notifications and AI summaries remain opt-in under their existing settings. A richer timetable alternate view can be developed without adding another persistent Overall dashboard zone.
+No new GPA engine, shared time-tracking ledger or OS always-on-top window is included. Existing grade projectors remain single-course planning tools. Existing hours entries retain their tracker context; Overall does not add study and service hours together. Automatic collection, desktop notifications and AI summaries remain opt-in under their existing settings. The optional Overall Schedule view is included; advanced calendar editing remains in the existing Planner.
 
 Verification results and screenshots are reported with the implementation delivery; examples use synthetic Canvas data only.
+
+## Synthetic review preview
+
+From a source checkout with development dependencies installed (`uv sync --locked`), run `uv run python scripts/preview-demo.py --port 8731 --metadata /tmp/canvas-hub-demo.json`. The protected metadata file contains the loopback launch URL. The server creates a temporary synthetic account and uses a local fake provider, with collection unavailable and Canvas writes disabled. It does not reuse any saved Canvas Hub home or real credentials. It lasts only while that process and the cloud environment remain running; loopback is not a public/iOS URL. Use a supported cloud browser handoff to open it remotely.
