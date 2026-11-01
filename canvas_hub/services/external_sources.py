@@ -30,6 +30,14 @@ class ExternalSources:
             raise NotFound('External source not found')
         return dict(r)
 
+    def item_issue(self, aid, item_id):
+        """Availability of published evidence, independent of its observation age."""
+        row = self.db.one('''SELECT s.status,s.last_success_at,r.last_seen_at FROM external_records r
+            JOIN external_sources s ON s.id=r.source_id WHERE r.item_id=? AND s.account_id=?''', (item_id, aid))
+        if row and (row['status'] != 'enabled' or row['last_seen_at'] < (row['last_success_at'] or '')):
+            return 'External source is unavailable or this item was missing from its latest read. Stored work is retained.'
+        return None
+
     def get(self, aid, sid):
         r = self._source(aid, sid)
         r['classification'] = json.loads(r.pop('classification_json') or 'null')
@@ -180,6 +188,14 @@ class ExternalSources:
         return self.get(aid, sid)
 
     def submit_analysis(self, aid, request_id, agent_name, result):
+        source = self._submit_analysis(aid, request_id, agent_name, result)
+        # Proposal/access changes can pause previously available evidence without
+        # performing a read. Update saved tool status after releasing the source
+        # transaction, preserving the user's interactive state.
+        self.hub.components.sync_sources(aid)
+        return source
+
+    def _submit_analysis(self, aid, request_id, agent_name, result):
         agent = _check_agent(agent_name)
         if not isinstance(result, dict) or set(result) - {'roles','confidence','evidence_url','read_at','summary','content','access_error','adapter_spec'}:
             raise InvalidInput('Invalid source analysis fields')
@@ -239,6 +255,12 @@ class ExternalSources:
         return self.get(aid, sid)
 
     def decide(self, aid, sid, revision, spec_hash, *, approve=False):
+        source = self._decide(aid, sid, revision, spec_hash, approve=approve)
+        if not approve:
+            self.hub.components.sync_sources(aid)
+        return source
+
+    def _decide(self, aid, sid, revision, spec_hash, *, approve=False):
         with self._lock, self.db.tx() as c:
             s = self._source(aid, sid)
             a = c.execute('SELECT * FROM external_adapters WHERE source_id=? AND revision=?', (sid,revision)).fetchone()
@@ -262,6 +284,7 @@ class ExternalSources:
             self._source(aid, sid)
             c.execute("UPDATE external_sources SET decision='declined',status='declined',enabled_revision=NULL WHERE id=?", (sid,))
             c.execute("UPDATE external_adapters SET status='disabled' WHERE source_id=? AND status IN ('enabled','testing')",(sid,))
+        self.hub.components.sync_sources(aid)
         return self.get(aid,sid)
 
     def refresh(self, aid, sid):

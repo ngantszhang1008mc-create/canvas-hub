@@ -1,0 +1,8 @@
+:root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+body { margin: 0; padding: 24px; }
+main { max-width: 780px; margin: 0 auto; line-height: 1.6; }
+button, select { font: inherit; padding: 10px; max-width: 100%; margin: 4px 0; }
+label { display: block; }
+select { display: block; width: 100%; }
+pre { white-space: pre-wrap; overflow-wrap: anywhere; padding: 16px; border: 1px solid #888; border-radius: 8px; }
+#error { color: light-dark(#b42318, #ffb4ab); }

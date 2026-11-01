@@ -229,6 +229,10 @@ class WidgetService:
             source = {"item_id": item["id"], "title": item["title"], "observed_at": item["last_observed_at"]}
             if item["presence"] != "observed":
                 return {"state": "unknown", "reason": "Source unavailable; the condition cannot be confirmed.", "source": source}
+            external = getattr(self.hub, "external_sources", None)
+            issue = external.item_issue(aid, item["id"]) if external else None
+            if issue:
+                return {"state": "unknown", "reason": issue, "source": source}
             if kind != "active_work":
                 raw = self.db.one("SELECT value_json,last_observed_at FROM item_fields WHERE item_id=? AND field='start_at'", (item["id"],)) if kind == "event_today" else None
                 field = {"value": json.loads(raw["value_json"]), "last_observed_at": raw["last_observed_at"]} if raw else None
