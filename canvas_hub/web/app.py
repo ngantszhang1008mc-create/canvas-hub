@@ -382,6 +382,39 @@ def create_app(api: HubAPI, *, token: str, port: int) -> FastAPI:
         b = await body(request)
         return api.delete_account_data(aid, b.get("confirm", ""))
 
+    # External adapter approval is user-only: no Agent tool enables or expands scope.
+    def external(aid):
+        api.hub.identity.get_account(aid)
+        return api.hub.external_sources
+
+    @app.get("/api/accounts/{aid}/external-sources")
+    def external_list(aid: int, course_id: str | None = None, item_id: int | None = None):
+        service = external(aid)
+        service.backfill(aid)
+        return {"sources": service.list(aid, course_id, item_id)}
+
+    @app.get("/api/accounts/{aid}/external-sources/{sid}")
+    def external_get(aid: int, sid: int):
+        return external(aid).get(aid, sid)
+
+    @app.post("/api/accounts/{aid}/external-sources/{sid}/analyze")
+    async def external_analyze(aid: int, sid: int, request: Request):
+        b = await body(request)
+        return external(aid).analyze(aid, sid, reanalyze=b.get("reanalyze") is True)
+
+    @app.post("/api/accounts/{aid}/external-sources/{sid}/decision")
+    async def external_decision(aid: int, sid: int, request: Request):
+        b = await body(request)
+        if b.get("approve") is True and (not isinstance(b.get("revision"), int) or not isinstance(b.get("spec_hash"), str)):
+            raise InvalidInput("Approval needs the exact displayed revision and hash")
+        if b.get("revision") is None and b.get("approve") is not True:
+            return external(aid).decline(aid, sid)
+        return await run_in_threadpool(lambda: external(aid).decide(aid, sid, b.get("revision"), b.get("spec_hash"), approve=b.get("approve") is True))
+
+    @app.post("/api/accounts/{aid}/external-sources/{sid}/refresh")
+    def external_refresh(aid: int, sid: int):
+        return external(aid).refresh(aid, sid)
+
     # ---- planner & external-site requests --------------------------------------------
     @app.get("/api/accounts/{aid}/planner/week")
     def planner_week(aid: int, week_of: str | None = None, suggest: bool = False, hours: float = 3.0):
