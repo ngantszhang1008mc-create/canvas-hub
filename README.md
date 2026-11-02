@@ -261,3 +261,24 @@ Code map:
 | `canvas_hub/testing/fake_canvas.py` | Synthetic Canvas for tests |
 
 Keep credentials, browser profiles, real course data and databases out of git; `.gitignore` covers the defaults.
+
+# File descriptor headroom
+
+On supported Unix systems, `canvas-hub serve` attempts to raise only its own
+soft open-file limit to 1024 (or the hard limit if lower). This modest headroom
+helps a service launched with a 256-descriptor limit; it does not fix leaks.
+`CANVAS_HUB_NOFILE` can select a target from 1 to 4096. Existing higher limits
+are never lowered. Unsupported platforms or permission failures continue with
+the current limit; startup logs report the effective limits when available.
+No system-wide settings are changed.
+
+Assistant runs default to four concurrent conversations; set
+`CANVAS_HUB_ASSISTANT_CONCURRENCY` to 1–16 to change this per process. Requests
+above the limit receive a busy response before a message is saved. Source
+analysis admits at most eight active or waiting analyses and four batches;
+at most two analyses call providers simultaneously.
+
+When storage is temporarily unavailable, completed-turn recovery information
+is kept in bounded memory and retried on access or normal shutdown. If storage
+remains unavailable until the process exits, unsaved partial text cannot
+survive the exit; on restart interrupted conversations are marked as errors.

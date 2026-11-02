@@ -47,6 +47,9 @@ def _hub(args):
 def cmd_serve(args):
     import uvicorn
 
+    from .resource_limits import configure_nofile
+    configure_nofile()
+
     from .boundary import HubAPI
     from .collector.browser import BrowserWorker
     from .collector.runner import JobRunner
@@ -79,6 +82,10 @@ def cmd_serve(args):
     finally:
         runner.stop()
         worker.stop()
+        try:
+            api.assistant.flush_recovery()
+        except Exception:  # Shutdown must proceed even if storage is unavailable.
+            logging.getLogger("canvas_hub.assistant").warning("Could not save pending assistant recovery data during shutdown")
         hub.close()
     return 0
 

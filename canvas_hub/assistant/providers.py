@@ -18,6 +18,7 @@ The callback may raise ``Stopped`` to end the request early.
 from __future__ import annotations
 
 import json
+from contextlib import closing
 import os
 from dataclasses import dataclass, field
 
@@ -62,6 +63,9 @@ def _neutral_assistant(msg: dict) -> tuple[str, list[dict]]:
 # --------------------------------------------------------------------- Anthropic
 class AnthropicProvider:
     name = "anthropic"
+
+    def close(self):
+        self.client.close()
 
     def __init__(self, cfg: dict):
         import anthropic
@@ -170,6 +174,9 @@ class AnthropicProvider:
 class OpenAICompatibleProvider:
     name = "openai_compatible"
 
+    def close(self):
+        self.client.close()
+
     def __init__(self, cfg: dict):
         import openai
         self._sdk = openai
@@ -215,31 +222,32 @@ class OpenAICompatibleProvider:
         """Stream a Chat Completions reply; returns (content, reasoning, calls, finish, model, usage)."""
         text, reasoning, calls = "", None, {}
         finish = model = usage = None
-        for chunk in self.client.chat.completions.create(**kwargs, stream=True):
-            model = getattr(chunk, "model", None) or model
-            usage = getattr(chunk, "usage", None) or usage
-            if not chunk.choices:
-                continue
-            ch = chunk.choices[0]
-            d = ch.delta
-            if d is not None:
-                if getattr(d, "content", None):
-                    text += d.content
-                    on_text(text)
-                rc = getattr(d, "reasoning_content", None)
-                if rc:
-                    reasoning = (reasoning or "") + rc
-                for tc in getattr(d, "tool_calls", None) or []:       # arrive in fragments, keyed by index
-                    slot = calls.setdefault(tc.index, {"id": None, "name": "", "arguments": ""})
-                    if tc.id:
-                        slot["id"] = tc.id
-                    fn = getattr(tc, "function", None)
-                    if fn is not None:
-                        if fn.name:
-                            slot["name"] = fn.name
-                        slot["arguments"] += fn.arguments or ""
-            if ch.finish_reason:
-                finish = ch.finish_reason
+        with closing(self.client.chat.completions.create(**kwargs, stream=True)) as stream:
+            for chunk in stream:
+                model = getattr(chunk, "model", None) or model
+                usage = getattr(chunk, "usage", None) or usage
+                if not chunk.choices:
+                    continue
+                ch = chunk.choices[0]
+                d = ch.delta
+                if d is not None:
+                    if getattr(d, "content", None):
+                        text += d.content
+                        on_text(text)
+                    rc = getattr(d, "reasoning_content", None)
+                    if rc:
+                        reasoning = (reasoning or "") + rc
+                    for tc in getattr(d, "tool_calls", None) or []:       # arrive in fragments, keyed by index
+                        slot = calls.setdefault(tc.index, {"id": None, "name": "", "arguments": ""})
+                        if tc.id:
+                            slot["id"] = tc.id
+                        fn = getattr(tc, "function", None)
+                        if fn is not None:
+                            if fn.name:
+                                slot["name"] = fn.name
+                            slot["arguments"] += fn.arguments or ""
+                if ch.finish_reason:
+                    finish = ch.finish_reason
         if finish is None:      # the connection ended mid-reply: never keep half an answer or run half a tool call
             raise ProviderError("The provider's reply was cut off before it finished. Try again.", retryable=True)
         return text, reasoning, [calls[i] for i in sorted(calls)], finish, model, usage

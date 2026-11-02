@@ -62,6 +62,65 @@ def test_codex_streams_and_preserves_early_notifications(fake_codex):
     assert requests["turn/start"]["effort"] == "high"
 
 
+@pytest.mark.skipif(not Path('/proc/self/fd').is_dir(), reason='requires Linux descriptor accounting')
+def test_repeated_codex_turns_reap_processes_and_release_descriptors(fake_codex):
+    setup, _ = fake_codex
+    setup(reply='OK')
+    before = len(os.listdir('/proc/self/fd'))
+    for _ in range(20):
+        provider = CodexProvider({})
+        try:
+            assert provider.complete('system', [{'role': 'user', 'sent_text': 'Question'}], []).text == 'OK'
+            server = provider.server
+        finally:
+            provider.close()
+        assert server.process.poll() is not None
+        assert not Path(server.workspace.name).exists()
+    assert len(os.listdir('/proc/self/fd')) <= before + 2
+
+
+def test_reader_start_failure_reaps_owned_process_and_workspace(fake_codex, monkeypatch):
+    from canvas_hub.assistant import codex
+    setup, _ = fake_codex
+    setup()
+    processes, workspaces = [], []
+    real = codex.popen_command
+    def launch(*args, **kwargs):
+        workspaces.append(Path(kwargs['cwd']))
+        process = real(*args, **kwargs)
+        processes.append(process)
+        return process
+    def fail(_thread):
+        raise RuntimeError('thread unavailable')
+    monkeypatch.setattr(codex, 'popen_command', launch)
+    monkeypatch.setattr(codex.threading.Thread, 'start', fail)
+    with pytest.raises(RuntimeError, match='thread unavailable'):
+        codex.AppServer()
+    assert processes[0].poll() is not None
+    assert not workspaces[0].exists()
+
+
+def test_codex_retry_uses_no_tools_and_no_duplicate_user_message(hub, account, fake_codex):
+    setup, messages = fake_codex
+    setup(turn_error=True)
+    svc = AssistantService(hub, HubAPI(hub))
+    svc.update_config({'preset': 'codex'})
+    cid = svc.send(account['id'], 'Question')['conversation_id']
+    svc.wait(cid, 10)
+    assert svc.get_conversation(account['id'], cid)['conversation']['run_state'] == 'error'
+    setup(reply='Continued')
+    svc.retry(account['id'], cid)
+    svc.wait(cid, 10)
+    conv = svc.get_conversation(account['id'], cid)
+    assert conv['conversation']['run_state'] == 'idle'
+    assert [m['role'] for m in conv['messages']].count('user') == 1
+    assert conv['messages'][-1]['text'] == 'Continued'
+    starts = [m['params'] for m in messages() if m.get('method') == 'thread/start']
+    assert starts[-1]['dynamicTools'] == []
+    turn = [m['params'] for m in messages() if m.get('method') == 'turn/start'][-1]
+    assert 'Tools are unavailable for this retry' in turn['input'][0]['text']
+
+
 def test_codex_uses_the_assistant_tool_loop_and_selected_account(hub, account, fixture_pkg, fake_codex):
     setup, messages = fake_codex
     hub.importer.import_package(fixture_pkg)

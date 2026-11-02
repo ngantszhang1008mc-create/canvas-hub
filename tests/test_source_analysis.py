@@ -20,6 +20,72 @@ RESULT = {'roles':['course_website','material'],'confidence':0.9,'summary':'Cour
           'adapter_spec': {'version':1,'pages':[URL],'format':'html'}}
 
 
+def test_analysis_admission_rejects_before_consuming_disclosure(hub, source, account):
+    api = HubAPI(hub)
+    api.assistant = AssistantService(hub, api)
+    api.assistant.update_config({'preset': 'codex'})
+    service = SourceAnalysis(api)
+    _, sid, _ = source
+    offer = service.disclosure(account['id'], sid)
+    for _ in range(8):
+        assert service._admission.acquire(blocking=False)
+    try:
+        with pytest.raises(Conflict) as exc:
+            service.start(account['id'], sid, offer['token'], consent=True)
+        assert exc.value.code == 'source_analysis_busy'
+        assert hub.db.one('SELECT state FROM source_analysis_attempts WHERE token=?', (offer['token'],))['state'] == 'offered'
+    finally:
+        for _ in range(8):
+            service._admission.release()
+    # Early validation errors also return the reservation.
+    with pytest.raises(InvalidInput):
+        service.start(account['id'], sid, offer['token'], consent=False)
+    for _ in range(8):
+        assert service._admission.acquire(blocking=False)
+    for _ in range(8):
+        service._admission.release()
+
+
+def test_waiting_analysis_cancels_without_waiting_for_provider_slot(hub, source, account):
+    api = HubAPI(hub)
+    api.assistant = AssistantService(hub, api)
+    api.assistant.update_config({'preset': 'codex'})
+    service = SourceAnalysis(api)
+    sources, sid, reads = source
+    offer = service.disclosure(account['id'], sid)
+    assert service._slots.acquire(blocking=False)
+    assert service._slots.acquire(blocking=False)
+    try:
+        service.start(account['id'], sid, offer['token'], consent=True)
+        thread = service.threads[offer['token']]
+        rid = sources.get(account['id'], sid)['analysis_request_id']
+        hub.requests.cancel(account['id'], rid)
+        thread.join(3)
+        assert not thread.is_alive()
+        assert not reads
+    finally:
+        service._slots.release()
+        service._slots.release()
+
+
+def test_batch_admission_preserves_offer_when_full(hub, source, account):
+    api = HubAPI(hub)
+    api.assistant = AssistantService(hub, api)
+    api.assistant.update_config({'preset': 'codex'})
+    service = SourceAnalysis(api)
+    offer = service.batch_disclosure(account['id'], course_id='4242')
+    for _ in range(4):
+        assert service._batch_admission.acquire(blocking=False)
+    try:
+        with pytest.raises(Conflict) as exc:
+            service.batch_start(account['id'], offer['token'], consent=True)
+        assert exc.value.code == 'source_analysis_busy'
+        assert hub.db.one('SELECT state FROM source_analysis_batches WHERE token=?', (offer['token'],))['state'] == 'offered'
+    finally:
+        for _ in range(4):
+            service._batch_admission.release()
+
+
 @pytest.mark.parametrize('batch', [False, True])
 def test_codex_analysis_cancel_closes_process_without_retry(hub, source, account, fake_codex, monkeypatch, batch):
     from pathlib import Path

@@ -1403,7 +1403,12 @@ function renderMessages(list, msgs, ctx = {}) {
 let assistantPoll = null;
 VIEWS.assistant = async (main, parts, params) => {
   clearInterval(assistantPoll);
-  const cfg = await api("/api/assistant/config");
+  let cfg, settingsUnavailable = false;
+  try { cfg = await api("/api/assistant/config"); }
+  catch (e) {
+    settingsUnavailable = true;
+    cfg = { configured: true, profiles: [], permissions: {} };
+  }
   const onSettings = parts[0] === "settings";
   if (onSettings || !cfg.configured) main.classList.remove("fill");       // only the chat itself fills the window
   main.classList.add("wide");          // both tabs span the window, so the heading, tabs and Focus never move
@@ -1418,6 +1423,10 @@ VIEWS.assistant = async (main, parts, params) => {
       icon("settings"), "Settings", cfg.profiles.length ? h("span", { class: "tab-count" }, String(cfg.profiles.length)) : null),
     h("span", { class: "grow" }), focusBtn);
   setChatFocus(store.get("chatFocus") === "1", [focusBtn]);
+  if (onSettings && settingsUnavailable) {
+    mount(main, head, tabs, h("div", { class: "banner bad" }, "Assistant settings are temporarily unavailable. Your data is retained. ", h("button", { onclick: () => route() }, "Retry")));
+    return;
+  }
   if (onSettings) return assistantSettingsView(main, head, tabs, cfg, params);
   if (!cfg.configured) {
     mount(main, head, tabs, empty("Set up the assistant first", "Add an API provider or connect your Codex CLI login. You can save several setups and switch between them.",
@@ -1502,9 +1511,10 @@ VIEWS.assistant = async (main, parts, params) => {
     } else typers.delete("live");
     const st = d.conversation.run_state;
     const busy = st === "running" || st === "cancelling";
-    sendBtn.disabled = busy; stopBtn.hidden = !busy;
+    sendBtn.disabled = busy || settingsUnavailable; stopBtn.hidden = !busy;
     mount(status, busy ? h("span", { class: "working" }, st === "cancelling" ? "Stopping…" : "Working…")
-      : st === "error" ? h("div", { class: "banner bad", style: "margin:0" }, h("div", { class: "b-body" }, h("div", { class: "b-title" }, "The assistant stopped"), h("div", { class: "small" }, d.conversation.run_error || ""))) : null);
+      : st === "error" ? h("div", { class: "banner bad", style: "margin:0" }, h("div", { class: "b-body" }, h("div", { class: "b-title" }, "The assistant stopped"), h("div", { class: "small" }, d.conversation.run_error || ""),
+        !settingsUnavailable ? h("div", null, h("button", { onclick: retry }, "Retry answer"), h("span", { class: "small" }, " Retry makes a new provider request with tools disabled. If more tools are needed, review previous results and send a new message.")) : null)) : null);
     const seq = all.length ? all[all.length - 1].seq : 0;
     scroller.scrollTop = atBottom && (seq !== lastSeq || stick || busy) ? scroller.scrollHeight : prevTop;
     lastSeq = seq; stick = false;
@@ -1513,6 +1523,7 @@ VIEWS.assistant = async (main, parts, params) => {
     if (!busy) clearInterval(assistantPoll);
   };
   const send = async (text) => {
+    if (settingsUnavailable) return;
     const t = (text ?? input.value).trim();
     if (!t) return;
     sendBtn.disabled = true;
@@ -1528,6 +1539,15 @@ VIEWS.assistant = async (main, parts, params) => {
     stick = true;
     clearInterval(assistantPoll);
     assistantPoll = setInterval(refresh, 400);   // often enough for the reply to flow while it is written
+    refresh();
+  };
+  const retry = async () => {
+    const r = await guard(() => api(A(`/assistant/conversations/${current}/retry`), { method: "POST", body: {
+      profile_id: setupSel.value || cfg.active_profile, reasoning: reasoningSel.hidden ? "" : reasoningSel.value,
+      model: modelSel.hidden ? "" : modelSel.value } }));
+    if (!r) return;
+    clearInterval(assistantPoll);
+    assistantPoll = setInterval(refresh, 400);
     refresh();
   };
   sendBtn.addEventListener("click", () => send());
@@ -1592,6 +1612,10 @@ VIEWS.assistant = async (main, parts, params) => {
       h("div", { class: "composer-bar" }, h("span", { class: "select-icon-wrap" }, icon("cube"), setupSel),
         h("span", { class: "select-icon-wrap" }, icon("brain"), modelSel),
         h("span", { class: "select-icon-wrap" }, icon("sliders"), reasoningSel), h("span", { class: "grow" }), stopBtn, sendBtn)), footer);
+  if (settingsUnavailable) {
+    input.disabled = true; sendBtn.disabled = true;
+    head.append(h("div", { class: "banner bad" }, "Assistant settings are temporarily unavailable. Your conversations remain available. ", h("button", { onclick: () => route() }, "Retry")));
+  }
   const layout = h("div", { class: "assistant-layout" }, sideList, chat);
   main.classList.add("fill");
   mount(main, head, tabs, layout);
