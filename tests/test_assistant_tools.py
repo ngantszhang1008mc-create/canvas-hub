@@ -8,7 +8,7 @@ import pytest
 from canvas_hub.assistant import AssistantService
 from canvas_hub.assistant.context import Policy, estimate, valid_groups
 from canvas_hub.assistant.providers import ToolCall, Turn
-from canvas_hub.assistant.tool_catalog import MAX_SCHEMA_TOKENS, ToolCatalog, ToolSession
+from canvas_hub.assistant.tool_catalog import MAX_ADVERTISED, ToolCatalog, ToolSession
 from canvas_hub.boundary import HubAPI
 from canvas_hub.util import InvalidInput
 
@@ -33,7 +33,8 @@ def test_catalog_selection_is_permission_filtered_bounded_and_stably_ordered():
     first = session.advertised()
     session.discover({"select": ["tool:read_context_source", "tool:show_artifact"]})
     assert first == session.advertised()
-    assert estimate(first) + len(first)*32 <= MAX_SCHEMA_TOKENS
+    assert len(first) <= MAX_ADVERTISED
+    assert read.public()['limits'] == {'max_advertised': 32, 'schema_tokens': None}
     with pytest.raises(InvalidInput, match="budget"):
         session.discover({"select": ["group:"+g["id"] for g in read.groups]})
     assert first == session.advertised()  # no partial selection on a budget error
@@ -220,13 +221,14 @@ def test_tool_picker_slash_keyboard_chips_and_mobile_bounds(hub, account, monkey
         page.screenshot(path=str(artifacts / f'assistant-tools-{width}.png'))
         field.click()
         expect(dialog).to_be_hidden()
-        field.fill("Explain this tracker")
+        field.fill("/list_context_sources /read_context_source /search_context_sources /get_coverage /wait_for_job /show_artifact Explain this tracker")
         page.get_by_role("button", name="Send", exact=True).click()
         expect(page.get_by_text("Ready", exact=True)).to_be_visible()
         assert "patch_component_state" in {t["name"] for t in requests[0]}
+        assert len(requests[0]) == 31 and estimate(requests[0]) + 32 * len(requests[0]) > 8000
         expect(page.locator(".assistant-tool-chip")).to_have_count(0)
         page.reload()
-        expect(page.get_by_text("Requested tools: /tracker", exact=True)).to_be_visible()
+        expect(page.get_by_text("Requested tools: /tracker", exact=False)).to_be_visible()
         assert page.locator("body").evaluate("el => el.scrollWidth <= innerWidth")
         browser.close()
     assert not errors

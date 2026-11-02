@@ -157,6 +157,25 @@ def test_opt_in_private_session_metadata_probe_and_destination_change(hub, gatew
             base_url(url, 'mock')
 
 
+def test_advertised_gateway_tool_and_wire_caps_still_reject_before_dispatch(hub, gateway, monkeypatch):
+    gateway.tools = ['list_components']
+    original = gateway.allowance
+    def limited():
+        value = original()
+        value['capabilities'].update(max_tools=1, max_body_bytes=4096)
+        return value
+    monkeypatch.setattr(gateway, 'allowance', limited)
+    service, pid = setup(HubAPI(hub), gateway)
+    provider = AllowanceGatewayProvider(service._load(pid))
+    with pytest.raises(GatewayError, match='reviewed gateway setup'):
+        provider.complete('Synthetic', [{'role': 'user', 'sent_text': 'Hello'}],
+                          [{'name': 'list_components'}, {'name': 'get_component_context'}])
+    with pytest.raises(GatewayError, match='message/body limit'):
+        provider.complete('Synthetic', [{'role': 'user', 'sent_text': 'x' * 5000}], [{'name': 'list_components'}])
+    assert not gateway.requests
+    assert not list((hub.paths.runtime / 'gateway-attempts').glob('*.json'))
+
+
 def test_real_assistant_guarded_tracker_tool_rounds_and_history(hub, account, gateway):
     aid = account['id']
     component = hub.components.create(aid, 'checklist', {'title': 'Synthetic tracker', 'sections': [

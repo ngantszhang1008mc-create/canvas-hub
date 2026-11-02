@@ -71,8 +71,11 @@ The server validates it before storing a message. A small default set plus
 search/page tool metadata and use `select` to replace discovered choices while
 retaining manual choices for the current run. Tool order follows fixed groups and
 names, independent of discovery order. Each discoverable set is capped at 32 schemas
-and 8,000 estimated schema tokens; excessive selections fail visibly and
-atomically. These are schema bounds, not a new step limit. Discovery can switch
+per request; excessive tool counts fail visibly and atomically. Complete schemas
+share the actual context budget with system text, history and source content;
+the server checks the whole request before each provider dispatch, including
+configured capacity, output reserve and headroom. There is no separate fixed
+8,000-token schema slice. This does not add a step limit. Discovery can switch
 tools later, so absent schemas do not mean a capability is unavailable.
 Selecting tools returns a compact acknowledgement unless catalog search/paging
 was also requested. Codex receives only schemas not already supplied in the same
