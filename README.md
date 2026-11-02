@@ -35,19 +35,35 @@ folder; keep the whole folder together and do not run launchers inside the ZIP.
 
 Install [uv](https://docs.astral.sh/uv/), which obtains a suitable Python when needed.
 
+For a fresh installation, these commands use a new folder in your home directory.
 On macOS:
 
 ```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
+(
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+  source "$HOME/.local/bin/env" &&
+  install_dir="$(mktemp -d "$HOME/canvas-hub-install.XXXXXX")" &&
+  curl -fL https://github.com/ngantszhang1008mc-create/canvas-hub/archive/refs/heads/main.zip -o "$install_dir/canvas-hub.zip" &&
+  unzip -q "$install_dir/canvas-hub.zip" -d "$install_dir" &&
+  cd "$install_dir/canvas-hub-main" &&
+  bash scripts/start-canvas-hub.command
+)
 ```
 
 On Windows, in PowerShell:
 
 ```powershell
 powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+$env:Path = "$env:USERPROFILE\.local\bin;$env:Path"
+$installDir = Join-Path $HOME ("canvas-hub-install-" + [guid]::NewGuid().ToString("N"))
+New-Item -ItemType Directory -Path $installDir -ErrorAction Stop | Out-Null
+Invoke-WebRequest -Uri "https://github.com/ngantszhang1008mc-create/canvas-hub/archive/refs/heads/main.zip" -OutFile "$installDir\canvas-hub.zip" -ErrorAction Stop
+Expand-Archive -Path "$installDir\canvas-hub.zip" -DestinationPath $installDir -ErrorAction Stop
+Set-Location "$installDir\canvas-hub-main" -ErrorAction Stop
+& .\scripts\start-canvas-hub.cmd
 ```
 
-After installing uv, reopen Terminal/PowerShell to refresh PATH. In the extracted
+If using the manual ZIP route, reopen Terminal/PowerShell after installing uv to refresh PATH. In the extracted
 `canvas-hub-main` folder, double-click the launcher for your computer:
 
 - macOS: `scripts/start-canvas-hub.command`
