@@ -1520,11 +1520,15 @@ VIEWS.assistant = async (main, parts, params) => {
     sendBtn.disabled = busy || settingsUnavailable; stopBtn.hidden = !busy;
     compactBtn.disabled = busy || settingsUnavailable;
     const cx = d.context || {}, cost = cx.summary_usage || {}, total = cx.total_usage || {};
+    const reportedTokens = (usage, key) => {
+      const missing = (usage.missing_fields || {})[key] || 0;
+      return missing && missing === usage.requests ? "unreported" : `${usage[key] ?? 0}${missing ? " (partial)" : ""}`;
+    };
     const budget = cx.budget;
     mount(contextInfo,
       h("p", null, cx.compacted_through ? (cx.stale ? "Saved summary is stale after data changes; original context will be used." : `Older turns compacted through message ${cx.compacted_through}.`) : "Using original conversation context."),
-      h("p", null, `${cx.summary_requests || 0} summary requests · reported summary tokens: ${cost.input_tokens || 0} in / ${cost.output_tokens || 0} out. Recorded response and summary tokens: ${total.input_tokens || 0} in / ${total.output_tokens || 0} out; cache read ${total.cache_read_input_tokens || 0}, cache write ${total.cache_creation_input_tokens || 0}.${total.unreported_requests ? ` Usage unavailable or incomplete for ${total.unreported_requests} recorded request(s); these are not counted as zero cost.` : ""}`),
-      h("p", null, "Answer requests that failed or were stopped before a response was saved are not included and may have used quota."),
+      h("p", null, `${cx.summary_requests || 0} summary requests · reported summary tokens: ${reportedTokens(cost, "input_tokens")} in / ${reportedTokens(cost, "output_tokens")} out. Total reported tokens: ${reportedTokens(total, "input_tokens")} in / ${reportedTokens(total, "output_tokens")} out; included cache read ${reportedTokens(total, "cache_read_input_tokens")}, cache write ${reportedTokens(total, "cache_creation_input_tokens")}; included reasoning ${reportedTokens(total, "reasoning_output_tokens")}.${total.unreported_requests ? ` Usage unavailable or incomplete for ${total.unreported_requests} request(s); these are not counted as zero cost.` : ""} Local telemetry does not determine free allowance or billed cost.`),
+      h("p", null, "Usage from earlier interrupted requests may be absent from these totals."),
       budget ? h("p", null, `Last request estimate: ${budget.estimated_tokens} input tokens; ${budget.response_reserved} reserved for output/reasoning. Safety budget: ${budget.capacity} (${budget.capacity_source}).`) : null,
       d.conversation.context_notice ? h("p", null, d.conversation.context_notice) : null);
     mount(status, busy ? h("span", { class: "working" }, st === "cancelling" ? "Stopping…" : "Working…")

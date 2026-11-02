@@ -46,7 +46,9 @@ def test_codex_streams_and_preserves_early_notifications(fake_codex):
     try:
         turn = provider.complete("Canvas Hub instructions", [{"role": "user", "sent_text": "Question"}], [], chunks.append)
         assert turn.text == "Early text\n\nA streamed Codex answer"
-        assert turn.model == "codex-test-model" and turn.usage == {"input_tokens": 12, "output_tokens": 8}
+        assert turn.model == "codex-test-model"
+        assert turn.usage["input_tokens"] == 12 and turn.usage["output_tokens"] == 8
+        assert turn.usage["status"] == "reported" and turn.usage["reasoning_output_tokens"] is None
         assert any("strea" in text for text in chunks)
         assert turn.raw == {"provider": "codex"}
         workspace = provider.server.workspace.name

@@ -794,7 +794,7 @@ class AssistantService(ContextService, GatewaySettings):
                         cid, account_id, cfg, system, transcript, tools, make_provider,
                         allow_compact=not compact_attempted, provider_pending=bool(getattr(provider, "pending", None)))
                     compact_attempted = compact_attempted or attempted
-                    turn = provider.complete(system, transcript, tools, on_text=on_text)
+                    turn, usage_request_id = self._complete_with_usage(cid, cfg, provider, system, transcript, tools, on_text)
                 except Stopped:
                     with self._live_lock:       # keep what was already written, as the answer so far
                         partial = self._live.pop(cid, "")
@@ -805,6 +805,7 @@ class AssistantService(ContextService, GatewaySettings):
                 with self._live_lock:
                     self._append(cid, "assistant", {
                         "text": turn.text, "stop": turn.stop, "model": turn.model, "usage": turn.usage, "raw": turn.raw,
+                        "usage_request_id": usage_request_id,
                         "tool_calls": [{"id": c.id, "name": c.name, "input": c.input, "input_error": c.input_error}
                                        for c in turn.tool_calls]})
                     self._live.pop(cid, None)
