@@ -1,6 +1,6 @@
-# Local integration v2 — not published or installed
+# Integration v2 — validated test branch, no deployment
 
-This local integration combines the original `eff9eb578869fc475722215c17651486a9cef096`
+The `codex/integration-study-hub-v2` test branch combines the original `eff9eb578869fc475722215c17651486a9cef096`
 test baseline with these exact public feature commits:
 
 | Feature | Commit | Tree |
@@ -32,12 +32,13 @@ alongside built-in batches, supplemental source/widget refresh, search, manual
 state, account isolation and independent cancellation. Real-browser cross-feature
 tests run at 1280px and touch 380px using local pages and fake providers.
 
-**The locally verified tree includes these additional fixes.** Merging only the
-two public feature refs does not reproduce it. The parent must choose an authorized
-way to deliver the local integration fix patch (or publish an approved integration
-ref) before upgrading a user's installation. Compare the delivered patch SHA-256
-and final tree with the separate handoff manifest. Never substitute a newer moving
-feature head for a pinned, tested commit.
+**The verified tree includes these additional fixes.** Merging only the two
+feature refs does not reproduce it. The user approved publishing the integration
+test branch to the same repository after local validation, followed by exact-head
+push CI. Use the final SHA/tree and completed CI recorded in the handoff, not a
+moving feature head. No GitHub PR merge, main update or deployment is authorized
+by that branch publication. The patch-based reproduction below is optional; the
+published integration branch already includes the fixes.
 
 ## Reproduce the code without touching a running test installation
 
@@ -71,8 +72,8 @@ explicitly authorized the test checkout to use that original data home. It is
 **shared existing data, not a disposable preview home**. The previously considered
 `CanvasHub-Test-eff9eb5` directory is not the selected data home. Recheck the process,
 home and checkout immediately before the desktop upgrade; a verified backup and
-matching rollback remain mandatory. Publication of the integration branch is a
-separate approval step; do not install a moving or unvalidated ref.
+matching rollback remain mandatory. Publication of the integration test branch has been approved; wait for the
+final exact-head local/CI results before installing it.
 
 1. Record the verified checkout, original commit/branch, test home, port and how
    its server is supervised. Do not copy a launch URL token, API key or cookies
@@ -125,9 +126,11 @@ backup. Keep the snapshot outside the home being upgraded. Confirm the original
 code commit remains available for rollback. The snapshot contains secrets and
 must remain private; verification prints no account content or setting values.
 
-4. With a clean working tree, update the **existing test checkout** to the exact
-   approved local/published integration commit using `git merge --ff-only
-   <verified-integration-commit>`. The old `eff9eb5` baseline is an ancestor. If
+4. With a clean working tree, fetch `git fetch origin
+   codex/integration-study-hub-v2` in the **existing test checkout**. Compare
+   `git rev-parse FETCH_HEAD` and `git rev-parse FETCH_HEAD^{tree}` with the final
+   handoff, then use `git merge --ff-only FETCH_HEAD`. The old `eff9eb5` baseline
+   is an ancestor. If
    fast-forward is refused, stop and reconcile history without discarding local
    work. Do not silently substitute `main` or a moving feature branch. Run
    `uv sync --locked --python 3.13` in that checkout.
