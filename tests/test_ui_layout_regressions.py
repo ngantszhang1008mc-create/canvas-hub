@@ -1,6 +1,7 @@
 """Synthetic browser regressions for tracker bounds, dates, links and launchers."""
 
 import copy
+import json
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -32,24 +33,37 @@ def layout_examples(hub, account, fixture_pkg):
     course["fields"]["title"] = course["title"]
     hub.importer.import_package(package)
     aid = account["id"]
-    score = hub.components.create(aid, "score_model", {
-        "title": "Synthetic score tracker", "threshold": 80,
+    # Insert the original persisted schema directly, without today's create /
+    # normalize path. Existing scores, manual values and checks must survive a
+    # layout upgrade without rewriting any saved component data.
+    score_spec = {
+        "title": "Synthetic score tracker", "threshold": 80, "unit_label": "pts", "scenarios": [],
         "buckets": [
-            {"id": f"line-{n}", "label": f"Activity {n:02}", "max": 10, "status": "pending",
+            {"id": f"line-{n}", "label": f"Activity {n:02}", "max": 10, "earned": None, "status": "pending",
+             "gating": "none", "min_value": None, "unit": "points", "full_at": None,
              "due": (now - timedelta(hours=22) if n == 0 else now + timedelta(days=n + 1)).isoformat(),
              "note": "Synthetic notes for scrolling and score controls."}
             for n in range(18)
         ],
-    }, course_id="4242")
-    checklist = hub.components.create(aid, "checklist", {
-        "title": "Synthetic checklist", "sections": [{"id": "steps", "title": "Steps", "rows": [
+    }
+    checklist_spec = {
+        "title": "Synthetic checklist", "sync_todos": False, "sections": [{"id": "steps", "title": "Steps", "rows": [
             {"id": f"step-{n}", "label": f"Synthetic step {n:02}", "due": (now - timedelta(days=2)).isoformat()}
             for n in range(24)
         ]}],
-    })
-    for component in (score, checklist):
-        hub.components.pin(aid, component["id"], True)
-        hub.widgets.save(aid, f"component:{component['id']}", {"mode": "pinned"}, expected_version=0)
+    }
+    ids = []
+    with hub.db.tx() as connection:
+        for kind, spec, state in (
+            ("score_model", score_spec, {"include": {"line-3": False}, "values": {"line-2": 4.5}, "scenario": None}),
+            ("checklist", checklist_spec, {"done": {"step-1": True}, "links": {}, "collapsed": {}}),
+        ):
+            ids.append(connection.execute("""INSERT INTO components
+                (account_id,kind,title,spec_json,state_json,version,pinned,created_by,created_at,updated_at)
+                VALUES (?,?,?,?,?,7,1,'assistant','2026-10-01T00:00:00Z','2026-10-01T00:00:00Z')""",
+                (aid, kind, spec["title"], json.dumps(spec), json.dumps(state))).lastrowid)
+    for component_id in ids:
+        hub.widgets.save(aid, f"component:{component_id}", {"mode": "pinned"}, expected_version=0)
     urls = ["https://study.example.edu/short", "https://study.example.edu/" + "long-path-segment" * 20,
             "https://study.example.edu/materials?chapter=" + "synthetic" * 25]
     for url in urls:
@@ -61,7 +75,7 @@ def layout_examples(hub, account, fixture_pkg):
             "roles": ["material"], "confidence": 1, "evidence_url": url, "read_at": now_iso(),
             "summary": "Synthetic cached link", "content": "Synthetic content; no remote page was read.",
         })
-    return {"aid": aid, "score": score["id"], "checklist": checklist["id"]}
+    return {"aid": aid, "score": ids[0], "checklist": ids[1]}
 
 
 def screenshot(page, tmp_path, name):
@@ -78,9 +92,13 @@ def assert_no_horizontal_overflow(page):
     """)
 
 
-@pytest.mark.parametrize("theme,width", [("light", 1440), ("dark", 390)], ids=["desktop-light", "phone-dark"])
+@pytest.mark.parametrize("theme,width", [("light", 1120), ("dark", 390)], ids=["desktop-light", "phone-dark"])
 def test_tracker_resize_internal_scroll_and_saved_controls(hub, layout_examples, theme, width, tmp_path):
     data = layout_examples
+    def saved_data():
+        return [tuple(row) for row in hub.db.query(
+            "SELECT spec_json,state_json,version FROM components WHERE account_id=? ORDER BY id", (data["aid"],))]
+    original_data = saved_data()
     with serve(hub, []) as (base, token, _), sync_playwright() as p:
         browser = p.chromium.launch()
         page = browser.new_page(viewport={"width": width, "height": 960})
@@ -92,17 +110,38 @@ def test_tracker_resize_internal_scroll_and_saved_controls(hub, layout_examples,
         content = score.locator(".cmp-resizable-content")
         expect(content).to_be_visible()
         original_height = content.bounding_box()["height"]
-        # The default fits the contents, rather than an arbitrary viewport cap.
-        assert original_height > 650
-        assert score.locator(".sl-main").evaluate("el => el.scrollHeight <= el.clientHeight + 2")
+        # Legacy components are bounded immediately, before the first resize.
+        assert 180 < original_height < 800
+        scroll = score.locator(".sl-main")
+        assert scroll.evaluate("el => el.scrollHeight > el.clientHeight + 20")
         assert score.locator(".sl-side").evaluate("el => getComputedStyle(el).position") not in ("sticky", "fixed")
+        expect(score.get_by_label("Points for Activity 02", exact=True)).to_have_value("4.5")
+        expect(score.get_by_label("Include Activity 03", exact=True)).not_to_be_checked()
+        if width == 1120:
+            side_box, main_box = score.locator(".sl-side").bounding_box(), scroll.bounding_box()
+            assert side_box["x"] + side_box["width"] < main_box["x"]
+        else:
+            assert scroll.bounding_box()["y"] > score.locator(".sl-side").bounding_box()["y"]
+        side_before = score.locator(".sl-side").bounding_box()["y"]
+        viewport_before = page.evaluate("scrollY")
+        scroll.evaluate("el => el.scrollTop = 150")
+        assert scroll.evaluate("el => el.scrollTop") > 0
+        assert abs(score.locator(".sl-side").bounding_box()["y"] - side_before) < 1
+        assert page.evaluate("scrollY") == viewport_before
+        checklist = page.locator(".cmp-checklist")
+        expect(checklist.get_by_role("checkbox", name="Synthetic step 01", exact=True)).to_be_checked()
+        check_scroll = checklist.locator(".cl-main")
+        header_y = checklist.locator(".cl-top").bounding_box()["y"]
+        check_scroll.evaluate("el => el.scrollTop = 100")
+        assert check_scroll.evaluate("el => el.scrollTop") > 0
+        assert checklist.locator(".cl-top").bounding_box()["y"] == header_y
         resize = score.get_by_role("separator", name="Resize Synthetic score tracker tracker", exact=True)
         resize.focus()
         for _ in range(40):
             page.keyboard.press("ArrowUp")
         compact_height = content.bounding_box()["height"]
         assert compact_height < original_height - 100
-        if width == 1440:
+        if width == 1120:
             resize.scroll_into_view_if_needed()
             grip = resize.bounding_box()
             page.mouse.move(grip["x"] + grip["width"] / 2, grip["y"] + grip["height"] / 2)
@@ -111,18 +150,18 @@ def test_tracker_resize_internal_scroll_and_saved_controls(hub, layout_examples,
             page.mouse.up()
             assert abs(content.bounding_box()["height"] - compact_height - 40) < 2
             compact_height = content.bounding_box()["height"]
-        scroll = score.locator(".sl-main")
         assert scroll.evaluate("el => el.scrollHeight > el.clientHeight + 20")
         scroll.evaluate("el => el.scrollTop = 150")
         before_scroll = scroll.evaluate("el => el.scrollTop")
         assert before_scroll > 0
-        if width == 1440:
+        if width == 1120:
             score.scroll_into_view_if_needed()
             side_before = score.locator(".sl-side").bounding_box()["y"]
             viewport_before = page.evaluate("scrollY")
             scroll.evaluate("el => el.scrollTop += 120")
             assert abs(score.locator(".sl-side").bounding_box()["y"] - side_before) < 1
             assert page.evaluate("scrollY") == viewport_before
+        assert saved_data() == original_data
         slider = score.get_by_label("Points for Activity 04 (slider)", exact=True)
         slider.focus()
         page.keyboard.press("ArrowLeft")
@@ -133,20 +172,24 @@ def test_tracker_resize_internal_scroll_and_saved_controls(hub, layout_examples,
         assert abs(content.bounding_box()["height"] - compact_height) < 2
         score.get_by_label("Include Activity 05", exact=True).uncheck()
         expect(score.locator(".save-state")).to_contain_text("Saved")
-        checklist = page.locator(".cmp-checklist")
         checklist.get_by_role("checkbox", name="Synthetic step 00", exact=True).check()
         expect(checklist.locator(".save-state")).to_contain_text("Saved")
         page.reload()
         expect(score.get_by_label("Points for Activity 04", exact=True)).to_have_value("9")
         expect(score.get_by_label("Include Activity 05", exact=True)).not_to_be_checked()
         expect(checklist.get_by_role("checkbox", name="Synthetic step 00", exact=True)).to_be_checked()
+        expect(checklist.get_by_role("checkbox", name="Synthetic step 01", exact=True)).to_be_checked()
+        expect(score.get_by_label("Points for Activity 02", exact=True)).to_have_value("4.5")
+        expect(score.get_by_label("Include Activity 03", exact=True)).not_to_be_checked()
         assert abs(content.bounding_box()["height"] - compact_height) < 2
         score.evaluate("el => el.scrollIntoView({block: 'start'})")
         screenshot(page, tmp_path, f"tracker-{theme}-{width}.png")
         resize.focus()
         page.keyboard.press("Home")
         assert content.bounding_box()["height"] > compact_height + 100
-        assert score.locator(".sl-main").evaluate("el => el.scrollHeight <= el.clientHeight + 2")
+        assert content.bounding_box()["height"] < 800
+        assert scroll.evaluate("el => el.scrollHeight > el.clientHeight + 20")
+        expect(resize).to_have_attribute("aria-valuetext", f"Auto height, {round(content.bounding_box()['height'])} pixels")
         assert_no_horizontal_overflow(page)
         assert hub.components.get(data["aid"], data["score"])["state"]["values"]["line-4"] == 9
         assert not errors, errors
