@@ -125,6 +125,8 @@ class BrowserConnection:
         self._verify_mode = False
         self._review_token = None
         self._review_deadline = 0
+        self._verified_digest = None
+        self._confirmed_digest = None
         self.thread = threading.Thread(target=self._run, daemon=True, name='external-site-login')
         self.thread.start()
 
@@ -260,6 +262,7 @@ class BrowserConnection:
                             future.set_result(self._verify(page))
                         elif action == 'retry_login':
                             self._review_token = None
+                            self._confirmed_digest = None
                             self.update(state='login_open')
                             try: page.goto(self.target, wait_until='domcontentloaded', timeout=15000)
                             except Exception: pass
@@ -269,8 +272,21 @@ class BrowserConnection:
                                 self._review_token = None
                                 raise Conflict('Review the requested page again before confirming')
                             self._review_token = None
+                            self._confirmed_digest = self._verified_digest
                             self.update(state='connected')
                             future.set_result({'state':'connected'})
+                        elif action == 'analysis_snapshot':
+                            expected = self._confirmed_digest
+                            if not expected or self.snapshot()['state'] != 'connected':
+                                raise Conflict('Confirm the requested course page first')
+                            result = self._verify(page)
+                            if result.get('state') != 'content_visible' or self._verified_digest != expected:
+                                self._confirmed_digest = None
+                                raise Conflict('The page changed or access expired; inspect and confirm it again')
+                            self._review_token = None
+                            self._confirmed_digest = expected
+                            self.update(state='connected')
+                            future.set_result({'content':result['content']})
                         else:
                             raise InvalidInput('Unknown action')
                     except Exception as exc:
@@ -284,6 +300,7 @@ class BrowserConnection:
     def _verify(self, page):
         cdp = None
         self._review_token = None
+        self._verified_digest = None
         try:
             # Verification is a single GET to the already approved source. No
             # page scripts, subresources, redirects or form submissions run.
@@ -300,9 +317,19 @@ class BrowserConnection:
             evidence = page.evaluate('''() => {
                 const area = document.querySelector('main,article');
                 if (!area) return {form:!!document.querySelector('input[type=password],form[action*="login" i]'), chooser:false, text:''};
-                const clone = area.cloneNode(true);
-                clone.querySelectorAll('form,input,textarea,select,script,style,iframe,object').forEach(e=>e.remove());
-                const text = (clone.innerText || clone.textContent || '').trim().slice(0,200000);
+                const walker = document.createTreeWalker(area,NodeFilter.SHOW_TEXT);
+                let text='', count=0, node;
+                while ((node=walker.nextNode()) && count++ < 5000 && text.length < 200000) {
+                  const el=node.parentElement;
+                  if (!el || el.closest('form,input,textarea,select,script,style,iframe,object,noscript,[hidden],[aria-hidden="true"]')) continue;
+                  let visible=true;
+                  for(let p=el; p && p!==area.parentElement; p=p.parentElement){
+                    const style=getComputedStyle(p);
+                    if(style.display==='none'||style.visibility==='hidden'||style.opacity==='0'){visible=false;break;}
+                  }
+                  if(visible) text += node.nodeValue + '\\n';
+                }
+                text=text.trim().slice(0,200000);
                 const form = !!document.querySelector('input[type=password],form[action*="login" i]');
                 const chooser = /join classes|add another class/i.test(document.body?.innerText || '') && /log[ -]?in|sign[ -]?in/i.test(document.body?.innerText || '');
                 return {form, chooser, text};
@@ -315,6 +342,7 @@ class BrowserConnection:
                 self.update(state=state)
                 return {'state':state}
             self.update(state='content_visible')
+            self._verified_digest = hashlib.sha256(evidence['text'].encode()).hexdigest()
             self._review_token = secrets.token_urlsafe(24)
             self._review_deadline = time.monotonic() + 300
             # Text is returned only to the local UI, never to an Assistant.
@@ -413,9 +441,12 @@ class SiteConnections:
         session = self._session(aid, sid)
         if session is None or session.snapshot()['state'] in ('closed', 'error'):
             raise Conflict('Open the site connection first')
-        if action not in ('cancel', 'verify', 'approve_post', 'retry_login', 'confirm_content'):
+        if action not in ('cancel', 'verify', 'approve_post', 'retry_login', 'confirm_content', 'analysis_snapshot'):
             raise InvalidInput('Unknown connection action')
-        return session.call(action, arg)
+        result = session.call(action, arg)
+        if action == 'analysis_snapshot':
+            return {**result, 'url':session.target, 'owner':session._owner_hash}
+        return result
 
     def close(self):
         with self.lock:

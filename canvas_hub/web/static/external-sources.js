@@ -100,6 +100,14 @@ export function makeExternalSources(env) {
             if(state.blocked_submission_origin)connectBox.append(note(`A submission to ${state.blocked_submission_origin} was blocked because its purpose could not be verified. This sign-in flow may not be supported.`));
             if(state.pending_post)connectBox.append(note(`A sign-in submission to ${state.pending_post.origin} is waiting for approval. Approve once, then submit again in the site window.`),
               button('Approve one sign-in submission',async()=>{await api(cp+'/approve_post',{method:'POST',body:{request:state.pending_post}});if(alive())await connectionPanel();}));
+            if(state.state==='connected')connectBox.append(button('Review connected source analysis',async()=>{
+              const offer=await api(aidPath+'/connected-disclosure',{method:'POST',body:{}}); if(!alive())return;
+              if(!offer.available){mount(output,note(offer.message));return;}
+              mount(output,note(`The exact text below and the website origin will be sent to ${offer.setup||offer.provider} (${offer.endpoint}), model ${offer.model}; this may use your quota. The reviewed text and classification will be saved locally and included in data backups.`),
+                note('Forms, common credential patterns, links and email addresses are removed automatically, but no filter can recognize every secret. Review the entire text and do not approve if it contains credentials, tokens, or information you do not want sent.'),
+                h('details',{open:true},h('summary',null,'Exact text to send and save'),h('pre',{class:'text'},offer.content)),
+                button('Approve, analyse and save',()=>action('/analyze-connected',{token:offer.token,consent:true})));
+            }));
             connectBox.append(button('Refresh connection status',connectionPanel),
               button('Reopen sign-in page',async()=>{await api(cp+'/retry_login',{method:'POST',body:{}});if(alive())await connectionPanel();}),
               button('Check requested page',async()=>{

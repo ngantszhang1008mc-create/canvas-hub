@@ -284,3 +284,49 @@ def test_site_connection_requires_review_and_consent_in_browser(hub, account, so
         expect(box).to_contain_text('Connection: closed')
         assert not errors
         browser.close()
+
+
+def test_connected_page_review_analysis_and_saved_source(hub, account, source, monkeypatch):
+    from playwright.sync_api import expect, sync_playwright
+    from canvas_hub.assistant.providers import Turn
+    from .test_site_connection import FakeBrowser
+    from .test_connected_analysis import COURSE
+    calls=[]
+    class Browser(FakeBrowser):
+        def __init__(self,*args): super().__init__(*args); self.state='login_open'
+        def call(self,action,arg=None,**kwargs):
+            if action=='verify': self.state='content_visible'; return {'state':self.state,'content':COURSE,'review_token':'fixture-review'}
+            if action=='confirm_content': self.state='connected'; return {'state':self.state}
+            if action=='analysis_snapshot': return {'content':COURSE}
+            return super().call(action,arg,**kwargs)
+    class Provider:
+        def complete(self,system,transcript,tools):
+            calls.append(transcript)
+            return Turn(json.dumps({'roles':['material'],'confidence':0.8,'summary':'fixture'}))
+    monkeypatch.setattr('canvas_hub.services.site_connection.BrowserConnection',Browser)
+    monkeypatch.setattr('canvas_hub.services.source_analysis.make_provider',lambda cfg:Provider())
+    svc,sid,_=source; aid=account['id']
+    with serve(hub,[]) as (base,token,_),sync_playwright() as p:
+        browser=p.chromium.launch();page=browser.new_page();errors=[]
+        page.on('pageerror',lambda e:errors.append(str(e)))
+        page.goto(f'{base}/?token={token}');page.goto(f'{base}/#/course/4242')
+        listing=page.locator('.external-source-list')
+        listing.get_by_role('button',name='Workspace actions',exact=True).click()
+        listing.locator('.workspace-action-icon[aria-label="Analyse link"]').click()
+        panel=page.get_by_role('complementary',name='Source Agent',exact=True)
+        box=panel.get_by_role('region',name='Site connection')
+        box.get_by_role('button',name='Review connection').click()
+        box.get_by_role('button',name='Agree and open sign-in window').click()
+        expect(box).to_contain_text('Connection: login open')
+        box.get_by_role('button',name='Check requested page').click()
+        box.get_by_role('button',name='Confirm this is the requested course page').click()
+        expect(box).to_contain_text('Connection: connected')
+        box.get_by_role('button',name='Review connected source analysis').click()
+        expect(box).to_contain_text('Exact text to send and save')
+        assert 'NeverSendThis' not in box.locator('pre').inner_text() and not calls
+        box.get_by_role('button',name='Approve, analyse and save').click()
+        expect(panel).to_contain_text('Stored observations',timeout=15000)
+        assert len(calls)==1 and 'NeverSendThis' not in json.dumps(calls)
+        assert svc.get(aid,sid)['classification']['access_mode']=='connected_local_reviewed'
+        assert svc.get(aid,sid)['records'] and not errors
+        browser.close()

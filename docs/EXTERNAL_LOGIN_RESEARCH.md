@@ -21,11 +21,21 @@ exact source URL with page scripts, subresources and redirects disabled. It
 shows bounded text only in the local UI. A user must confirm it is the requested
 course page; a generic sign-in or enrollment chooser is not proof of course
 access. Failure or expiry does not alter saved source data or tracker state.
-The current slice does **not** send authenticated page content to the Assistant,
-create adapters from it, save it to the tracker, or automatically refresh it.
-The existing Analyze link workflow remains public-only. A separate explicit
-consent and data-review design would be needed before using a model on
-potentially private authenticated page text.
+After confirmation, a separate action re-reads the exact page and presents the
+cleaned text, configured provider and model for explicit review. Approval
+rechecks that access and the text remain unchanged before one model request.
+The source origin and reviewed text are sent; credentials, browser cookies and
+profiles are not supplied to the model. Common credential patterns, links and
+email addresses are removed, but no automatic filter can recognize every
+secret: users must review the entire exact text before approving. On success a
+sanitized snapshot and classification are saved with connected-site provenance.
+The snapshot can be selected as a tracker review source; changes require the
+existing user review and do not automatically change grading rules or manual
+state. Snapshots are local course data and are included in data backups.
+
+No public adapter is created for an authenticated snapshot and no authenticated
+background crawling is enabled. The existing public Analyze link flow remains
+separate. Every connected-page analysis requires a fresh explicit approval.
 
 Limitations requiring real-world validation include multi-cookie and SSO flows,
 login POST paths not recognized by the conservative policy, sites requiring a

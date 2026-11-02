@@ -465,7 +465,19 @@ def create_app(api: HubAPI, *, token: str, port: int) -> FastAPI:
     @app.post("/api/accounts/{aid}/external-sources/{sid}/site-connection/{action}")
     async def site_connection_action(aid: int, sid: int, action: str, request: Request):
         b = await body(request)
+        if action == 'analysis_snapshot':
+            raise InvalidInput('Use the connected source review flow')
         return await run_in_threadpool(lambda: site_connections.action(aid, sid, action, b.get('request')))
+
+    @app.post("/api/accounts/{aid}/external-sources/{sid}/connected-disclosure")
+    def connected_disclosure(aid: int, sid: int):
+        return source_analysis.connected_disclosure(aid, sid, site_connections)
+
+    @app.post("/api/accounts/{aid}/external-sources/{sid}/analyze-connected")
+    async def analyze_connected(aid: int, sid: int, request: Request):
+        b = await body(request)
+        return source_analysis.start(aid, sid, b.get('token'), consent=b.get('consent') is True,
+                                     reanalyze=True, connected=True)
 
     @app.post("/api/accounts/{aid}/external-sources/{sid}/analyze")
     async def external_analyze(aid: int, sid: int, request: Request):

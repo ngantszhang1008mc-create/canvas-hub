@@ -6,6 +6,7 @@ Approval and publication are revision/hash checked under SQLite transactions.
 from __future__ import annotations
 
 import json
+import html
 import threading
 import uuid
 from urllib.parse import urlsplit
@@ -193,19 +194,21 @@ class ExternalSources:
             self.db.conn.execute('UPDATE external_sources SET analysis_request_id=?,error=NULL WHERE id=?', (req['id'], sid))
         return self.get(aid, sid)
 
-    def submit_analysis(self, aid, request_id, agent_name, result, *, _builtin=False, _attempt_token=None, _reader_failure=None):
+    def submit_analysis(self, aid, request_id, agent_name, result, *, _builtin=False, _attempt_token=None, _reader_failure=None, _connected=False):
         if _check_agent(agent_name) == 'Canvas Hub built-in Assistant' and not _builtin:
             raise Conflict('Built-in analysis cannot be submitted by a connected Agent')
         if _reader_failure is not None and (not _builtin or _reader_failure not in ('needs_login', 'needs_attention', 'stale')):
             raise InvalidInput('Invalid reader failure')
-        source = self._submit_analysis(aid, request_id, agent_name, result, _attempt_token=_attempt_token, _reader_failure=_reader_failure)
+        if _connected and (not _builtin or not _attempt_token):
+            raise InvalidInput('Connected snapshots require an active built-in attempt')
+        source = self._submit_analysis(aid, request_id, agent_name, result, _attempt_token=_attempt_token, _reader_failure=_reader_failure, _connected=_connected)
         # Proposal/access changes can pause previously available evidence without
         # performing a read. Update saved tool status after releasing the source
         # transaction, preserving the user's interactive state.
         self.hub.components.sync_sources(aid)
         return source
 
-    def _submit_analysis(self, aid, request_id, agent_name, result, *, _attempt_token=None, _reader_failure=None):
+    def _submit_analysis(self, aid, request_id, agent_name, result, *, _attempt_token=None, _reader_failure=None, _connected=False):
         agent = _check_agent(agent_name)
         if not isinstance(result, dict) or set(result) - {'roles','confidence','evidence_url','read_at','summary','content','access_error','adapter_spec'}:
             raise InvalidInput('Invalid source analysis fields')
@@ -250,7 +253,11 @@ class ExternalSources:
                 raise InvalidInput('Login page evidence cannot establish course contents; report access_error')
             classification = {k: result[k] for k in ('roles','confidence','evidence_url','read_at','summary') if k in result}
             classification['provided_by'] = agent
+            if _connected:
+                classification['access_mode'] = 'connected_local_reviewed'
             spec = validate_spec(result['adapter_spec']) if result.get('adapter_spec') else None
+            if _connected and spec:
+                raise InvalidInput('Connected snapshots cannot create public adapters')
             if spec and s['access_needed']:
                 raise InvalidInput('Signed/private discovery cannot enable a public adapter; register a separate public URL')
             # A recommendation cannot expand onto unrelated domains silently.
@@ -259,14 +266,19 @@ class ExternalSources:
             c.execute("UPDATE external_sources SET classification_json=?,status='analyzed',error=NULL WHERE id=?",
                       (canonical_json(classification), sid))
             c.execute('INSERT INTO external_reads(source_id,read_at,status,evidence_json,detail) VALUES (?,?,?,?,?)',
-                      (sid, result['read_at'], 'agent_read', canonical_json([{'url':evidence, 'content':result['content'], 'provided_by':agent}]), None))
+                      (sid, result['read_at'], 'connected_read' if _connected else 'agent_read', canonical_json([{'url':evidence, 'content':result['content'], 'provided_by':agent, **({'access_mode':'connected_local_reviewed'} if _connected else {})}]), None))
+            if _connected:
+                self._publish(aid, s, [{'url':evidence, 'content':result['content'], 'records':[]}], 0, result['read_at'], connected=True)
+                c.execute("UPDATE external_sources SET status='enabled',last_attempt_at=?,last_success_at=?,error=NULL WHERE id=?", (result['read_at'],result['read_at'],sid))
             if spec:
                 rev = c.execute('SELECT COALESCE(MAX(revision),0)+1 n FROM external_adapters WHERE source_id=?', (sid,)).fetchone()['n']
                 c.execute('INSERT INTO external_adapters(source_id,revision,spec_json,spec_hash,created_at) VALUES (?,?,?,?,?)',
                           (sid, rev, canonical_json(spec), sha256_text(canonical_json(spec)), now_iso()))
                 # Reanalysis pauses an enabled adapter pending review of the new proposal.
                 c.execute("UPDATE external_sources SET proposed_revision=?,enabled_revision=NULL,status='proposed',decision='undecided' WHERE id=?", (rev,sid))
-            self.hub.requests._set(request_id, status='done', result_note='Source classification saved; adapter requires user review', completed_at=now_iso())
+            note = ('Reviewed connected-site snapshot and classification saved.' if _connected else
+                    'Source classification saved; adapter requires user review' if spec else 'Source classification saved.')
+            self.hub.requests._set(request_id, status='done', result_note=note, completed_at=now_iso())
         return self.get(aid, sid)
 
     def decide(self, aid, sid, revision, spec_hash, *, approve=False):
@@ -356,15 +368,16 @@ class ExternalSources:
         self.hub.components.sync_sources(aid)
         return self.get(aid,sid)
 
-    def _publish(self, aid, s, pages, revision, when):
+    def _publish(self, aid, s, pages, revision, when, *, connected=False):
         account = self.hub.identity.get_account(aid)
         items = []
         for page in pages:
             items.append({'type':'external_link','course_id':s['course_id'] or None,
-                'source_key':f"external:{s['id']}:page:{sha256_text(page['url'])}", 'url':page['url'], 'title':s['title'],
+                'source_key':f"external:{s['id']}:{'connected-page' if connected else 'page'}:{sha256_text(page['url'])}", 'url':page['url'], 'title':s['title'],
                 'observed_at':when,'method':f"external-adapter:{s['id']}:{revision}",'depth':'body',
                 'fields':{'title':s['title'],'content':page['content'],'read_at':when,'external_source_id':s['id'],
-                          'adapter_revision':revision,'provided_by':'public declarative adapter'}})
+                          'adapter_revision':revision,'provided_by':'reviewed connected-site snapshot' if connected else 'public declarative adapter',
+                          **({'body':html.escape(page['content'])} if connected else {})}})
             for record in page['records']:
                 fields = dict(record['fields'])
                 rid = fields.pop('id')
@@ -375,14 +388,13 @@ class ExternalSources:
                         'precision':'instant','tz_evidence':'offset_in_source'}
                 if 'body' in fields:
                     # HTML sanitizer handles it too; store literal text as escaped HTML.
-                    import html
                     fields['body'] = html.escape(fields['body'])
                 fields.update(external_source_id=s['id'],adapter_revision=revision,evidence_url=page['url'],read_at=when,
                               provided_by='public declarative adapter')
                 items.append({'type':kind,'source_key':key,'url':page['url'],'title':fields['title'],'course_id':s['course_id'] or None,
                     'observed_at':when,'method':f"external-adapter:{s['id']}:{revision}",'depth':'detail','fields':fields})
         pkg = {'format':'canvas-hub.observations','format_version':1,'package_id':f'external-{uuid.uuid4()}',
-               'generated_at':when,'collector':{'name':f"external-adapter:{s['id']}",'version':str(revision),'method':'public_get'},
+               'generated_at':when,'collector':{'name':f"external-adapter:{s['id']}",'version':str(revision),'method':'connected_reviewed' if connected else 'public_get'},
                'identity':{'origin':account['origin'],'canvas_user_id':account['canvas_user_id']},'run':{'mode':'import'},'items':items}
         # Namespaced source keys prevent any implicit overwrite of Canvas deadlines/submissions.
         self.hub.importer.import_package(pkg,expected_account_id=aid)
