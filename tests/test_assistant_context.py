@@ -166,6 +166,21 @@ def test_budget_counts_native_reasoning_schema_and_separate_document_allowance()
     assert estimate("你好") > estimate("hi")
 
 
+def test_output_budget_truncation_never_executes_parseable_tool_arguments(monkeypatch):
+    from types import SimpleNamespace as Obj
+    from canvas_hub.assistant.providers import OpenAICompatibleProvider
+    provider = OpenAICompatibleProvider({"model": "synthetic", "base_url": "http://localhost:9/v1", "api_key": "synthetic",
+                                         "_response_tokens": 512})
+    call = Obj(id="cut", function=Obj(name="create_note", arguments='{"title":"must not execute"}'))
+    response = Obj(choices=[Obj(message=Obj(content="", tool_calls=[call]), finish_reason="length")])
+    monkeypatch.setattr(provider.client.chat.completions, "create", lambda **kwargs: response)
+    try:
+        turn = provider.complete("system", [{"role": "user", "sent_text": "synthetic question"}], [])
+        assert turn.stop == "truncated" and turn.tool_calls[0].input_error
+    finally:
+        provider.close()
+
+
 def test_tracker_patch_conflicts_preserve_user_state_and_linked_todos(hub, account):
     aid = account["id"]
     spec = {"title": "Checklist", "sync_todos": True, "sections": [{"id": "s", "rows": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}]}]}

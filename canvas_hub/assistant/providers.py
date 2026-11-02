@@ -307,7 +307,9 @@ class OpenAICompatibleProvider:
             except ValueError:
                 args, err = None, f"arguments were not valid JSON: {(tc['arguments'] or '')[:200]}"
             calls.append(ToolCall(tc["id"], tc["name"], args if isinstance(args, dict) else None, err))
-        stop = "tool_use" if calls else {"length": "truncated", "content_filter": "refusal"}.get(finish, "end")
+        # A context-managed output cap can stop a tool-bearing response. Even
+        # parseable arguments must not execute when the provider marks it cut off.
+        stop = {"length": "truncated", "content_filter": "refusal"}.get(finish, "tool_use" if calls else "end")
         if stop == "truncated" and calls:
             for c in calls:
                 c.input_error = "tool input was cut off by the output limit; not executed"
