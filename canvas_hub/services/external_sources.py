@@ -1,6 +1,6 @@
 """Durable link classification and explicitly approved declarative adapters.
 
-Discovery never calls an LLM. Analysis is an explicit connected-agent request.
+Discovery never calls an LLM. Analysis is explicit, using the built-in Assistant or a connected agent.
 Approval and publication are revision/hash checked under SQLite transactions.
 """
 from __future__ import annotations
@@ -167,6 +167,11 @@ class ExternalSources:
     def analyze(self, aid, sid, *, reanalyze=False):
         with self._lock, self.db.tx():
             s = self._source(aid, sid)
+            if self.db.one("SELECT 1 FROM source_analysis_attempts WHERE source_id=? AND state='running'", (sid,)):
+                current = self.get(aid, sid)
+                if current['request']['status'] not in ('open', 'claimed'):
+                    raise Conflict('Cancelled analysis is still finishing; wait before starting another Agent')
+                return current
             if s['analysis_request_id']:
                 req = self.hub.requests.view(aid, s['analysis_request_id'])
                 if req['status'] in ('open', 'claimed'):
@@ -187,7 +192,9 @@ class ExternalSources:
             self.db.conn.execute('UPDATE external_sources SET analysis_request_id=?,error=NULL WHERE id=?', (req['id'], sid))
         return self.get(aid, sid)
 
-    def submit_analysis(self, aid, request_id, agent_name, result):
+    def submit_analysis(self, aid, request_id, agent_name, result, *, _builtin=False):
+        if _check_agent(agent_name) == 'Canvas Hub built-in Assistant' and not _builtin:
+            raise Conflict('Built-in analysis cannot be submitted by a connected Agent')
         source = self._submit_analysis(aid, request_id, agent_name, result)
         # Proposal/access changes can pause previously available evidence without
         # performing a read. Update saved tool status after releasing the source
@@ -214,7 +221,8 @@ class ExternalSources:
                 if not isinstance(error, str):
                     raise InvalidInput('Access error must be text')
                 self.hub.requests._set(request_id, status='declined', result_note=error[:2000], completed_at=now_iso())
-                c.execute("UPDATE external_sources SET status='needs_login',error=? WHERE id=?", (error[:2000], sid))
+                status = 'needs_attention' if agent == 'Canvas Hub built-in Assistant' else 'needs_login'
+                c.execute('UPDATE external_sources SET status=?,error=? WHERE id=?', (status, error[:2000], sid))
                 return self.get(aid, sid)
             roles = result.get('roles')
             confidence = result.get('confidence')
@@ -281,7 +289,9 @@ class ExternalSources:
 
     def decline(self, aid, sid):
         with self._lock, self.db.tx() as c:
-            self._source(aid, sid)
+            s = self._source(aid, sid)
+            if s['analysis_request_id']:
+                self.hub.requests.cancel(aid, s['analysis_request_id'])
             c.execute("UPDATE external_sources SET decision='declined',status='declined',enabled_revision=NULL WHERE id=?", (sid,))
             c.execute("UPDATE external_adapters SET status='disabled' WHERE source_id=? AND status IN ('enabled','testing')",(sid,))
         self.hub.components.sync_sources(aid)

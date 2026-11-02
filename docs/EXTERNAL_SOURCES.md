@@ -1,16 +1,66 @@
-# External course sources (stacked on PR #23)
+# External course sources
 
-Canvas collection records external links without calling an AI provider. The
-contextual **> → Analyse link** action leaves one request for a connected MCP
-agent. The side Source Agent panel shows its progress, cached classification,
-proposed adapter, exact scope, limitations, observed content and read history.
-Opening an already classified/declined source does not start another analysis.
-“Reanalyse explicitly” is available; cancellation/access failures can be retried.
-The Overall workspace is unchanged.
+Canvas collection records external links without calling an AI provider. **> →
+Analyse link** opens the Source Agent panel with the exact public URL, active
+Assistant setup, endpoint, model, and API quota disclosure. **Approve and analyse**
+reads that URL and sends its extracted text to the existing Assistant provider.
+The key stays in the existing server-side settings; no second setup is needed.
+Nothing is fetched or sent merely by opening a page or during automatic sync.
+
+The built-in path supports Anthropic and OpenAI-compatible API setups (including
+local endpoints). With no API setup, the panel links to **Assistant settings**.
+Codex CLI setups can use the explicit **Use connected Agent instead** fallback.
+Built-in analysis supplies no tools, chat history, account data or credentials to
+the model. Page instructions are untrusted. Evidence URL, timestamp and text come
+from the reader, not the model. JSON output uses the existing classification and
+adapter validation. Optional built-in adapters are restricted to the single
+reviewed URL and detected format; no generated code or autonomous crawling runs.
+
+Successful, unknown, declined and failed attempts are cached. **Approve and
+reanalyse** is required to run again. Each disclosure is bound to account, source,
+current request and provider setup, expires after 30 minutes, and authorizes one
+attempt. Replaying a consumed token never resends. SDK retries and model fallback
+are disabled for this operation. Failure, cancellation or restart never triggers
+an automatic retry; explicit reanalysis can incur new usage. Cancellation discards
+late results, but cannot refund or guarantee stopping a model request already sent.
+A cancelled worker retains its reservation until it finishes; then MCP fallback
+or a newly approved attempt can proceed. Request claims are transactional.
+
+Public HTML/text/PDF only: login pages, empty JavaScript shells, unsupported types
+and redirects outside the exact URL fail without expanding scope or using Canvas
+cookies. Existing data is retained. Some script-dependent sites can expose partial
+static text; the result reflects only what the reader actually observed.
+The Overall workspace and widget approval rules are unchanged.
+
+## Analyse all and uninspected-link reminder
+
+The **Analyse all (N)** button is visible beside the External sources heading.
+Course pages use only that course; item pages use only that item's source links.
+There is no implicit account-wide batch. Only never-attempted, public,
+unclassified, undecided sources are eligible. Running, failed, cancelled,
+classified, declined, private and duplicate URLs are excluded. A batch disclosure
+lists the exact URLs, count, current scope, Assistant setup/model and quota usage;
+**Approve and analyse N links** is the only start action.
+
+A non-blocking floating reminder offers **Analyse all** and **View links**.
+Dismissal is stored in this browser per account/source ID, across reloads and
+course/item navigation. The same links do not prompt again; a newly eligible
+source can trigger a new reminder. Dismissal and opening the review never call a
+model. The header button remains available after dismissal. Clearing browser
+storage resets reminder preferences, not analysis records.
+
+Batches show completed/total and failures, with per-link statuses and **Cancel
+batch**. Each batch dispatches sequentially, and at most two built-in source jobs
+can run at once in the server. Account/scope-bound durable tokens and atomic
+claims prevent double clicks, retries and overlapping tabs from paying twice for
+the same source. Scope changes remove stale UI while a deliberately started batch
+continues in its original scope; return there to see/cancel it. Cancellation stops
+queued work and discards in-flight results. A restart cancels incomplete batches
+without replay. Failed links can be explicitly reanalysed individually.
 
 ## Connected-agent workflow
 
-Run the existing MCP server with `canvas-hub mcp --allow-fulfil`. A client with
+Choose **Use connected Agent instead** in the panel, then run the existing MCP server with `canvas-hub mcp --allow-fulfil`. A client with
 its own authorized browser access uses `list_view_requests`, `claim_view_request`
 and, for a request with `external_source_id`, `submit_source_analysis`. The latter
 accepts `request_id`, `agent_name` and `result`:
@@ -43,12 +93,9 @@ accepts `request_id`, `agent_name` and `result`:
 ```
 
 Roles can also include `reference`, `submission_platform`, `other`, `unknown`.
-An unknown-only analysis can be retried and is not treated as a complete cache
-hit. Report `{"access_error":"Site login required"}` instead of guessing course
+An unknown-only analysis can be explicitly reanalysed. Report `{"access_error":"Site login required"}` instead of guessing course
 contents from a login screen. Evidence must be the exact requested safe URL;
-redirected analysis evidence requires a separately reviewed registration. This
-iteration hands requests to a connected agent; an in-app provider without its
-own external access cannot automatically read them. The UI states this limit.
+redirected analysis evidence requires a separately reviewed registration. MCP remains an optional path for agents with their own authorized access.
 `submit_view_result` continues to support ordinary view requests.
 
 ## Local adapters and approval
@@ -116,7 +163,7 @@ complete conflict detector. Broader source reconciliation remains manual.
 
 ## Migration and validation
 
-Schema 13 adds registrations scoped by `(account, course, URL identity)`, origins,
+Schema 15 adds durable, single-use source analysis attempts. Schema 13 adds registrations scoped by `(account, course, URL identity)`, origins,
 adapter revisions, read history and record bindings, plus an optional source ID
 on view requests. Existing item identities, trackers and account mappings are
 left intact. A bounded lazy backfill (first 2,000 legacy external items) records
@@ -132,6 +179,11 @@ flow, source binding, preserved progress, collection integration, exact revision
 races, decline/cancel/retry, public text/PDF, multi-page atomicity, identity,
 account/course isolation, malicious page data, DNS/private targets, redirects,
 resource limits and stale records. `tests/test_external_sources_ui.py` exercises
-one-click request → fake connected agent → review → approval → refresh → reload
+disclosure → fake API provider or connected agent → review → approval → refresh → reload
 in Light/Dark at desktop/380px. All use local fixtures, fake transports and fake
 providers; no real institutional login or paid calls are part of acceptance.
+
+`tests/test_source_analysis.py` covers settings reuse, consent, output validation,
+prompt-injection containment, exact scope, cancellation, deduplication, stale
+setup/source disclosures, failure redaction, cached attempts and MCP ownership.
+No live API keys or institutional login are needed.

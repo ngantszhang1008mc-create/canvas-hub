@@ -93,11 +93,12 @@ class RequestService:
         return [self.view(account_id, r["id"]) for r in self.db.query(sql + " ORDER BY id DESC LIMIT 200", params)]
 
     def cancel(self, account_id: int, request_id: int) -> dict:
-        r = self._get(account_id, request_id)
-        if r["status"] in ("done", "declined", "cancelled"):
-            return r
-        self._set(r["id"], status="cancelled")
-        return self.view(account_id, request_id)
+        with self.db.tx():
+            r = self._get(account_id, request_id)
+            if r["status"] in ("done", "declined", "cancelled"):
+                return r
+            self._set(r["id"], status="cancelled")
+            return self.view(account_id, request_id)
 
     def _set(self, rid: int, **fields) -> None:
         fields["updated_at"] = now_iso()
@@ -107,27 +108,35 @@ class RequestService:
 
     # ---- agent side -------------------------------------------------------------------
     def claim(self, account_id: int, request_id: int, agent_name: str) -> dict:
-        agent = _check_agent(agent_name)
-        r = self._get(account_id, request_id)
-        stale = False
-        if r["status"] == "claimed" and r["claimed_by"] != agent:
-            claimed = parse_iso(r["claimed_at"])
-            stale = claimed is not None and datetime.now(timezone.utc) - claimed > CLAIM_TIMEOUT
-            if not stale:
-                raise InvalidInput(f"already claimed by {r['claimed_by']}", code="request_claimed")
-        if r["status"] not in ("open", "claimed"):
-            raise InvalidInput(f"request is {r['status']}", code="request_closed")
-        self._set(r["id"], status="claimed", claimed_by=agent, claimed_at=now_iso())
-        return self.view(account_id, request_id)
+        with self.db.tx():
+            agent = _check_agent(agent_name)
+            if agent == 'Canvas Hub built-in Assistant':
+                raise InvalidInput('Reserved built-in agent identity')
+            r = self._get(account_id, request_id)
+            if r['claimed_by'] == 'Canvas Hub built-in Assistant':
+                raise InvalidInput('Cancel built-in analysis before using MCP', code='request_claimed')
+            stale = False
+            if r["status"] == "claimed" and r["claimed_by"] != agent:
+                claimed = parse_iso(r["claimed_at"])
+                stale = claimed is not None and datetime.now(timezone.utc) - claimed > CLAIM_TIMEOUT
+                if not stale:
+                    raise InvalidInput(f"already claimed by {r['claimed_by']}", code="request_claimed")
+            if r["status"] not in ("open", "claimed"):
+                raise InvalidInput(f"request is {r['status']}", code="request_closed")
+            self._set(r["id"], status="claimed", claimed_by=agent, claimed_at=now_iso())
+            return self.view(account_id, request_id)
 
     def decline(self, account_id: int, request_id: int, agent_name: str, reason: str) -> dict:
-        agent = _check_agent(agent_name)
-        r = self._get(account_id, request_id)
-        if r["status"] not in ("open", "claimed"):
-            raise InvalidInput(f"request is {r['status']}", code="request_closed")
-        self._set(r["id"], status="declined", claimed_by=agent, result_note=(reason or "")[:2000] or "declined",
-                  completed_at=now_iso())
-        return self.view(account_id, request_id)
+        with self.db.tx():
+            agent = _check_agent(agent_name)
+            r = self._get(account_id, request_id)
+            if agent == 'Canvas Hub built-in Assistant' or r['claimed_by'] == 'Canvas Hub built-in Assistant':
+                raise InvalidInput('Use user cancellation for built-in analysis', code='request_claimed')
+            if r["status"] not in ("open", "claimed"):
+                raise InvalidInput(f"request is {r['status']}", code="request_closed")
+            self._set(r["id"], status="declined", claimed_by=agent, result_note=(reason or "")[:2000] or "declined",
+                      completed_at=now_iso())
+            return self.view(account_id, request_id)
 
     def submit(self, account_id: int, request_id: int, agent_name: str, *, content: str, title: str | None = None,
                source_url: str | None = None, read_at: str | None = None) -> dict:
