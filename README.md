@@ -84,6 +84,39 @@ To pass server options through the Windows launcher, such as a different port:
 .\scripts\start-canvas-hub.cmd --port 8740
 ```
 
+### Linux installation
+
+Linux is supported from a terminal. Install Git and [uv](https://docs.astral.sh/uv/getting-started/installation/)
+first; Python 3.11+ is required, and the commands below let uv select/download Python 3.13.
+Use a graphical desktop session for the Canvas sign-in window (SSO/MFA needs that window).
+The macOS `.command` launcher and Windows `.cmd` launcher are not Linux launchers.
+
+```bash
+git clone https://github.com/ngantszhang1008mc-create/canvas-hub.git
+cd canvas-hub
+uv sync --locked --python 3.13
+uv run playwright install --with-deps chromium
+uv run canvas-hub serve
+```
+
+On a [Playwright-supported Linux distribution](https://playwright.dev/python/docs/intro#system-requirements),
+`--with-deps` installs Chromium and its system libraries; the system-package step may ask for sudo.
+Run Canvas Hub itself as your normal user. For an existing installation, preserve local changes
+and back up its data before updating; do not clone over the existing directory.
+
+The server opens your browser at `http://127.0.0.1:8730/?token=…`; if it does not,
+open the full private URL printed in the terminal. Keep that terminal running; Ctrl-C stops the app.
+If `uv` is not found, reopen the terminal after installation. Missing Chromium/libraries:
+repeat the Playwright install command above. Port already in use: use
+`uv run canvas-hub serve --port 8740`. A headless SSH session cannot show the interactive
+sign-in window; use a graphical session. `--no-open` only suppresses opening the app UI.
+
+Optional Codex analysis requires an installed Codex CLI (0.163.0 or newer), available
+as `codex` on PATH (or configured with `CANVAS_HUB_CODEX`), and its own `codex login`.
+Choose the Codex setup in Assistant settings; no second API key is needed. The regular
+Canvas collection features do not require Codex or an AI provider. Linux tests use synthetic
+Canvas pages and mock Codex; they do not verify your institution's login or a paid account.
+
 ### Try it without a Canvas account
 
 ```bash
