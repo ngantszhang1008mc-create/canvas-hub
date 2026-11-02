@@ -66,11 +66,14 @@ a new synthetic user; production account recovery belongs to the operator.
   is no automatic model retry or paid fallback. The operator must separately
   configure and fund a production service; this branch does not provide one.
 - Manual context compaction uses the selected provider and consumes its quota.
-  Original history is retained. Recorded usage is not a complete billing ledger:
-  ordinary failed/cancelled requests may have consumed quota without a saved Turn.
+  Original history is retained. New chat attempts are recorded even after
+  cancellation/failure; absent provider counts stay unknown. Historical failed
+  requests may be missing. Local telemetry never determines gateway allowance.
 
-The context schema migration is `0017`; the other three features add no local
-SQLite migration. For any later real-data upgrade, stop the app and back up the
+The context schema migration is `0017`; provider usage adds `0018` to distinguish
+chat attempts from summaries in the existing usage table. External connections,
+layout and the gateway add no local SQLite migration. For a real-data upgrade,
+stop the app and back up the
 whole private data home consistently before startup. Restore the matching backup
 for rollback; do not run older code against a newly migrated database.
 
@@ -87,6 +90,11 @@ A real local Wrangler/SQLite runtime also completed invitation enrollment,
 allowance reads, an Assistant `list_components` tool round and the next response:
 two settled mock requests, no remaining hold. The synthetic preview launcher
 started successfully. No full suite or real model/login test was run at this
-checkpoint. The next tool-picker/context-default and token-optimization inputs
-are still pending; final combined validation and the user test invitation wait
-for those exact heads.
+checkpoint. Provider usage/cache head `58638db` is now integrated; its worker
+reported 44 focused checks on the gateway checkpoint. Three integration checks
+passed in 0.45 seconds: schema 16→18, 17→18 (retaining old summaries as
+`purpose=summary`), and a gateway tracker conversation whose recorded usage is
+counted once across three model/tool rounds.
+The next tool-picker/context-default and source-deduplication inputs are still
+pending; final combined validation and the user test invitation wait for those
+exact heads.
