@@ -51,7 +51,8 @@ class ExternalSources:
             r['adapters'].append(a)
         req = r['analysis_request_id']
         r['request'] = self.hub.requests.view(aid, req) if req else None
-        if r['request'] and r['request']['status'] in ('open', 'claimed'):
+        r['analysis_running'] = bool(self.db.one("SELECT 1 FROM source_analysis_attempts WHERE source_id=? AND state='running'", (sid,)))
+        if r['analysis_running'] or (r['request'] and r['request']['status'] in ('open', 'claimed')):
             r['status'] = 'analyzing'
         r['origins'] = [dict(x) for x in self.db.query('''SELECT i.id, i.title, i.source_url FROM external_source_origins o
             JOIN items i ON i.id=o.item_id WHERE o.source_id=?''', (sid,))]

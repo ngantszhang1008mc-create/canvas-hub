@@ -43,21 +43,22 @@ export function makeExternalSources(env) {
         note('Local adapters read public pages only. Login and JavaScript-only sites may need a connected Agent. Adapter approval stays separate.'),
         c ? h('div',null,note(`${c.roles.join(' · ')} · ${Math.round(c.confidence*100)}% confidence`),h('p',null,c.summary||''),note(`Read ${c.read_at} · ${c.provided_by}`)) : note('No successful classification saved.'),
         source.error ? h('p',{role:'alert'},source.error):null);
-      if (req && ['open','claimed'].includes(req.status)) {
-        content.append(note(req.claimed_by==='Canvas Hub built-in Assistant' ? `Request #${req.id} · Assistant is reading and analysing. Cancel discards the result; a model request already sent may still use API quota.` : `Request #${req.id} · ${req.status}. Connect an MCP Agent with --allow-fulfil and ask it to claim this request and submit_source_analysis.`),
-          h('a',{href:'#/requests'},'Connected Agent requests'),h('button',{onclick:async()=>{
+      if (source.analysis_running || (req && ['open','claimed'].includes(req.status))) {
+        content.append(note(!req ? 'Finishing the previous attempt.' : req.claimed_by==='Canvas Hub built-in Assistant' ? `Request #${req.id} · Assistant is reading and analysing. Cancel discards the result; a model request already sent may still use API quota.` : `Request #${req.id} · ${req.status}. Connect an MCP Agent with --allow-fulfil and ask it to claim this request and submit_source_analysis.`),
+          h('a',{href:'#/requests'},'Connected Agent requests'),['open','claimed'].includes(req?.status)?h('button',{onclick:async()=>{
             await api(aidPath.replace(/external-sources\/\d+$/,`requests/${req.id}/cancel`),{method:'POST'}); source=await api(aidPath); disclosure=null; await draw(); if(alive())window.dispatchEvent(new Event('external-sources-updated'));
-          }},'Cancel analysis'));
+          }},'Cancel analysis'):note('Finishing the previous attempt; please wait before re-inspecting.'));
         const token=++generation;
-        setTimeout(async()=>{ if(token!==generation||!alive())return; try{source=await api(aidPath);await draw();if(source.request?.status==='done')window.dispatchEvent(new Event('external-sources-updated'));}catch(e){status.textContent=e.message;} },1200);
+        setTimeout(async()=>{ if(token!==generation||!alive())return; try{source=await api(aidPath);await draw();if(!source.analysis_running&&!['open','claimed'].includes(source.request?.status))window.dispatchEvent(new Event('external-sources-updated'));}catch(e){status.textContent=e.message;} },1200);
       } else {
+        if(req?.status==='declined') content.append(note('Latest inspection failed. Previous successful results are retained; you can re-inspect after reviewing the disclosure.'));
         if(req?.result_note) content.append(note(req.result_note));
         if (!disclosure) disclosure=await api(aidPath+'/disclosure');
         if(!alive())return;
         const repeat=!!req||!!c||source.decision!=='undecided';
         if(disclosure.available) {
           content.append(note(`Read only this public URL: ${disclosure.urls.join(', ')}. Its page text will be sent to ${disclosure.setup || disclosure.provider} (${disclosure.endpoint}), model ${disclosure.model}. ${disclosure.provider === 'codex' ? 'This may use your Codex quota.' : 'This uses your API quota.'} No Canvas cookies or login are used.`),
-            h('button',{class:'primary',onclick:()=>action('/analyze',{token:disclosure.token,consent:true,reanalyze:repeat})},repeat?'Approve and reanalyse':'Approve and analyse'));
+            h('button',{class:'primary',onclick:()=>action('/analyze',{token:disclosure.token,consent:true,reanalyze:repeat})},repeat?'Approve and re-inspect':'Approve and analyse'));
         } else content.append(note(disclosure.message),h('a',{href:'#/assistant/settings'},'Open Assistant settings'));
         content.append(h('button',{onclick:()=>action('/analyze',{executor:'mcp',reanalyze:repeat})},'Use connected Agent instead'));
       }
@@ -103,9 +104,12 @@ export function makeExternalSources(env) {
     if(!valid()||!result.sources.length)return;
     const seenURLs=new Set();
     const eligible=result.sources.filter(s=>{
-      if(s.analysis_request_id||s.classification||s.decision!=='undecided'||s.access_needed||s.status!=='unclassified'||seenURLs.has(s.url))return false;
+      const failed=s.request?.status==='declined';
+      const fresh=!s.analysis_request_id&&!s.classification&&s.decision==='undecided'&&s.status==='unclassified';
+      if((!fresh&&!failed)||s.analysis_running||s.access_needed||seenURLs.has(s.url))return false;
       seenURLs.add(s.url);return true;
     });
+    const fresh=eligible.filter(s=>!s.analysis_request_id);
     const scopeLabel=scope.item_id ? 'this item' : 'this course';
     const list=h('details',{class:'workspace-evidence external-source-list',open:true});
     const batchArea=h('section',{class:'external-batch','aria-label':'Batch source analysis'});
@@ -146,7 +150,7 @@ export function makeExternalSources(env) {
         if(!valid()||reviewVersion!==polling)return;
         if(!d.available) {mount(batchArea,note(d.message),h('a',{href:'#/assistant/settings'},'Open Assistant settings'));return;}
         mount(batchArea,h('h3',{tabindex:'-1'},`Analyse ${d.count} links · ${scopeLabel}`),
-          note(`These public pages will be read and their text sent to ${d.setup||d.provider} (${d.endpoint}), model ${d.model}. ${d.provider === 'codex' ? 'This may use your Codex quota.' : 'This uses your API quota.'} No Canvas cookies or login are used. Existing decisions and previous attempts are excluded.`),
+          note(`These public pages will be read and their text sent to ${d.setup||d.provider} (${d.endpoint}), model ${d.model}. ${d.provider === 'codex' ? 'This may use your Codex quota.' : 'This uses your API quota.'} No Canvas cookies or login are used. New: ${d.new_count}; previously failed and to be retried: ${d.retry_count}. Successful inspections are excluded.`),
           h('ul',null,d.urls.map(url=>h('li',null,url))),
           h('button',{class:'primary',onclick:async(e)=>{
             e.currentTarget.disabled=true;
@@ -160,16 +164,17 @@ export function makeExternalSources(env) {
     list.append(h('summary',{class:'external-source-heading'},h('span',null,'External sources'),all),batchArea);
     for(const source of result.sources) {
       list.append(h('div',{class:'external-source-row'},h('div',null,h('a',{href:source.url,target:'_blank',rel:'noopener noreferrer'},source.title),
-        note(`${source.status.replaceAll('_',' ')}${source.classification?' · '+source.classification.roles.join(', '):''}${source.last_success_at?' · read '+source.last_success_at:''}`)),
+        note(`${source.status.replaceAll('_',' ')}${source.request?.status==='declined'?' · latest inspection failed':''}${source.classification?' · '+source.classification.roles.join(', '):''}${source.last_success_at?' · read '+source.last_success_at:''}`)),
+        source.analysis_request_id && !source.analysis_running && !['open','claimed'].includes(source.request?.status) ? h('button',{onclick:()=>show(main,source)},'Re-inspect') : null,
         launcher([{id:'analyze',icon:'message',label:source.classification||source.decision!=='undecided'?'Review source':'Analyse link',
           description:'Review the public URL and Assistant API usage before analysis; cached decisions are reused.',run:()=>{dismiss();return show(main,source);} }])));
     }
     const host=main.querySelector('.workspace-content')||main;
     host.querySelector('.external-source-list')?.remove(); main.querySelector('.external-source-nudge')?.remove(); host.append(list);
-    if(eligible.some(s=>!dismissed(key).has(s.id))) {
+    if(fresh.some(s=>!dismissed(key).has(s.id))) {
       toast=h('aside',{class:'external-source-nudge','aria-label':'Uninspected external links'},
         h('button',{class:'workspace-icon-button',title:'Dismiss link reminder','aria-label':'Dismiss link reminder',onclick:dismiss},'×'),
-        h('p',{role:'status'},`${eligible.length} external links in ${scopeLabel} have not been inspected.`),
+        h('p',{role:'status'},`${fresh.length} external links in ${scopeLabel} have not been inspected.`),
         h('div',{class:'row'},h('button',{class:'primary',onclick:review},`Analyse all (${eligible.length})`),
           h('button',{onclick:()=>{dismiss();list.open=true;all.focus();list.scrollIntoView({block:'center'});}},'View links')));
       main.append(toast);

@@ -13,6 +13,82 @@ from .test_codex import fake_codex
 pytestmark=pytest.mark.browser
 
 
+def test_failed_inspection_can_be_retried_and_reinspected(hub, account, source, monkeypatch):
+    from playwright.sync_api import expect, sync_playwright
+    from canvas_hub.assistant.providers import Turn
+    calls = []
+    class Provider:
+        def complete(self, *args):
+            calls.append(args)
+            if len(calls) == 1:
+                raise RuntimeError('temporary provider failure')
+            return Turn(json.dumps(RESULT))
+        def close(self):
+            pass
+    monkeypatch.setattr('canvas_hub.services.source_analysis.make_provider', lambda cfg: Provider())
+    svc, sid, reads = source
+    with serve(hub, []) as (base, token, api), sync_playwright() as p:
+        browser = p.chromium.launch(); page = browser.new_page()
+        page.goto(f'{base}/?token={token}'); page.goto(f'{base}/#/course/4242')
+        listing = page.locator('.external-source-list')
+        listing.get_by_role('button', name='Workspace actions', exact=True).click()
+        listing.locator('.workspace-action-icon[aria-label="Analyse link"]').click()
+        panel = page.get_by_role('complementary', name='Source Agent', exact=True)
+        panel.get_by_role('button', name='Approve and analyse', exact=True).click()
+        expect(panel).to_contain_text('Latest inspection failed', timeout=15000)
+        expect(panel.get_by_role('button', name='Approve and re-inspect', exact=True)).to_be_visible()
+        page.reload()
+        listing = page.locator('.external-source-list')
+        expect(listing.get_by_role('button', name='Analyse all (1)', exact=True)).to_be_visible()
+        listing.get_by_role('button', name='Re-inspect', exact=True).click()
+        expect(panel).to_contain_text('Latest inspection failed')
+        assert len(calls) == 1
+        panel.get_by_role('button', name='Approve and re-inspect', exact=True).click()
+        expect(panel.get_by_role('button', name='Approve, test and enable')).to_be_visible(timeout=15000)
+        assert len(calls) == 2 and svc.get(account['id'], sid)['request']['status'] == 'done'
+        page.reload()
+        listing = page.locator('.external-source-list')
+        expect(listing.get_by_role('button', name='Analyse all (0)', exact=True)).to_be_disabled()
+        listing.get_by_role('button', name='Re-inspect', exact=True).click()
+        expect(panel.get_by_role('button', name='Approve and re-inspect', exact=True)).to_be_visible()
+        assert len(calls) == 2
+        browser.close()
+
+
+def test_batch_discloses_failed_retry_and_runs_only_after_approval(hub, account, source, monkeypatch):
+    from playwright.sync_api import expect, sync_playwright
+    from canvas_hub.assistant.providers import Turn
+    calls = []
+    class Provider:
+        def complete(self, *args):
+            calls.append(args)
+            if len(calls) == 1:
+                raise RuntimeError('temporary failure')
+            return Turn(json.dumps(RESULT))
+        def close(self):
+            pass
+    monkeypatch.setattr('canvas_hub.services.source_analysis.make_provider', lambda cfg: Provider())
+    with serve(hub, []) as (base, token, _), sync_playwright() as p:
+        browser = p.chromium.launch(); page = browser.new_page()
+        page.goto(f'{base}/?token={token}'); page.goto(f'{base}/#/course/4242')
+        listing = page.locator('.external-source-list')
+        listing.get_by_role('button', name='Workspace actions', exact=True).click()
+        listing.locator('.workspace-action-icon[aria-label="Analyse link"]').click()
+        panel = page.get_by_role('complementary', name='Source Agent', exact=True)
+        panel.get_by_role('button', name='Approve and analyse', exact=True).click()
+        expect(panel).to_contain_text('Latest inspection failed', timeout=15000)
+        panel.get_by_role('button', name='Close source Agent').click()
+        page.reload()
+        listing.get_by_role('button', name='Analyse all (1)', exact=True).click()
+        batch = page.get_by_role('region', name='Batch source analysis')
+        expect(batch).to_contain_text('New: 0; previously failed and to be retried: 1')
+        assert len(calls) == 1
+        batch.get_by_role('button', name='Approve and analyse 1 links', exact=True).click()
+        expect(batch).to_contain_text('1 / 1 completed · 0 failed · done', timeout=15000)
+        assert len(calls) == 2
+        browser.close()
+
+
 def test_codex_link_analysis_disclosure_and_approval(hub, account, source, fake_codex):
     from playwright.sync_api import expect, sync_playwright
     setup, messages = fake_codex

@@ -397,7 +397,77 @@ def test_batch_scope_consent_serial_cache_and_stale_tabs(builtin,source,account,
     service.batch_start(aid,d['token'],consent=True);finish_batch(service)
     with pytest.raises(Conflict):service.batch_start(aid,old_tab['token'],consent=True)
     assert len(calls)==2
-    assert not service.batch_disclosure(aid,course_id='4242')['available']
+    retry = service.batch_disclosure(aid,course_id='4242')
+    assert retry['available'] and retry['count'] == 1 and retry['new_count'] == 0 and retry['retry_count'] == 1
+    assert retry['urls'] == [URL+'&page=2']
+
+
+def test_batch_explicit_retry_preserves_success_on_failure_and_can_reinspect(builtin, source, account, monkeypatch):
+    service, api, calls = builtin; svc, sid, reads = source; aid = account['id']
+    start(service, aid, sid); finish(service)
+    original = svc.get(aid, sid)
+    assert original['request']['status'] == 'done' and original['classification']
+    class Failure:
+        def complete(self, *args):
+            calls.append(args)
+            raise RuntimeError('temporary failure')
+    monkeypatch.setattr('canvas_hub.services.source_analysis.make_provider', lambda cfg: Failure())
+    start(service, aid, sid, reanalyze=True); finish(service)
+    failed = svc.get(aid, sid)
+    assert failed['request']['status'] == 'declined'
+    assert failed['classification'] == original['classification']
+    assert failed['adapters'] == original['adapters'] and failed['reads'] == original['reads']
+    offer = service.batch_disclosure(aid, course_id='4242')
+    assert offer['available'] and offer['retry_count'] == 1 and offer['new_count'] == 0
+    assert len(calls) == 2  # disclosure alone never sends another request
+    class Success:
+        def complete(self, *args):
+            calls.append(args)
+            return Turn(json.dumps({**RESULT, 'summary': 'Updated after explicit retry'}))
+    monkeypatch.setattr('canvas_hub.services.source_analysis.make_provider', lambda cfg: Success())
+    service.batch_start(aid, offer['token'], consent=True); finish_batch(service)
+    updated = svc.get(aid, sid)
+    assert updated['request']['status'] == 'done'
+    assert updated['classification']['summary'] == 'Updated after explicit retry'
+    assert len(calls) == 3 and service.batch_view(aid, offer['token'])['failed'] == 0
+    assert not service.batch_disclosure(aid, course_id='4242')['available']
+
+
+def test_reinspection_does_not_dispatch_duplicate_concurrent_attempts(builtin, source, account, monkeypatch):
+    service, api, calls = builtin; svc, sid, reads = source; aid = account['id']
+    start(service, aid, sid); finish(service)
+    first = service.disclosure(aid, sid)
+    stale = service.disclosure(aid, sid)
+    entered, release = threading.Event(), threading.Event()
+    class Blocking:
+        def complete(self, *args):
+            calls.append(args); entered.set(); assert release.wait(5)
+            return Turn(json.dumps(RESULT))
+    monkeypatch.setattr('canvas_hub.services.source_analysis.make_provider', lambda cfg: Blocking())
+    service.start(aid, sid, first['token'], consent=True, reanalyze=True)
+    try:
+        assert entered.wait(3)
+        with pytest.raises(Conflict):
+            service.start(aid, sid, stale['token'], consent=True, reanalyze=True)
+        assert len(calls) == 2 and svc.get(aid, sid)['analysis_running']
+    finally:
+        release.set(); finish(service)
+    assert svc.get(aid, sid)['request']['status'] == 'done' and len(calls) == 2
+
+
+def test_reinspection_access_failure_keeps_previous_classification(builtin, source, account, monkeypatch):
+    service, api, calls = builtin; svc, sid, reads = source; aid = account['id']
+    start(service, aid, sid); finish(service)
+    before = svc.get(aid, sid)
+    class AccessFailure:
+        def complete(self, *args):
+            return Turn(json.dumps({'access_error': 'Page is temporarily unavailable'}))
+    monkeypatch.setattr('canvas_hub.services.source_analysis.make_provider', lambda cfg: AccessFailure())
+    start(service, aid, sid, reanalyze=True); finish(service)
+    after = svc.get(aid, sid)
+    assert after['request']['status'] == 'declined' and after['status'] == 'needs_attention'
+    assert after['classification'] == before['classification'] and after['reads'] == before['reads']
+    assert service.batch_disclosure(aid, course_id='4242')['retry_count'] == 1
 
 
 def test_batch_cancel_stops_queued_and_discards_inflight(builtin,source,account,monkeypatch):
