@@ -8,12 +8,23 @@ Record each result as **pass**, **fail** (what you saw), or **n/a**. Once you've
 
 ## 0. Install and start
 
+Follow the [macOS installation steps in the README](../README.md#macos-and-windows-download-canvas-hub-first):
+download the main-branch ZIP, extract the complete `canvas-hub-main` folder, install
+uv, and reopen Terminal. Installing uv alone does not download Canvas Hub.
+
+Open `scripts/start-canvas-hub.command` inside that extracted folder, or use Terminal
+(the path below assumes you extracted into Downloads; adjust it if necessary):
+
 ```bash
-cd canvas-hub
-./scripts/start-canvas-hub.command
+cd "$HOME/Downloads/canvas-hub-main"
+uv sync --locked --python 3.13
+uv run playwright install chromium
+uv run canvas-hub serve
 ```
 
-Alternatively run `uv sync`, then `uv run playwright install chromium`, then `uv run canvas-hub serve`.
+If you used `git clone` instead, enter the cloned `canvas-hub` directory first.
+For an existing installation, use its actual checkout and preserve its data and
+local edits; do not download over it just to run this checklist.
 
 The UI opens in your default browser. If it doesn't, copy the printed `http://127.0.0.1:8730/?token=…` link.
 
