@@ -1448,6 +1448,12 @@ VIEWS.assistant = async (main, parts, params) => {
   const input = h("textarea", { rows: 2, placeholder: "Ask about deadlines, announcements, materials, grades…  (Enter to send, Shift+Enter for a new line)" });
   const sendBtn = h("button", { class: "primary" }, icon("send"), "Send");
   const stopBtn = h("button", { class: "danger", hidden: true }, "Stop");
+  const compactBtn = h("button", { class: "ghost sm", disabled: !convId,
+    title: "Summarize older turns using the selected provider. This uses model quota; original messages stay saved." }, "Compact conversation");
+  const contextInfo = h("div", { class: "tiny muted", "aria-live": "polite" });
+  const contextDetails = h("details", { class: "chat-context" }, h("summary", { class: "tiny" }, "Context & usage"),
+    h("p", { class: "tiny muted" }, "Compaction sends older turns to the selected provider and uses model quota. Original messages remain saved. Automatic compaction follows this setup's settings."),
+    contextInfo, compactBtn);
   let current = convId; let lastSeq = 0; let all = []; let stick = true; let wasBusy = false;
   showConvs(convs);
   const listTop = main.querySelector(".conv-scroll")?.scrollTop || 0;      // the chat list being replaced, if any
@@ -1512,6 +1518,14 @@ VIEWS.assistant = async (main, parts, params) => {
     const st = d.conversation.run_state;
     const busy = st === "running" || st === "cancelling";
     sendBtn.disabled = busy || settingsUnavailable; stopBtn.hidden = !busy;
+    compactBtn.disabled = busy || settingsUnavailable;
+    const cx = d.context || {}, cost = cx.summary_usage || {}, total = cx.total_usage || {};
+    const budget = cx.budget;
+    mount(contextInfo,
+      h("p", null, cx.compacted_through ? (cx.stale ? "Saved summary is stale after data changes; original context will be used." : `Older turns compacted through message ${cx.compacted_through}.`) : "Using original conversation context."),
+      h("p", null, `${cx.summary_requests || 0} summary requests · reported summary tokens: ${cost.input_tokens || 0} in / ${cost.output_tokens || 0} out. Total reported tokens: ${total.input_tokens || 0} in / ${total.output_tokens || 0} out; cache read ${total.cache_read_input_tokens || 0}, cache write ${total.cache_creation_input_tokens || 0}.${total.unreported_requests ? ` Usage unavailable or incomplete for ${total.unreported_requests} request(s); these are not counted as zero cost.` : ""}`),
+      budget ? h("p", null, `Last request estimate: ${budget.estimated_tokens} input tokens; ${budget.response_reserved} reserved for output/reasoning. Safety budget: ${budget.capacity} (${budget.capacity_source}).`) : null,
+      d.conversation.context_notice ? h("p", null, d.conversation.context_notice) : null);
     mount(status, busy ? h("span", { class: "working" }, st === "cancelling" ? "Stopping…" : "Working…")
       : st === "error" ? h("div", { class: "banner bad", style: "margin:0" }, h("div", { class: "b-body" }, h("div", { class: "b-title" }, "The assistant stopped"), h("div", { class: "small" }, d.conversation.run_error || ""),
         !settingsUnavailable ? h("div", null, h("button", { onclick: retry }, "Retry answer"), h("span", { class: "small" }, " Retry makes a new provider request with tools disabled. If more tools are needed, review previous results and send a new message.")) : null)) : null);
@@ -1552,6 +1566,15 @@ VIEWS.assistant = async (main, parts, params) => {
   };
   sendBtn.addEventListener("click", () => send());
   stopBtn.addEventListener("click", async () => { await guard(() => api(A(`/assistant/conversations/${current}/stop`), { method: "POST" })); refresh(); });
+  compactBtn.addEventListener("click", async () => {
+    if (!current || compactBtn.disabled) return;
+    compactBtn.disabled = true;
+    const result = await guard(() => api(A(`/assistant/conversations/${current}/compact`), { method: "POST", body: {
+      profile_id: setupSel.value || cfg.active_profile, reasoning: reasoningSel.hidden ? "" : reasoningSel.value,
+      model: modelSel.hidden ? "" : modelSel.value } }));
+    if (result) { clearInterval(assistantPoll); assistantPoll = setInterval(refresh, 400); }
+    await refresh();
+  });
   input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } });
 
   const suggestions = h("div", { class: "chips suggest" }, ["What's due in the next 7 days?", "Plan my study time this week",
@@ -1605,7 +1628,7 @@ VIEWS.assistant = async (main, parts, params) => {
   const footer = h("div", { class: "chat-foot tiny muted" },
     icon("bulb"),
     h("span", null, `Can ${["read your data", perms.notes ? "edit your notes" : null, perms.collect ? "check Canvas" : null, perms.deadlines ? "manage deadlines" : null, perms.settings ? "change scope" : null].filter(Boolean).join(", ")}. Questions and the data it reads go to the chosen provider.`));
-  scroller.append(log, status);
+  scroller.append(log, status, contextDetails);
   if (!current) scroller.append(h("div", { class: "chat-empty", id: "chat-empty" }, icon("sparkles", "empty-sparkles"), h("div", { class: "e-title" }, "What would you like to know?"), suggestions));
   const chat = h("div", { class: "chat" }, scroller,
     h("div", { class: "composer" }, input,
@@ -1722,6 +1745,13 @@ function assistantSettingsCard(cfg, prof) {
   extra.value = cur.extra_params && Object.keys(cur.extra_params).length ? JSON.stringify(cur.extra_params) : "";
   const extraField = h("label", { class: "field", style: "grid-column:1/-1" },
     h("span", null, "Extra request settings (JSON, optional — sent as-is to the provider)"), extra);
+  const autoCompact = h("input", { type: "checkbox", checked: cur.context?.auto_compact !== false });
+  const capacity = h("input", { type: "number", min: 4096, max: 2000000, step: 1,
+    value: cur.context?.capacity || "", placeholder: "Application safety default", "aria-label": "Context token capacity" });
+  const contextField = h("div", { class: "field", style: "grid-column:1/-1" },
+    h("label", null, autoCompact, " Automatically compact older turns near the context budget"),
+    h("label", null, "Context token capacity (optional)", capacity),
+    h("p", { class: "tiny muted" }, "Set this to a capacity verified for your model and endpoint. Defaults are conservative application budgets, not advertised model limits. Compaction uses model quota; original history stays saved. Replies and reasoning have reserved space."));
   const hint = h("div", { class: "tiny muted" });
   const sync = () => {
     const p = cfg.presets.find((x) => x.id === presetSel.value);
@@ -1749,6 +1779,8 @@ function assistantSettingsCard(cfg, prof) {
       try { extraParams = JSON.parse(extra.value); } catch { toast("Extra request settings must be valid JSON", true); return null; }
     }
     const body = { profile_id: cur.id, name: name.value, preset: presetSel.value, model: model.value };
+    body.context = { ...(cur.context || {}), auto_compact: autoCompact.checked };
+    if (capacity.value.trim()) body.context.capacity = Number(capacity.value); else delete body.context.capacity;
     if (!isCodex) Object.assign(body, { base_url: base.value, extra_params: extraParams, ...(key.value ? { api_key: key.value } : {}) });
     const r = await guard(() => api("/api/assistant/config", { method: "PUT", body }));
     if (r) { key.value = ""; cur.id = r.saved_profile; toast("Setup saved"); return r; }   // later saves edit this setup
@@ -1779,7 +1811,7 @@ function assistantSettingsCard(cfg, prof) {
     h("div", { class: "banner info" }, h("div", { class: "b-body small" }, cfg.privacy, " Keys are kept in a private file outside your course data, so they are never included in backups or exports.")),
     h("div", { class: "grid cols-2" }, h("label", { class: "field", style: "grid-column:1/-1" }, h("span", null, "Name"), name),
       h("label", { class: "field" }, h("span", null, "Provider"), presetSel), h("label", { class: "field" }, h("span", null, "Model"), model, modelPick),
-      baseField, keyField, extraField),
+      baseField, keyField, extraField, contextField),
     hint,
     h("div", { class: "tiny muted" }, "Reasoning effort is not part of a setup: choose it next to the message box for each message."),
     h("div", { class: "row", style: "margin-top:14px" },

@@ -74,6 +74,7 @@ class AnthropicProvider:
         self.effort = cfg.get("effort") or None
         self.base_url = (cfg.get("base_url") or "").strip() or None
         self.single_attempt = cfg.get("_single_attempt", False)
+        self.response_tokens = cfg.get("_response_tokens", MAX_TOKENS)
         kw = {"max_retries": 0 if self.single_attempt else 2, "timeout": 120.0 if self.single_attempt else 600.0}
         if cfg.get("api_key"):
             kw["api_key"] = cfg["api_key"]
@@ -113,7 +114,7 @@ class AnthropicProvider:
             if official:
                 d["eager_input_streaming"] = True   # inputs are validated before any tool runs
             tool_defs.append(d)
-        kwargs = dict(model=self.model, max_tokens=MAX_TOKENS, system=system, messages=self._messages(transcript),
+        kwargs = dict(model=self.model, max_tokens=self.response_tokens, system=system, messages=self._messages(transcript),
                       cache_control={"type": "ephemeral"})
         if tool_defs:
             kwargs["tools"] = tool_defs
@@ -167,7 +168,7 @@ class AnthropicProvider:
         usage = data.get("usage") or {}
         return Turn(text=text, tool_calls=calls, stop=stop, raw={"provider": "anthropic", "content": content},
                     model=data.get("model"), usage={k: usage.get(k) for k in ("input_tokens", "output_tokens",
-                                                                             "cache_read_input_tokens")})
+                                                                             "cache_read_input_tokens", "cache_creation_input_tokens")})
 
 
 # --------------------------------------------------------------------- OpenAI-compatible
@@ -191,6 +192,9 @@ class OpenAICompatibleProvider:
         # picked in the chat for this message takes precedence.
         self.extra_body = dict(cfg.get("extra_params") or {})
         self.extra_body.update(thinking_params(cfg.get("preset"), cfg.get("thinking") or ""))
+        self.response_tokens = cfg.get("_response_tokens")
+        self.output_limit_key = "max_completion_tokens" if cfg.get("preset") == "openai" else "max_tokens"
+        self.single_attempt = cfg.get("_single_attempt", False)
         self.no_streaming = False
 
     def _messages(self, system: str, transcript: list[dict]) -> list[dict]:
@@ -255,6 +259,8 @@ class OpenAICompatibleProvider:
     def complete(self, system: str, transcript: list[dict], tools: list[dict], on_text=None) -> Turn:
         sdk = self._sdk
         kwargs = dict(model=self.model, messages=self._messages(system, transcript))
+        if self.response_tokens and not any(k in self.extra_body for k in ("max_tokens", "max_completion_tokens")):
+            kwargs[self.output_limit_key] = self.response_tokens
         if self.extra_body:
             kwargs["extra_body"] = dict(self.extra_body)
         if tools:
@@ -266,7 +272,7 @@ class OpenAICompatibleProvider:
                 try:
                     streamed = self._streamed(kwargs, on_text)
                 except sdk.BadRequestError as e:
-                    if "stream" not in str(e.message).lower():
+                    if self.single_attempt or "stream" not in str(e.message).lower():
                         raise
                     self.no_streaming = True   # this endpoint does not stream: ask again without, and stop trying
             resp = None if streamed else self.client.chat.completions.create(**kwargs)

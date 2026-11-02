@@ -92,6 +92,8 @@ class SearchService:
             rid = c.execute("INSERT INTO search_docs(account_id, item_id, resource_id) VALUES (?,?,?)",
                             (account_id, item_id, resource_id)).lastrowid
         c.execute("INSERT INTO search_fts(rowid, title, body) VALUES (?,?,?)", (rid, title, body))
+        from .context_sources import index_source
+        index_source(c, rid, item_id, resource_id, title, body)
 
     def search(self, account_id: int, q: str, *, course_id: str | None = None, types: list[str] | None = None,
                observed_after: str | None = None, observed_before: str | None = None,

@@ -231,6 +231,7 @@ class CodexProvider:
     def _turn(self, calls=None):
         result = Turn(self._text(), tool_calls=calls or [], stop="tool_use" if calls else "end",
                       raw={"provider": "codex"}, model=self.model, usage=self.usage)
+        self.usage = None  # do not count one usage event again at the next tool boundary
         self.reported = {key: len(value) for key, value in self.messages.items()}
         return result
 
