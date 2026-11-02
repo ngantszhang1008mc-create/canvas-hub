@@ -13,11 +13,21 @@ open an interactive browser for the user's own sign-in. Unknown origins and
 non-HTTPS requests are blocked. Sign-in POSTs are limited to recognized paths;
 each requires separate one-time user approval and expires after 60 seconds.
 Requests are routed through a public-address DNS-pinned transport, with bounded
-response size. HTTP redirect responses are blocked before the browser sees them:
-Playwright does not re-run route handlers on subsequent redirect hops, so letting
-the browser follow them could escape the approved origins and pinned transport.
-Redirect-dependent sign-in/SSO is currently unsupported, even between approved
-origins. WebSockets and service workers are
+response size. HTTP redirects are never handed to Chromium: Playwright does not
+re-run route handlers for later hops in a browser redirect chain. Instead,
+top-level sign-in redirects are aborted and replaced by fresh GET navigations
+to validated HTTPS URLs within the explicitly approved origins. Each request
+revalidates DNS and pins the connection before sending traffic, including
+same-origin hops. The final document keeps its actual destination origin.
+Each chain allows at most five redirects, rejects repeated URLs, and stops
+starting hops after 20 seconds. Existing per-request time/size limits still
+apply. New navigations use only destination-scoped cookies; source request
+headers and bodies are not copied. POST 301/302/303 responses become GETs;
+POST 307/308 responses are blocked because the one-time approval does not
+permit replaying a submission. Subresource redirects and popup sign-in are
+unsupported. Blocked redirects have a bounded reason code in the local UI,
+without disclosing redirect paths, queries or authentication values.
+WebSockets and service workers are
 blocked. Unsupported cookie syntax and other network requests fail closed.
 
 Checking the requested page is a separate action: it makes a single GET for the
@@ -41,7 +51,13 @@ No public adapter is created for an authenticated snapshot and no authenticated
 background crawling is enabled. The existing public Analyze link flow remains
 separate. Every connected-page analysis requires a fresh explicit approval.
 
-Limitations requiring real-world validation include multi-cookie flows,
+Synthetic tests cover bounded GET SSO redirects, relative locations, actual
+document origin, per-origin cookies, POST-to-GET without credential forwarding,
+private/rebound DNS, unknown/unsafe destinations, loops and replay blocking.
+Real Oxygen/Zinc sign-in has not been tested; support for this safe subset of
+redirects does not establish that their full SSO flows work.
+
+Limitations requiring real-world validation include multi-cookie and SSO flows,
 login POST paths not recognized by the conservative policy, sites requiring a
 Referrer header or script-rendered course pages, native HTTP Basic sign-in,
 CAPTCHAs, and cross-origin assets. Such sites may remain unverified even when

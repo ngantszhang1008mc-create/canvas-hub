@@ -97,7 +97,21 @@ export function makeExternalSources(env) {
                   }));
               }));
           } else {
-            if(state.redirect_blocked)connectBox.append(note('This sign-in flow uses an HTTP redirect, which is currently blocked. Redirect-dependent sign-in is not supported; saved source data is unchanged.'));
+            if(state.redirect_blocked) {
+              const reason={
+                unapproved_origin:'The destination has not been approved. Review the blocked origin before reconnecting.',
+                unsafe_target:'The destination could not be used safely.',
+                post_replay:'The sign-in flow would repeat a submission. It cannot be continued automatically.',
+                verification:'The requested page redirected instead of showing course content. Reopen sign-in, then check the requested page again.',
+                loop:'The sign-in page redirected in a loop.',
+                limit:'The sign-in page redirected too many times.',
+                timeout:'The sign-in redirects took too long.',
+                navigation_changed:'The sign-in destination changed unexpectedly. Reopen the sign-in page to try again.',
+                subresource:'A page resource tried to redirect. This sign-in flow may not be supported.',
+                request_failed:'The next sign-in page could not be reached safely.'
+              }[state.redirect_reason]||'This redirect is not supported.';
+              connectBox.append(note(`A sign-in redirect was stopped. ${reason} Saved source data is unchanged.`));
+            }
             if(state.blocked_origins?.length)connectBox.append(note(`Blocked origins: ${state.blocked_origins.join(', ')}. Close and reopen after reviewing any identity-provider origin you need.`));
             if(state.blocked_submission_origin)connectBox.append(note(`A submission to ${state.blocked_submission_origin} was blocked because its purpose could not be verified. This sign-in flow may not be supported.`));
             if(state.pending_post)connectBox.append(note(`A sign-in submission to ${state.pending_post.origin} is waiting for approval. Approve once, then submit again in the site window.`),

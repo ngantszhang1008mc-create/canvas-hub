@@ -256,10 +256,12 @@ def test_batch_cancel_ui_and_item_scope(hub,account,source,monkeypatch):
 def test_site_connection_requires_review_and_consent_in_browser(hub, account, source, monkeypatch):
     from playwright.sync_api import expect, sync_playwright
     from .test_site_connection import FakeBrowser
-    created=[]
+    created=[]; redirect_state={}
+    class Browser(FakeBrowser):
+        def snapshot(self): return {**super().snapshot(), **redirect_state}
     def make_browser(profile,target,domains):
         created.append((profile,target,domains))
-        return FakeBrowser(profile,target,domains)
+        return Browser(profile,target,domains)
     monkeypatch.setattr('canvas_hub.services.site_connection.BrowserConnection',make_browser)
     with serve(hub,[]) as (base,token,_),sync_playwright() as p:
         browser=p.chromium.launch(); page=browser.new_page(viewport={'width':380,'height':900})
@@ -280,6 +282,10 @@ def test_site_connection_requires_review_and_consent_in_browser(hub, account, so
         box.get_by_role('button',name='Agree and open sign-in window').click()
         expect(box).to_contain_text('Connection: opening')
         assert len(created)==1 and 'https://identity.example.edu' in created[0][2]
+        redirect_state.update(redirect_blocked=True,redirect_reason='post_replay')
+        box.get_by_role('button',name='Refresh connection status').click()
+        expect(box).to_contain_text('The sign-in flow would repeat a submission')
+        expect(box).to_contain_text('Saved source data is unchanged')
         box.get_by_role('button',name='Close connection').click()
         expect(box).to_contain_text('Connection: closed')
         assert not errors
