@@ -21,6 +21,7 @@ from ..db import Database
 from ..util import Conflict, InvalidInput, NotFound, now_iso, parse_iso
 from .annotations import AnnotationService
 from .component_sync import ComponentSourceSync, SOURCE_META, source_meta
+from .component_context import ComponentContext
 
 KINDS = ("score_model", "checklist", "grade_projector", "hours_tracker")
 MAX_ROWS = 300
@@ -88,7 +89,7 @@ def checklist_totals(spec: dict, state: dict) -> dict:
             "open_count": cnt - dcnt, "next_due": nxt[0] if nxt else None}
 
 
-class ComponentService(ComponentSourceSync):
+class ComponentService(ComponentSourceSync, ComponentContext):
     def __init__(self, db: Database, annotations: AnnotationService):
         self.db = db
         self.annotations = annotations

@@ -831,6 +831,11 @@ def create_app(api: HubAPI, *, token: str, port: int) -> FastAPI:
         b = await body(request)
         return _assistant().retry(aid, cid, b.get('profile_id'), b.get('reasoning'), b.get('model'))
 
+    @app.post("/api/accounts/{aid}/assistant/conversations/{cid}/compact")
+    async def assistant_compact(aid: int, cid: int, request: Request):
+        b = await body(request)
+        return _assistant().compact(aid, cid, b.get('profile_id'), b.get('reasoning'), b.get('model'))
+
     @app.delete("/api/accounts/{aid}/assistant/conversations/{cid}")
     def assistant_delete(aid: int, cid: int):
         return _assistant().delete_conversation(aid, cid)

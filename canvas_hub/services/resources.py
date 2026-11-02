@@ -164,6 +164,13 @@ class ResourceService:
                 (status, tool, detail, extracted_path, len(text) if text else 0, now_iso(),
                  None if conf is None else round(conf, 1), sha),
             )
+            # Forced extraction/OCR can change text without changing the original
+            # resource hash. Replace derived previews/chunks even for empty text.
+            from .search import SearchService
+            search = SearchService(self.db)
+            for doc in c.execute("SELECT d.account_id,d.item_id,f.title FROM search_docs d JOIN search_fts f ON f.rowid=d.id "
+                                 "WHERE d.resource_id=?", (sha,)).fetchall():
+                search.index_resource(c, doc["account_id"], doc["item_id"], sha, doc["title"], text or "")
         return dict(self.db.one("SELECT * FROM resources WHERE id=?", (sha,)))
 
     def extract_bounded(self, sha: str, filename: str | None, *, should_stop,
