@@ -131,9 +131,7 @@ class SourceAnalysis:
     def _submit(self, aid, sid, rid, token, result):
         # Bind publication to the durable attempt too: deleted/recreated account
         # and request integer IDs must never accept an old worker's result.
-        with self.sources._lock, self.db.tx():
-            self._active(aid, sid, rid, token)
-            return self.sources.submit_analysis(aid, rid, AGENT, result, _builtin=True)
+        return self.sources.submit_analysis(aid, rid, AGENT, result, _builtin=True, _attempt_token=token)
 
     def _run(self, aid, sid, rid, token, cfg):
         with self._slots:
@@ -241,10 +239,10 @@ class SourceAnalysis:
         visible = []
         for entry in entries:
             status = entry['status']
-            if entry.get('request_id'):
+            if entry.get('request_id') and self.db.one('SELECT 1 FROM source_analysis_attempts WHERE token=? AND account_id=? AND source_id=? AND request_id=?', (entry['token'],aid,entry['source_id'],entry['request_id'])):
                 req = self.hub.requests._get(aid, entry['request_id'])
                 status = {'done':'done','declined':'failed','cancelled':'cancelled'}.get(req['status'],'running')
-            elif row['state']=='cancelled' and status=='queued':
+            elif entry.get('request_id') or (row['state']=='cancelled' and status=='queued'):
                 status='cancelled'
             visible.append({'source_id':entry['source_id'],'url':entry['url'],'status':status})
         return {'token':token, 'scope':row['scope_key'], 'state':row['state'], 'total':len(visible),
@@ -291,7 +289,7 @@ class SourceAnalysis:
             if batch['state'] in ('offered','running'):
                 c.execute("UPDATE source_analysis_batches SET state='cancelled' WHERE token=?", (token,))
                 for e in json.loads(batch['entries_json']):
-                    if e.get('request_id'):
+                    if e.get('request_id') and c.execute('SELECT 1 FROM source_analysis_attempts WHERE token=? AND account_id=? AND source_id=? AND request_id=?', (e['token'],aid,e['source_id'],e['request_id'])).fetchone():
                         self.hub.requests.cancel(aid,e['request_id'])
         return self.batch_view(aid,token)
 
@@ -314,7 +312,6 @@ class SourceAnalysis:
                         entry['status']='failed'
                     with self.db.tx() as c:
                         c.execute('UPDATE source_analysis_batches SET entries_json=? WHERE token=?',(canonical_json(entries),token))
-                rid=entry.get('request_id')
                 # Serial dispatch: cancellation can mark both current and queued jobs.
                 thread=self.threads.get(entry['token'])
                 if thread:
@@ -322,6 +319,9 @@ class SourceAnalysis:
             with self.db.tx() as c:
                 c.execute("UPDATE source_analysis_batches SET state='done' WHERE token=? AND state='running'",(token,))
         except Exception:
-            self.batch_cancel(aid,token)
+            try:
+                self.batch_cancel(aid,token)
+            except NotFound:
+                pass  # Account deletion also removes the batch; never resurrect it.
         finally:
             self.batch_threads.pop(token,None)

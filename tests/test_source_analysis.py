@@ -306,3 +306,18 @@ def test_deleted_and_recreated_ids_reject_old_worker(builtin,source,account,hub,
     finally:resume.set();finish(service)
     assert svc.get(aid,sid)['classification']['summary']=='NEW WORKER'
     assert len(svc.get(aid,sid)['reads'])==1
+
+
+
+def test_component_sync_runs_after_source_transaction(builtin,source,account,monkeypatch):
+    service,api,calls=builtin;svc,sid,reads=source;aid=account['id'];checked=[]
+    original=svc.hub.components.sync_sources
+    def sync(account_id):
+        # Component writes take their own lock before a SQLite transaction.
+        # Holding the source transaction here would invert that lock order.
+        assert not svc.db.conn.in_transaction
+        checked.append(account_id)
+        return original(account_id)
+    monkeypatch.setattr(svc.hub.components,'sync_sources',sync)
+    start(service,aid,sid);finish(service)
+    assert checked==[aid] and svc.get(aid,sid)['request']['status']=='done'

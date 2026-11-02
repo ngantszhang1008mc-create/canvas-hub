@@ -192,17 +192,17 @@ class ExternalSources:
             self.db.conn.execute('UPDATE external_sources SET analysis_request_id=?,error=NULL WHERE id=?', (req['id'], sid))
         return self.get(aid, sid)
 
-    def submit_analysis(self, aid, request_id, agent_name, result, *, _builtin=False):
+    def submit_analysis(self, aid, request_id, agent_name, result, *, _builtin=False, _attempt_token=None):
         if _check_agent(agent_name) == 'Canvas Hub built-in Assistant' and not _builtin:
             raise Conflict('Built-in analysis cannot be submitted by a connected Agent')
-        source = self._submit_analysis(aid, request_id, agent_name, result)
+        source = self._submit_analysis(aid, request_id, agent_name, result, _attempt_token=_attempt_token)
         # Proposal/access changes can pause previously available evidence without
         # performing a read. Update saved tool status after releasing the source
         # transaction, preserving the user's interactive state.
         self.hub.components.sync_sources(aid)
         return source
 
-    def _submit_analysis(self, aid, request_id, agent_name, result):
+    def _submit_analysis(self, aid, request_id, agent_name, result, *, _attempt_token=None):
         agent = _check_agent(agent_name)
         if not isinstance(result, dict) or set(result) - {'roles','confidence','evidence_url','read_at','summary','content','access_error','adapter_spec'}:
             raise InvalidInput('Invalid source analysis fields')
@@ -213,6 +213,8 @@ class ExternalSources:
             if req['status'] != 'claimed' or req['claimed_by'] != agent or not req['external_source_id']:
                 raise Conflict('Claim this active source analysis request first')
             sid = req['external_source_id']
+            if _attempt_token is not None and not c.execute("SELECT 1 FROM source_analysis_attempts WHERE token=? AND account_id=? AND source_id=? AND request_id=? AND state='running'", (_attempt_token, aid, sid, request_id)).fetchone():
+                raise Conflict('This built-in attempt was deleted or superseded')
             s = self._source(aid, sid)
             if s['analysis_request_id'] != request_id:
                 raise Conflict('This analysis request was superseded')
