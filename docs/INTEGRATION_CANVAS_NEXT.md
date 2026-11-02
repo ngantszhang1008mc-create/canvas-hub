@@ -173,3 +173,38 @@ distinct focused checks across the initial run and targeted reruns (one test's
 misplaced assertion was corrected); these include the Chromium context panel.
 JavaScript syntax and diff whitespace checks passed. All provider responses were
 synthetic; the token figures above remain application estimates.
+
+## Overnight regression integration
+
+The tracker/deadline repair (`8f150f1`) and external-login repair (`ce0e6d4`)
+are integrated with the context fixes above. Legacy trackers now use a bounded
+automatic height with internal scrolling and desktop score/control columns;
+saved heights, definitions and manual state are retained. Upcoming deadline
+views include older unfinished assignments/quizzes while keeping course, type,
+archive and completion filters. Actual completion counts still depend on
+collected submission status.
+
+Failed source inspections receive a bounded anonymous authentication check and
+a sign-in/manual connection button, without an automatic model retry. HTTP
+links require separate HTTPS review. Basic credentials stay in memory for the
+exact challenged HTTPS document; they are not forwarded to redirects or assets.
+The integration also fixes a shutdown race so a timed-out close still closes the
+browser and clears queued credentials after the active request returns.
+Real course-site Basic/SSO/MFA has not been exercised. Popup-only SSO,
+cross-origin resources and JavaScript-generated course content remain limited;
+see [connection boundaries](EXTERNAL_LOGIN_RESEARCH.md).
+
+One combined run passed **29 focused checks in 58.96 seconds**. The added
+timed-out-close regression passed separately (1.80 seconds), followed by three
+credential-expiry/denial variants (12.13 seconds). Both challenged and plain
+401/403 denials clear the cached authorization. Chromium screenshots at 1120px and
+390px were inspected. The checks include context continuation, source consent,
+Basic/redirect boundaries, gateway failure usage, legacy tracker state and
+deadline filters. No complete suite or real provider call was run.
+
+Schema remains **18**, with no new migration. Upgrade checks passed for 12→18,
+16→18 and 17→18, including reopening and saved state. The schema-12 test's old
+store builder had incorrectly used the newer context-index hook before its
+table existed; the fixture now simulates the old index, then verifies actual
+migration and context-source backfill. Production startup still migrates before
+initializing services; missing current-schema tables are not silently ignored.

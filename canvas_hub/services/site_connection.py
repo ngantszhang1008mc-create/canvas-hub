@@ -187,7 +187,10 @@ class BrowserConnection:
         try:
             return future.result(timeout=timeout)
         except TimeoutError:
-            future.cancel()  # A timed-out action still in the queue must not run.
+            # Stale queued actions must not run, but closing intent must survive
+            # a slow in-flight request even after its caller stops waiting.
+            if action != 'cancel':
+                future.cancel()
             raise Conflict('The site browser did not respond; check connection status before retrying')
 
     def _allowed_origin(self, host):
@@ -353,6 +356,8 @@ class BrowserConnection:
                     # Native auth prompts cannot work through an intercepted
                     # transport; use the guarded local entry UI instead.
                 elif status in (401, 403):
+                    self._basic_pending = None
+                    getattr(self, '_basic_auth', {}).pop(request.url, None)
                     self.update(http_auth=None, failure_reason='access_denied')
                 elif status >= 400:
                     self.update(failure_reason='page_unavailable')

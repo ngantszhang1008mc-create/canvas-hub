@@ -22,12 +22,15 @@ CONTENT = b'<body><table><tr><td>' + b'Course lectures and assignment informatio
 
 
 @pytest.mark.browser
-def test_basic_challenge_secure_entry_legacy_page_expiry_and_cleanup(tmp_path):
+@pytest.mark.parametrize('expiry', ['challenge', '401', '403'])
+def test_basic_challenge_secure_entry_legacy_page_expiry_and_cleanup(tmp_path, expiry):
     calls, expired = [], [False]
     def transport(url, method, headers, body):
         calls.append((url, method, dict(headers)))
         if headers.get('authorization') == AUTH and not expired[0]:
             return 200, {'content-type':'text/html'}, [], CONTENT.replace(b'</body>', f'<p>{PASSWORD}</p></body>'.encode())
+        if expired[0] and expiry != 'challenge':
+            return int(expiry), {}, [], b''
         return 401, {'content-type':'text/html', 'www-authenticate':'Basic realm="never-disclose-realm"'}, [], b'Authentication required'
     with browser_session(tmp_path, transport) as session:
         challenge = session.snapshot()['http_auth']
@@ -48,8 +51,10 @@ def test_basic_challenge_secure_entry_legacy_page_expiry_and_cleanup(tmp_path):
         assert USERNAME not in json.dumps(session.snapshot()) and PASSWORD not in json.dumps(session.snapshot())
         expired[0] = True
         with pytest.raises(Conflict): session.call('analysis_snapshot')
-        assert session.snapshot()['state'] == 'reconnect_needed'
+        assert session.snapshot()['state'] == ('reconnect_needed' if expiry == 'challenge' else 'access_denied')
         assert not session._basic_auth
+        if expiry != 'challenge':
+            assert session._basic_pending is None
     assert not session._credential_redactions and not session._basic_auth
 
 
@@ -143,8 +148,8 @@ def test_close_discards_queued_credentials_without_sending_them(tmp_path):
     session = BrowserConnection(base/'external-sites'/'account-1'/'profile', TARGET, {COURSE}, transport, headless=True)
     try:
         assert entered.wait(5)
-        session._cancel_requested.set()
-        session.events.put(('cancel', None, Future()))
+        with pytest.raises(Conflict, match='did not respond'):
+            session.call('cancel', timeout=.01)
         pending = {'username':USERNAME, 'password':PASSWORD, 'challenge':{}}
         future = Future()
         session.events.put(('http_auth', pending, future))
