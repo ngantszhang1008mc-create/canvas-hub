@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -106,6 +107,11 @@ class Importer:
         if job_id is None:
             prior = self.jobs.by_package(account_id, pkg.package_id)
             if prior:
+                # A prior process may have committed observations but stopped
+                # before consuming the durable component-refresh outbox.
+                changed_sync = getattr(self, "after_changed_import", None)
+                if changed_sync is not None:
+                    changed_sync(account_id)
                 return {"status": "already_imported", "job_id": prior["id"], "account_id": account_id,
                         "stats": prior["stats"]}
             job = self.jobs.create(account_id=account_id, instance_id=acct["instance_id"], kind="import",
@@ -132,10 +138,17 @@ class Importer:
                     if iid:
                         touched.append(iid)
                 for pc in pkg.presence_checks:
-                    self._apply_presence(c, account_id, job_id, pc, stats)
+                    iid = self._apply_presence(c, account_id, job_id, pc, stats)
+                    if iid:
+                        touched.append(iid)
                 for cov in pkg.coverage:
-                    self._apply_coverage(c, account_id, job_id, pkg.run.mode, cov, stats)
+                    touched.extend(self._apply_coverage(c, account_id, job_id, pkg.run.mode, cov, stats))
                 self._detect_discrepancies(c, account_id, acct.get("time_zone"), touched)
+                if getattr(self, "after_changed_import", None) is not None:
+                    changes = {(account_id, "item", str(iid)) for iid in touched}
+                    changes.update((account_id, "collection", str(cov.course_id)) for cov in pkg.coverage
+                                   if cov.category == "assignments" and cov.course_id)
+                    c.executemany("INSERT OR IGNORE INTO component_source_changes VALUES (?,?,?)", sorted(changes))
         except Exception as e:
             if own_job:
                 self.jobs.set_state(job_id, "failed", error=f"{type(e).__name__}: {e}")
@@ -146,6 +159,18 @@ class Importer:
         discovery = getattr(self, "after_discovery", None)
         if discovery is not None:
             discovery(account_id, pkg)
+        changed_sync = getattr(self, "after_changed_import", None)
+        if changed_sync is not None:
+            started = time.monotonic()
+            refreshed = changed_sync(account_id, item_ids=set(touched), course_ids={
+                cov.course_id for cov in pkg.coverage if cov.category == "assignments" and cov.course_id
+            })
+            sync_stats = {"component_sync_seconds": time.monotonic() - started,
+                          "components_refreshed": len(refreshed)}
+            self.jobs.update_stats(job_id, **sync_stats)
+            stats.update(sync_stats)
+        # Keep the original hook for integrations that need every completed
+        # package. The built-in component service uses the dependency hook above.
         sync = getattr(self, "after_import", None)
         if sync is not None:
             sync(account_id)
@@ -385,11 +410,13 @@ class Importer:
                 self._event(c, account_id, row["id"], job_id, "source_unavailable", pc.checked_at,
                             old={"presence": row["presence"]}, new={"presence": "source_unavailable", "detail": detail},
                             prior=row["last_observed_at"], stats=stats)
+                return row["id"]
         elif pc.result == "available" and row["presence"] != "observed":
             c.execute("UPDATE items SET presence='observed', presence_detail=?, presence_changed_at=? WHERE id=?",
                       ("source still reachable but not listed in the index", pc.checked_at, row["id"]))
             self._event(c, account_id, row["id"], job_id, "reobserved", pc.checked_at,
                         old={"presence": row["presence"]}, new={"presence": "observed"}, stats=stats)
+            return row["id"]
 
     def _apply_coverage(self, c, account_id, job_id, mode, cov, stats):
         course = cov.course_id or ""
@@ -409,7 +436,7 @@ class Importer:
         )
         stats["coverage_records"] += 1
         if not cov.absence_inference or cov.status != "complete" or cov.index_depth != "complete":
-            return
+            return []
         types = cov.absence_inference.item_types
         # Account-level coverage (course_id None) spans every course, e.g. the
         # All Courses inventory for item type 'course'.
@@ -430,6 +457,7 @@ class Importer:
                         old={"presence": "observed"}, new={"presence": "not_in_latest_index", "category": cov.category},
                         prior=r["last_observed_at"], stats=stats)
             stats["marked_not_in_index"] += 1
+        return [r["id"] for r in rows]
 
     # ------------------------------------------------------------------
     def _detect_discrepancies(self, c, account_id: int, time_zone: str | None, item_ids: list[int]) -> None:

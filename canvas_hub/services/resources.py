@@ -13,6 +13,9 @@ import mimetypes
 import os
 import re
 import subprocess
+import signal
+import sys
+import time
 import tempfile
 import threading
 from pathlib import Path
@@ -126,6 +129,10 @@ class ResourceService:
             raise NotFound("resource not found")
         if row["extraction_status"] != "not_attempted" and not force:
             return dict(row)
+        result = self._convert(row, filename)
+        return self._save_extraction(sha, result)
+
+    def _convert(self, row, filename):
         ext = Path(filename or "").suffix.lower()
         if not ext and row["content_type"]:
             ext = mimetypes.guess_extension(row["content_type"].split(";")[0].strip()) or ""
@@ -134,10 +141,21 @@ class ResourceService:
         if status in ("image_only", "needs_ocr"):
             status, detail, text, tool, conf = self._try_ocr(self.paths.resources / row["stored_path"], ext,
                                                              (status, detail, text, tool))
+        return status, detail, text, tool, conf
+
+    def _save_extraction(self, sha, result):
+        status, detail, text, tool, conf = result
         extracted_path = None
         if text:
             out = self.paths.extracted / f"{sha}.md"
-            out.write_text(text, encoding="utf-8")
+            fd, temp = tempfile.mkstemp(dir=self.paths.extracted)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as output:
+                    output.write(text)
+                os.replace(temp, out)
+            finally:
+                if os.path.exists(temp):
+                    os.unlink(temp)
             extracted_path = out.relative_to(self.paths.resources).as_posix()
         with self.db.tx() as c:
             c.execute(
@@ -147,6 +165,80 @@ class ResourceService:
                  None if conf is None else round(conf, 1), sha),
             )
         return dict(self.db.one("SELECT * FROM resources WHERE id=?", (sha,)))
+
+    def extract_bounded(self, sha: str, filename: str | None, *, should_stop,
+                        timeout_seconds: float = 120) -> dict:
+        """Convert in a disposable local process; only the parent commits results.
+
+        The durable queue owns retry policy. Timeout/cancellation leave the resource
+        unattempted, so a restart can retry it without accepting partial output.
+        Neither document text nor converter diagnostics enter process logs.
+        """
+        from ..collector.client import Cancelled
+
+        row = self.db.one("SELECT * FROM resources WHERE id=?", (validate_resource_id(sha),))
+        if not row:
+            raise NotFound("resource not found")
+        if should_stop():
+            raise Cancelled("document processing cancelled")
+        if row["extraction_status"] not in ("not_attempted", "failed", "tool_unavailable"):
+            return dict(row)
+        if timeout_seconds <= 0:
+            raise ValueError("extraction timeout must be positive")
+        with tempfile.TemporaryDirectory(prefix="canvas-extract-") as directory:
+            root = Path(directory)
+            request = root / "request.json"
+            result = root / "result.json"
+            request.write_text(json.dumps({"db": self.db.path, "home": str(self.paths.home),
+                                           "sha": sha, "filename": filename}), encoding="utf-8")
+            env = os.environ.copy()
+            env.update(TMPDIR=directory, TEMP=directory, TMP=directory)
+            options = {"start_new_session": True} if os.name != "nt" else {
+                "creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+            process = subprocess.Popen(self._extraction_command(request, result),
+                                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                       stderr=subprocess.DEVNULL, env=env, **options)
+            deadline = time.monotonic() + timeout_seconds
+            try:
+                while process.poll() is None:
+                    if should_stop():
+                        raise Cancelled("document processing cancelled")
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError("document processing exceeded its time limit")
+                    time.sleep(min(0.05, max(0, deadline - time.monotonic())))
+                if should_stop():
+                    raise Cancelled("document processing cancelled")
+                if process.returncode != 0 or not result.exists():
+                    raise RuntimeError("document processing worker failed; retry is available")
+                converted = json.loads(result.read_text(encoding="utf-8"))
+                return self._save_extraction(sha, converted)
+            finally:
+                self._stop_extraction_process(process)
+
+    @staticmethod
+    def _extraction_command(request, result):
+        return [sys.executable, "-m", "canvas_hub.extraction_worker", str(request), str(result)]
+
+    @staticmethod
+    def _stop_extraction_process(process):
+        # POSIX children (including OCR helpers) inherit this dedicated group.
+        # Windows taskkill /T terminates the worker and its descendant tree.
+        if os.name == "nt":
+            if process.poll() is None:
+                try:
+                    subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                   timeout=5, check=False)
+                except (OSError, subprocess.TimeoutExpired):
+                    process.kill()
+        else:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        if process.poll() is None:
+            process.kill()
+        process.wait()
 
     def _run_extraction(self, path: Path, ext: str, size: int) -> tuple[str, str | None, str, str | None]:
         if ext in _MEDIA_TYPES:

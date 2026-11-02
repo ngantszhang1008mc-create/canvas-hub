@@ -168,9 +168,13 @@ class CollectionRun:
         self.scoped_courses: list[str] = list(st.get("scoped_courses") or [])
         self.staff: dict[str, list[str]] = dict(st.get("staff") or {})
         self._stop_cache = (0.0, False)
+        self._enqueued_at = {}
+        self._download_metadata = {}
 
     # ---- control -------------------------------------------------------------
     def should_stop(self) -> bool:
+        if getattr(self, "shutdown", None) is not None and self.shutdown.is_set():
+            return True
         t, v = self._stop_cache
         if time.monotonic() - t < 1.0:
             return v
@@ -180,8 +184,11 @@ class CollectionRun:
         return v
 
     def enqueue(self, key: str, kind: str, *, course_id=None, category=None, payload=None) -> bool:
-        return self.hub.jobs.add_task(self.job_id, key, kind, course_id=str(course_id) if course_id else None,
+        added = self.hub.jobs.add_task(self.job_id, key, kind, course_id=str(course_id) if course_id else None,
                                       category=category, payload=payload)
+        if added:
+            self._enqueued_at[key] = time.monotonic()
+        return added
 
     def enqueue_with_referrer(self, key: str, kind: str, referrer: dict | None, *, course_id=None, category=None,
                               payload=None) -> None:
@@ -337,48 +344,100 @@ class CollectionRun:
             self.enqueue("identity", "identity")
             self.enqueue("courses", "courses", category="courses")
         jobs.set_state(self.job_id, "running", message="Collecting from Canvas")
-        while True:
-            if self.should_stop():
-                return self._stopped()
-            task = jobs.next_task(self.job_id)
-            if task is None:
+        from .pipeline import BackgroundPipeline
+        started = time.monotonic()
+        try:
+            pipeline = BackgroundPipeline(self)
+        except AuthRequired:
+            jobs.set_state(self.job_id, "needs_login", message="Sign in again to resume pending work.")
+            return "needs_login"
+        except IdentityMismatch:
+            jobs.set_state(self.job_id, "failed", message="Session belongs to another account; no data was mixed.")
+            return "failed"
+        self._pipeline_active = True
+        try:
+            while True:
+                if self.should_stop():
+                    return self._stopped()
+                pipeline.pump()
+                state = jobs.get(self.job_id)["state"]
+                if state != "running":
+                    return self._stopped() if state == "cancel_requested" else state
+                task = jobs.next_task(self.job_id, exclude=["download", "process_document", "supplemental"])
+                if task is not None:
+                    self.execute_task(task, lambda: getattr(self, self.HANDLERS[task["kind"]])(task))
+                    continue
+                if not jobs.get(self.job_id)["stats"].get("core_status"):
+                    gaps = self.hub.db.one("SELECT 1 FROM job_tasks WHERE job_id=? AND kind NOT IN ('download','process_document','supplemental') AND state IN ('failed','blocked','skipped')", (self.job_id,))
+                    gaps = gaps or self.hub.db.one("SELECT 1 FROM coverage WHERE job_id=? AND status IN ('partial','blocked') AND category!='files'", (self.job_id,))
+                    jobs.update_stats(self.job_id, core_status="gaps" if gaps else "updated", core_seconds=time.monotonic()-started)
+                    with self.hub.db.tx() as c:
+                        c.execute("UPDATE jobs SET message=? WHERE id=? AND state='running'", ("Core data updated; attachments, document processing and supplemental verification may still be pending.", self.job_id))
+                self.enqueue("supplemental", "supplemental")
+                if pipeline.futures or jobs.pending_tasks(self.job_id, kinds=["download", "process_document", "supplemental"]):
+                    time.sleep(0.05)
+                    continue
                 break
-            jobs.update_stats(self.job_id, current_task=task["task_key"])
-            try:
-                getattr(self, self.HANDLERS[task["kind"]])(task)
-                jobs.finish_task(task["id"], "done")
-            except AuthRequired as e:
-                jobs.defer_task(task["id"], f"sign-in required: {e}")
-                jobs.set_state(self.job_id, "needs_login",
-                               message="Canvas sign-in expired or is required. Sign in again; the job resumes from its checkpoint.",
-                               error=str(e))
-                return "needs_login"
-            except Cancelled:
-                jobs.defer_task(task["id"], "stopped before completion")
-                return self._stopped()
-            except IdentityMismatch as e:
-                jobs.finish_task(task["id"], "failed", str(e))
-                jobs.set_state(self.job_id, "failed", error=str(e),
-                               message="The signed-in Canvas account is not this job's account; nothing was mixed.")
-                return "failed"
-            except (AccessDenied, NotFoundError) as e:
-                jobs.finish_task(task["id"], "blocked", str(e))
-                self._task_gap(task, "blocked", str(e))
-            except (TransientError, RateLimited, CollectorError) as e:
-                jobs.finish_task(task["id"], "failed", str(e))
-                self._task_gap(task, "partial", f"{type(e).__name__}: {e}")
-            except Exception as e:  # noqa: BLE001 - one task must not sink the job
-                log.exception("task %s failed", task["task_key"])
-                jobs.finish_task(task["id"], "failed", f"{type(e).__name__}: {e}")
-                self._task_gap(task, "partial", f"internal error: {type(e).__name__}: {e}")
+            return self._finish()
+        finally:
+            pipeline.close()
+            self._pipeline_active = False
+            current = jobs.get(self.job_id)["state"]
+            if current == "cancel_requested" or (current == "running" and self.should_stop()):
+                self._stopped()
+            jobs.update_stats(self.job_id, **{f"metadata_{k}": v for k,v in getattr(self.client, "metrics", lambda: {})().items()})
+
+    def execute_task(self, task, action, *, started=None):
+        jobs = self.hub.jobs
+        started = started if started is not None else time.monotonic()
+        jobs.mark_running(task["id"])
+        queued = self._enqueued_at.pop(task["task_key"], None)
+        if queued is not None:
+            jobs.update_stats(self.job_id, **{f"queue_seconds:{task['kind']}": max(0, started-queued)})
+        jobs.update_stats(self.job_id, current_task=task["task_key"])
+        try:
+            action()
+            jobs.finish_task(task["id"], "done")
+        except AuthRequired:
+            jobs.defer_task(task["id"], "sign-in required")
+            jobs.set_state(self.job_id, "needs_login", message="Sign in again to resume pending work.")
+        except Cancelled:
+            jobs.defer_task(task["id"], "stopped before completion")
+            self._stopped()
+        except IdentityMismatch:
+            jobs.finish_task(task["id"], "failed", "session identity mismatch")
+            jobs.set_state(self.job_id, "failed", message="Session belongs to another account; no data was mixed.")
+        except (AccessDenied, NotFoundError) as e:
+            jobs.finish_task(task["id"], "blocked", type(e).__name__)
+            self._task_gap(task, "blocked", type(e).__name__)
+        except Exception as e:
+            # URLs may contain signed tokens; retain only the safe error type.
+            jobs.finish_task(task["id"], "failed", type(e).__name__)
+            self._task_gap(task, "partial", type(e).__name__)
+        finally:
+            jobs.update_stats(self.job_id, **{f"seconds:{task['kind']}:{task.get('course_canvas_id') or 'account'}": time.monotonic()-started})
             jobs.heartbeat(self.job_id)
-        return self._finish()
+
+    def _supplemental(self, should_stop=None):
+        should_stop = should_stop or self.should_stop
+        external = self.hub.external_sources.refresh_registered(
+            self.account["id"], course_ids=set(self.scoped_courses), should_stop=should_stop)
+        if should_stop():
+            raise Cancelled("supplemental verification stopped")
+        self.hub.jobs.update_stats(self.job_id, external_sources=[{"id": s["id"], "status": s["status"]} for s in external])
 
     def _stopped(self) -> str:
         row = self.hub.db.one("SELECT state FROM jobs WHERE id=?", (self.job_id,))
         if row and row["state"] == "cancel_requested":
+            if getattr(self, "_pipeline_active", False):
+                return "cancelled"  # Keep the account locked while workers drain.
             self.hub.jobs.set_state(self.job_id, "cancelled", message="Cancelled. Observations collected so far were kept.")
             return "cancelled"
+        if row and row["state"] == "running":
+            if getattr(self, "_pipeline_active", False):
+                return "interrupted"
+            self.hub.jobs.set_state(self.job_id, "interrupted", message="Stopped; resume to continue durable pending work.")
+            return "interrupted"
         return row["state"] if row else "cancelled"
 
     def _linked_coverage(self) -> None:
@@ -388,35 +447,95 @@ class CollectionRun:
             """SELECT course_canvas_id, COUNT(*) n, SUM(state='done') ok FROM job_tasks
                WHERE job_id=? AND category='linked_content' AND course_canvas_id IS NOT NULL GROUP BY course_canvas_id""",
             (self.job_id,))
-        pkg = Package(self, "linked-coverage")
+        import hashlib
+        task_states = [tuple(r) for r in self.hub.db.query("SELECT id,state FROM job_tasks WHERE job_id=? ORDER BY id", (self.job_id,))]
+        digest = hashlib.sha256(json.dumps(task_states).encode()).hexdigest()[:20]
+        pkg = Package(self, f"linked-coverage:{digest}")
         for r in rows:
-            if r["n"] == r["ok"] and not self.hub.db.one(
-                    "SELECT 1 FROM coverage WHERE job_id=? AND course_canvas_id=? AND category='linked_content'",
-                    (self.job_id, r["course_canvas_id"])):
-                pkg.coverage("linked_content", "complete", course_id=r["course_canvas_id"], index="complete",
-                             body="complete", attachments="complete" if self.scope.get("download_files") else "not_checked",
+            if r["n"] == r["ok"]:
+                existing = self.hub.db.one(
+                    "SELECT detail_json FROM coverage WHERE job_id=? AND course_canvas_id=? AND category='linked_content'",
+                    (self.job_id, r["course_canvas_id"]))
+                if existing and "module_item_id" in json.loads(existing["detail_json"]):
+                    continue  # A deliberately unopened view-gated target is still a gap.
+                attachment_gap = self.hub.db.one(
+                    "SELECT 1 FROM job_tasks WHERE job_id=? AND course_canvas_id=? AND kind IN ('download','process_document') AND state!='done'",
+                    (self.job_id, r["course_canvas_id"]))
+                pkg.coverage("linked_content", "partial" if attachment_gap else "complete", course_id=r["course_canvas_id"], index="complete",
+                             body="complete", attachments=("partial" if attachment_gap else "complete") if self.scope.get("download_files") else "not_checked",
                              collected=r["n"], detail={"note": "Every destination linked from Home, syllabus, modules, "
                                                                "pages or announcements was followed."})
         pkg.commit()
 
     def _finish(self) -> str:
         self._linked_coverage()
+        # Inventory and attachment evidence share a coverage row. Recombine
+        # them without allowing a later download/gap to erase index evidence.
+        stats = self.hub.jobs.get(self.job_id)["stats"]
+        attachments = self.hub.db.query(
+            "SELECT course_canvas_id, COUNT(*) n, SUM(state='done') done FROM job_tasks "
+            "WHERE job_id=? AND kind IN ('download','process_document') GROUP BY course_canvas_id", (self.job_id,))
+        by_course = {r["course_canvas_id"] or "": dict(r) for r in attachments}
+        for key in stats:
+            if key.startswith("file_inventory:"):
+                by_course.setdefault(key.split(":", 1)[1], {"n": 0, "done": 0})
+        outcomes = []
+        for cid, counts in by_course.items():
+            inventory = stats.get(f"file_inventory:{cid}")
+            if inventory is None:
+                row = self.hub.db.one("SELECT * FROM coverage WHERE job_id=? AND course_canvas_id=? AND category='files'", (self.job_id, cid))
+                if row:
+                    detail = json.loads(row["detail_json"])
+                    # Keep the original inventory through repeated finalization,
+                    # including jobs begun before inventory snapshots were added.
+                    inventory = detail.get("core_inventory")
+                    # A failed task's summary is not evidence about the index.
+                    if inventory is None and not detail.get("task") and not detail.get("phase"):
+                        inventory = {"status": row["status"], "index": row["index_depth"], "body": row["body_depth"],
+                                     "expected": row["expected_count"], "collected": row["collected_count"],
+                                     "reason": row["reason"], "detail": detail}
+            if inventory is None:
+                core_gap = self.hub.db.one(
+                    "SELECT 1 FROM job_tasks WHERE job_id=? AND COALESCE(course_canvas_id,'')=? AND category='files' "
+                    "AND kind NOT IN ('download','process_document') AND state!='done'", (self.job_id, cid))
+                inventory = {"status": "partial" if core_gap else "complete",
+                             "index": "partial" if core_gap else "not_checked", "body": "not_checked"}
+            all_done = counts["n"] == counts["done"]
+            attachment_depth = ("complete" if all_done else "partial") if self.scope.get("download_files") else "not_checked"
+            # A partial inventory cannot establish that every attachment was found.
+            if inventory["status"] in ("partial", "blocked") and attachment_depth == "complete":
+                attachment_depth = "partial"
+            outcomes.append({"cid": cid, "inventory": inventory, "counts": counts, "attachments": attachment_depth})
+        import hashlib
+        digest = hashlib.sha256(json.dumps(outcomes, sort_keys=True).encode()).hexdigest()[:20]
+        pkg = Package(self, f"attachment-coverage:{digest}")
+        for outcome in outcomes:
+            inventory, counts = outcome["inventory"], outcome["counts"]
+            status = inventory["status"] if inventory["status"] in ("partial", "blocked") else (
+                "complete" if counts["n"] == counts["done"] else "partial")
+            pkg.coverage("files", status, course_id=outcome["cid"] or None,
+                         index=inventory["index"], body=inventory["body"], attachments=outcome["attachments"],
+                         expected=inventory.get("expected"), collected=inventory.get("collected"),
+                         reason=inventory.get("reason") or ("Some attachment or processing tasks did not complete" if status == "partial" else None),
+                         detail={**inventory.get("detail", {}), "core_inventory": inventory,
+                                 "phase": "attachments and document processing", "tasks": counts["n"], "done": counts["done"]})
+        pkg.commit()
         gaps = self.hub.db.one("SELECT COUNT(*) n FROM job_tasks WHERE job_id=? AND state IN ('failed','blocked','skipped')",
                                (self.job_id,))["n"]
         partial = self.hub.db.one("SELECT COUNT(*) n FROM coverage WHERE job_id=? AND status IN ('partial','blocked')",
                                   (self.job_id,))["n"]
-        external = self.hub.external_sources.refresh_registered(
-            self.account["id"], course_ids=set(self.scoped_courses),
-            should_stop=self.should_stop)
-        if self.should_stop():
-            return self._stopped()
+        external = self.hub.jobs.get(self.job_id)["stats"].get("external_sources", [])
         external_gaps = any(s['status'] != 'enabled' for s in external)
         state = "completed_with_gaps" if gaps or partial or external_gaps else "completed"
         msg = ("Finished. Some content could not be read; see Coverage and external source details for the specific gaps."
-               if state == "completed_with_gaps" else "Finished; every in-scope surface was read.")
+               if state == "completed_with_gaps" else "Finished; all queued collection and background work completed. See Coverage for verification depth.")
         self.hub.jobs.update_stats(self.job_id, external_sources=[{"id": s["id"], "status": s["status"]} for s in external])
         self.hub.jobs.update_stats(self.job_id, current_task=None)
-        self.hub.jobs.set_state(self.job_id, state, message=msg)
+        with self.hub.db.tx() as c:
+            current = c.execute("SELECT state FROM jobs WHERE id=?", (self.job_id,)).fetchone()
+            if current and current["state"] != "running":
+                return self._stopped()
+            self.hub.jobs.set_state(self.job_id, state, message=msg)
         return state
 
     def _task_gap(self, task: dict, status: str, reason: str) -> None:
@@ -1199,16 +1318,25 @@ class CollectionRun:
         if not self.scope.get("download_files"):
             return
         fid = str(f["id"])
+        if not hasattr(self, "_download_metadata"):
+            self._download_metadata = {}
+        self._download_metadata[fid] = dict(f)
         size = f.get("size") or 0
-        if size > self.scope.get("max_file_mb", 100) * 1024 * 1024:
-            return
-        if f.get("locked_for_user"):
+        excluded = ("skipped", "File exceeds the configured download size limit") if size > self.scope.get("max_file_mb", 100) * 1024 * 1024 else (
+            ("blocked", "Canvas reports this file is locked for the signed-in user") if f.get("locked_for_user") else (
+                ("skipped", "Opening this file would complete a gated module requirement") if self.view_blocked(f"file:{fid}") else None))
+        if excluded:
+            if self.enqueue(f"download:{fid}", "download", course_id=cid, category="files", payload={"id": fid}):
+                task = self.hub.db.one("SELECT id FROM job_tasks WHERE job_id=? AND task_key=?", (self.job_id, f"download:{fid}"))
+                self.hub.jobs.finish_task(task["id"], excluded[0], excluded[1])
             return
         prev_mod = self.stored_field("file", fid, "modified_at")
         new_mod = dates.from_api(f.get("modified_at") or f.get("updated_at"))
         changed = (prev_mod or {}).get("iso") != (new_mod or {}).get("iso")
-        if not self.has_resource("file", fid) or changed or self.thorough:
+        if not self.has_resource("file", fid) or changed or self.mode == "thorough":
             self.enqueue(f"download:{fid}", "download", course_id=cid, category="files", payload={"id": fid})
+        else:
+            self.hub.jobs.update_stats(self.job_id, unchanged_file_cache_hits=1)
 
     def t_files(self, task):
         cid = task["course_canvas_id"]
@@ -1242,8 +1370,7 @@ class CollectionRun:
                          title=f.get("display_name"), fields={**self._file_fields(f), "folder_path": fo.get("full_name")},
                          observed_at=t)
                 members.append({"relation": "folder_contains", "label": "", "to": ref("file", cid, fid)})
-                if not self.view_blocked(f"file:{fid}"):
-                    self._maybe_download(cid, f)
+                self._maybe_download(cid, f)
             pkg.item("folder", course_id=cid, canvas_id=foid, url=f"{self.origin}/courses/{cid}/files/folder/{quote(fo.get('full_name') or '')}",
                      title=fo.get("full_name"), observed_at=t, links=members, replace_links=["folder_contains"],
                      fields={"title": fo.get("full_name"), "name": fo.get("name"), "files_count": fo.get("files_count"),
@@ -1254,13 +1381,19 @@ class CollectionRun:
         reconciled = complete and not mismatches
         pkg.coverage("files", "complete" if reconciled else "partial", course_id=cid,
                      index="complete" if reconciled else "partial", body="not_applicable",
-                     attachments="complete" if self.scope.get("download_files") else "not_checked",
+                     attachments="partial" if self.scope.get("download_files") else "not_checked",
                      expected=sum((fo.get("files_count") or 0) for fo in folders.items), collected=n_files,
                      reason=(f"folder counts did not reconcile: {mismatches[:5]}" if mismatches else folders.reason),
                      detail={"folders": len(folders.items), "mismatches": mismatches,
                              "downloads": "queued separately; see per-file extraction status"},
                      absence_types=["file", "folder"] if reconciled else None)
         pkg.commit()
+        self.hub.jobs.update_stats(self.job_id, **{f"file_inventory:{cid}": {
+            "status": "complete" if reconciled else "partial", "index": "complete" if reconciled else "partial",
+            "body": "not_applicable", "expected": sum((fo.get("files_count") or 0) for fo in folders.items),
+            "collected": n_files, "reason": f"folder counts did not reconcile: {mismatches[:5]}" if mismatches else folders.reason,
+            "detail": {"folders": len(folders.items), "mismatches": mismatches},
+        }})
         self._presence_checks(cid, ["file"])
 
     def t_fetch_file(self, task):
@@ -1276,8 +1409,8 @@ class CollectionRun:
         pkg = Package(self, task["task_key"])
         pkg.item("file", course_id=cid, canvas_id=fid, url=f"{self.origin}/files/{fid}", title=f.get("display_name"),
                  fields=self._file_fields(f), observed_at=now_iso())
-        pkg.commit()
         self._maybe_download(cid, f)
+        pkg.commit()
 
     def t_fetch_folder(self, task):
         cid, path = task["course_canvas_id"], task["payload"]["path"]
@@ -1301,8 +1434,7 @@ class CollectionRun:
                          title=f.get("display_name"), fields={**self._file_fields(f), "folder_path": fo.get("full_name")},
                          observed_at=t)
                 members.append({"relation": "folder_contains", "label": "", "to": ref("file", cid, fid)})
-                if not self.view_blocked(f"file:{fid}"):
-                    self._maybe_download(cid, f)
+                self._maybe_download(cid, f)
             pkg.item("folder", course_id=cid, canvas_id=foid, title=fo.get("full_name"), observed_at=t, links=members,
                      replace_links=["folder_contains"],
                      fields={"title": fo.get("full_name"), "files_count": fo.get("files_count"),
@@ -1311,30 +1443,69 @@ class CollectionRun:
                 stack.extend(self.client.api_list(f"/api/v1/folders/{foid}/folders").items)
         pkg.commit()
 
-    def t_download(self, task):
+    def download_file(self, task, client):
         fid = task["payload"]["id"]
-        cid = task.get("course_canvas_id")
         blocked = self.view_blocked(f"file:{fid}")
         if blocked:
-            self._skip_view(task, blocked)
-            return
-        meta = self.client.api_get(f"/api/v1/files/{fid}")
+            raise AccessDenied("view completion is not permitted")
+        meta = self._download_metadata.get(fid)
+        if not meta or not meta.get("url"):
+            meta = client.api_get(f"/api/v1/files/{fid}")
         url = meta.get("url")
         if not url:
-            raise AccessDenied("no download URL offered (file locked or restricted)")
-        max_bytes = self.scope.get("max_file_mb", 100) * 1024 * 1024
-        body, ctype, _final = self.client.download(url, max_bytes)
+            raise AccessDenied("no download URL offered")
+        body, ctype, _ = client.download(url, self.scope.get("max_file_mb", 100) * 1024 * 1024)
+        # Signed URLs and session material are never persisted in task payloads.
+        safe_keys = {"id", "display_name", "filename", "content-type", "content_type", "size",
+                     "created_at", "updated_at", "modified_at", "locked", "hidden", "locked_for_user",
+                     "unlock_at", "lock_at", "folder_id", "lock_explanation"}
+        safe_meta = {k: v for k, v in meta.items() if k in safe_keys}
+        return body, ctype, safe_meta, getattr(client, "metrics", lambda: {})()
+
+    def commit_download(self, task, result):
+        body, ctype, meta, metrics = result
+        fid, cid = task["payload"]["id"], task.get("course_canvas_id")
         sha = self.hub.resources.store_bytes(body, ctype or meta.get("content-type"))
         name = meta.get("display_name") or meta.get("filename") or f"file-{fid}"
-        ext = self.hub.resources.extract(sha, name)
+        # Checkpoint the stored original before importing. A crash/retry can use
+        # it without a second network download; importer hooks run outside this
+        # transaction to preserve the component-lock/database-lock ordering.
+        checkpoint = {**task["payload"], "artifact": {"sha": sha, "meta": meta, "ctype": ctype}}
+        with self.hub.db.tx() as c:
+            c.execute("UPDATE job_tasks SET payload_json=? WHERE id=?", (json.dumps(checkpoint), task["id"]))
+        ext_status = self.hub.db.one("SELECT extraction_status FROM resources WHERE id=?", (sha,))["extraction_status"]
         pkg = Package(self, task["task_key"])
         pkg.item("file", course_id=cid, canvas_id=fid, url=f"{self.origin}/files/{fid}", title=name,
                  fields={**self._file_fields(meta), "content_sha256": sha, "downloaded_size": len(body),
-                         "extraction_status": ext["extraction_status"]},
+                         "extraction_status": "pending" if ext_status == "not_attempted" else ext_status},
                  resources=[{"sha256": sha, "filename": name}], observed_at=now_iso(), depth="detail")
         pkg.commit()
+        self.enqueue(f"process:{fid}:{sha}", "process_document", course_id=cid, category="files",
+                     payload={"id": fid, "sha": sha, "name": name})
+        self.hub.jobs.update_stats(self.job_id, downloaded_bytes=len(body))
+
+    def commit_document(self, task, ext):
+        payload = task["payload"]
+        if self.stored_field("file", payload["id"], "content_sha256") != payload["sha"]:
+            return  # A newer original has superseded this document.
+        pkg = Package(self, task["task_key"] + ":" + ext["extraction_status"])
+        pkg.item("file", course_id=task.get("course_canvas_id"), canvas_id=payload["id"],
+                 fields={"extraction_status": ext["extraction_status"]},
+                 resources=[{"sha256": payload["sha"], "filename": payload["name"]}], depth="detail")
+        pkg.commit()
+        text = self.hub.resources.extracted_text_for(payload["sha"])
+        if text:
+            with self.hub.db.tx() as c:
+                item = c.execute("SELECT id FROM items WHERE account_id=? AND item_type='file' AND source_key=?", (self.account["id"], payload["id"])).fetchone()
+                self.hub.search.index_resource(c, self.account["id"], item["id"], payload["sha"], payload["name"], text)
+        if ext["extraction_status"] in ("failed", "tool_unavailable"):
+            raise CollectorError("document conversion failed; retry available")
         if ext["extraction_status"] not in ("ok", "ocr", "ocr_low_confidence"):
             self.hub.jobs.update_stats(self.job_id, documents_without_text=1)
+
+    def t_download(self, task):
+        # Compatibility for direct callers; normal traversal uses BackgroundPipeline.
+        self.commit_download(task, self.download_file(task, self.client))
 
     # ---- account level --------------------------------------------------------------------------------
     def t_calendar(self, task):

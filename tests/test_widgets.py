@@ -258,6 +258,8 @@ def test_existing_component_history_is_unchanged_by_upgrade(tmp_path,monkeypatch
     with monkeypatch.context() as m:
         m.setattr(database,'_migration_files',lambda:[f for f in files if f[0]<=12])
         old=Hub(get_paths(tmp_path/'old-home'))
+    # Simulate the old application without the migration-16 dependency hook.
+    old.importer.after_changed_import=None
     instance=old.identity.add_instance(fixture_pkg['identity']['origin'])
     aid=old.identity.upsert_verified_account(instance['id'],{'canvas_user_id':'100001','time_zone':'Asia/Hong_Kong'})['id']
     old.importer.import_package(fixture_pkg)
