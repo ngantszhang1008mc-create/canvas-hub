@@ -145,3 +145,31 @@ available aggregate budgets 46,918/44,299/43,198. They also exercise a new
 `/tracker` message, blocked retry writes, saved state/proposal preservation,
 discovery rereads and source pagination. These are application estimates, not
 measured provider usage or billed tokens.
+
+## Context review follow-up
+
+The five reported integration gaps were confirmed and addressed:
+
+- Scoped Workspace actions preload their minimal permitted source/tracker tools
+  through the existing consent and permission checks.
+- Local tracker/note changes keep the historical summary with a current-state
+  warning. Imported-source changes still invalidate it, and original messages
+  and the completed-action manifest remain available.
+- Follow-ups retain versioned source references with selective bounded small-text
+  restoration. They do not replay every source or silently adopt new versions.
+- Tracker instructions require `get_component_context` and the exact version and
+  state token for patches.
+- Gateway terminal usage survives later failures and is counted once. The
+  protocol supplies no midstream usage, so missing counters remain unknown.
+
+Automatic compaction remains off. These changes add no migration, paid request,
+model-capacity increase, user-state replay or gateway quota exemption. Focused
+checks cover consent/scope, source restoration and ID boundaries, summary races,
+completed-action preservation and terminal/error usage. The original full suite
+is not repeated for these repairs.
+
+The budget repair passed 17 focused checks. The review follow-up passed 22
+distinct focused checks across the initial run and targeted reruns (one test's
+misplaced assertion was corrected); these include the Chromium context panel.
+JavaScript syntax and diff whitespace checks passed. All provider responses were
+synthetic; the token figures above remain application estimates.

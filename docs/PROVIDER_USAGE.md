@@ -61,6 +61,13 @@ cancelled ones. Gateway's private idempotency journal is not changed or replayed
 Source analysis has its own lifecycle and is not included in conversation totals.
 Historical failed chat requests from before this migration cannot be reconstructed.
 
+The local gateway adapter retains validated terminal usage even if subsequent
+stream framing, tool parsing, cancellation or journal persistence fails. The
+attempt ledger counts it once; retained usage never authorizes tool execution.
+Each call clears its previous usage before authorization/preflight. Protocol v1
+has no midstream token counter: a missing or invalid terminal leaves usage
+unknown, with no inference from text or quota reservations.
+
 ## Prefix stability
 
 Tools are sorted by name and object keys are serialized consistently, including

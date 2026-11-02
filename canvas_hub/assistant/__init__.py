@@ -33,7 +33,7 @@ from ..util import HubError, InvalidInput, NotFound, now_iso
 from .providers import ANTHROPIC_DEFAULT_MODEL, RESERVED_PARAMS, ProviderError, Stopped, make_provider
 from .context import Policy, validate_settings
 from .context_service import ContextService
-from .source_context import source_manifest, restore_source_context
+from .source_context import source_manifest, restore_source_context, followup_source_context
 from .gateway_settings import GATEWAY_FIELDS, GatewaySettings, apply_gateway
 from .tool_catalog import ToolCatalog, ToolSession
 
@@ -116,7 +116,8 @@ calling the tools; do not guess course facts.
 - Trackers: for "how many points can I still get / can I skip X / am I passing" questions, build a score model with
   show_score_model (draft lines with course_score_lines, then set gating, hours rules and the pass threshold from the
   syllabus or the user). For to-do style lists use show_checklist. Both are saved and the user edits them in place:
-  before answering about them later, read the current state with get_component instead of assuming.
+  before answering about them later, read current fields with get_component_context instead of assuming. State
+  changes require patch_component_state with that read's exact expected_version and state_token; never reuse an old token.
 - Writing to Canvas: only when the user has switched writes on do you get prepare_* tools. They only PREPARE a
   submission, reply or message; the user must press Send on the preview in the app. Never say something was
   submitted or sent unless list_canvas_writes shows status "sent". For a file submission, save_file first.
@@ -820,9 +821,13 @@ class AssistantService(ContextService, GatewaySettings):
                                       self._context_projection(cid, account_id, self._transcript(cid)), make_provider)
                 return
             if request_context is None:
-                latest_user = next((m for m in reversed(self._transcript(cid)) if m["role"] == "user"), {})
+                original = self._transcript(cid)
+                latest_user = next((m for m in reversed(original) if m["role"] == "user"), {})
                 if latest_user.get("source_context"):
                     request_context = restore_source_context(self.hub, account_id, latest_user["source_context"])
+                else:
+                    request_context = followup_source_context(self.hub, account_id, original,
+                        {'course_id': conv['scope_course_id'], 'item_id': conv['scope_item_id']})
             provider = make_provider(cfg)
             compact_attempted = False
             for _step in range(MAX_STEPS):

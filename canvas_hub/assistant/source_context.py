@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 import json
+import re
 
 from ..services.context_sources import ContextSources
 from ..util import HubError, canonical_json
@@ -32,11 +33,38 @@ def restore_source_context(hub, account_id, manifest):
         except HubError:
             context["warnings"].append(
                 f"Source {source['source_id']} changed or is unavailable. Its prior text was not restored; "
-                "do not reconstruct rules from memory. A new message can read current sources.")
+                "do not reconstruct rules from memory. Catalog and deliberately read the current version before relying on changed rules.")
             continue
         if result["coverage"]["complete_read"]:
             source["text"] = result["text"]
     return context
+
+
+def followup_source_context(hub, account_id, transcript, scope):
+    """Carry references, restoring only explicitly named small sources or one
+    small source for an ordinary follow-up. Never replace a changed version.
+    """
+    users = [m for m in transcript if m['role'] == 'user' and not m.get('context_summary')]
+    prior = next((m['source_context'] for m in reversed(users[:-1]) if m.get('source_context')), None)
+    if not users or not prior or prior.get('scope') != scope:
+        return None
+    context = source_manifest(prior)
+    question = (users[-1].get('text') or users[-1].get('sent_text') or '').casefold()
+    small = [s for s in context['sources'] if s.get('inline') and 0 < s.get('total_chars', 0) <= 4000]
+    # Match whole IDs: item:1 is not item:10 or a document's item prefix.
+    named = [s for s in context['sources'] if
+             re.search(r'(?<![\w:-])' + re.escape(s['source_id'].casefold()) + r'(?![\w:-])', question) or
+             any(len(s.get(k) or '') >= 8 and s[k].casefold() in question for k in ('title', 'filename'))]
+    selected = [s for s in small if s in named][:2] if named else small[:1]
+    wanted, remaining = set(), 6000
+    for source in selected:
+        if source['total_chars'] <= remaining:
+            wanted.add(source['source_id'])
+            remaining -= source['total_chars']
+    for source in context['sources']:
+        source['inline'] = source['source_id'] in wanted
+    context['warnings'].append('Follow-up: only selected small sources are restored at their recorded versions. Other references remain readable by source_id/version; read every relevant range before interpreting full rules.')
+    return restore_source_context(hub, account_id, context)
 
 
 def _merged(ranges):

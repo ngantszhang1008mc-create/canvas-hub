@@ -5,7 +5,7 @@ import json
 import threading
 
 from ..util import InvalidInput, now_iso
-from .context import (Policy, SUMMARY_SYSTEM, context_error, data_version, encoded,
+from .context import (Policy, SUMMARY_SYSTEM, context_error, data_version, live_data_version, encoded,
                       estimate, neutral_message, parse_summary, split_for_summary, summary_message)
 from .providers import ProviderError, Stopped
 from .usage import stored_usage, usage_totals
@@ -47,7 +47,8 @@ class ContextService:
         if not row or row["data_version"] != data_version(self.hub, account_id):
             return transcript
         tail = [m for m in transcript if m.get("seq", float("inf")) > row["through_seq"]]
-        return [summary_message(json.loads(row["summary_json"])), *tail]
+        summary = json.loads(row['summary_json'])
+        return [summary_message(summary, live_state_changed=summary.get('_live_state_version') != live_data_version(self.hub, account_id)), *tail]
 
     def _compact_context(self, cid, account_id, cfg, transcript, make_provider):
         policy = Policy.for_config(cfg)
@@ -103,6 +104,7 @@ class ContextService:
         if input_tokens + policy.summary_tokens > int(policy.capacity * .9):
             raise ProviderError("Older history is too large for one safe summary request. Original context is retained; start a focused chat. No summary request was sent.")
         version = data_version(self.hub, account_id)
+        live_version = live_data_version(self.hub, account_id)
         source_seq = self.hub.db.one("SELECT MAX(id) AS seq FROM assistant_messages WHERE conversation_id=?", (cid,))["seq"]
         if cid in self._cancel:
             raise Stopped()
@@ -130,13 +132,14 @@ class ContextService:
             summary = parse_summary(turn.text, policy.summary_tokens)
             summary["reference_manifest"] = anchors
             summary["tool_execution_manifest"] = executions
-            candidate = [summary_message(summary), *tail]
-            # Installation is atomic and refuses concurrent data/message changes.
+            summary['_live_state_version'] = live_version
+            # Installation is atomic and refuses concurrent source/message changes.
             with self._lock, self.hub.db.tx() as c:
                 check_cancel("")
                 latest = c.execute("SELECT MAX(id) AS seq FROM assistant_messages WHERE conversation_id=?", (cid,)).fetchone()["seq"]
                 if latest != source_seq or data_version(self.hub, account_id) != version:
                     raise ProviderError("Data changed while compacting; the original context is retained. Read the latest sources and retry when ready.")
+                candidate = [summary_message(summary, live_state_changed=live_version != live_data_version(self.hub, account_id)), *tail]
                 if estimate([neutral_message(m) for m in candidate]) >= estimate([neutral_message(m) for m in transcript]):
                     raise ProviderError("The summary would not reduce context; original context is retained.")
                 c.execute("INSERT INTO assistant_context VALUES (?,?,?,?,?) ON CONFLICT(conversation_id) DO UPDATE SET "
@@ -234,6 +237,7 @@ class ContextService:
 
         return {"compacted_through": row["through_seq"] if row else None,
                 "stale": bool(row and row["data_version"] != data_version(self.hub, account_id)),
+                "live_state_changed": bool(row and json.loads(row['summary_json']).get('_live_state_version') != live_data_version(self.hub, account_id)),
                 "summary_usage": usage_totals(summary_uses), "total_usage": usage_totals(uses + [a["usage"] for a in attempts]),
                 "usage_scope": "recorded assistant attempts and compaction attempts; earlier failed requests may be absent",
                 "summary_requests": len(summaries), "last_summary_status": summaries[-1]["status"] if summaries else None,

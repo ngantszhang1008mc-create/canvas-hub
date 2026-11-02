@@ -88,11 +88,19 @@ def test_manual_compaction_preserves_history_pairs_usage_restart_and_invalidatio
     hub.annotations.create(other["id"], kind="note", title="Other account change")
     assert not resumed.get_conversation(account["id"], cid)["context"]["stale"]
     hub.annotations.create(account["id"], kind="note", title="New decision")
-    assert resumed.get_conversation(account["id"], cid)["context"]["stale"]
+    status = resumed.get_conversation(account['id'], cid)['context']
+    assert not status['stale'] and status['live_state_changed']
+    retained = resumed._context_projection(cid, account['id'], before)
+    assert retained[0]['context_summary'] and 'Local tracker/note/to-do state changed' in retained[0]['sent_text']
+    assert '"outcome":"completed"' in retained[0]['sent_text']
+    with hub.db.tx() as c:
+        c.execute("INSERT INTO items(account_id,item_type,source_key,title,first_observed_at,last_observed_at) VALUES (?,'page','new-source','Changed source',?,?)",
+                  (account['id'], now_iso(), now_iso()))
+    assert resumed.get_conversation(account['id'], cid)['context']['stale']
     assert resumed._context_projection(cid, account["id"], before) == before
 
 
-@pytest.mark.parametrize("outcome", ["invalid", "failure", "cancel", "changed"])
+@pytest.mark.parametrize("outcome", ["invalid", "failure", "cancel", "changed", "live_changed"])
 def test_failed_or_racing_compaction_keeps_original_and_records_attempt(hub, account, monkeypatch, outcome):
     svc, cid = conversation(hub, account)
     before = svc._transcript(cid)
@@ -108,10 +116,19 @@ def test_failed_or_racing_compaction_keeps_original_and_records_attempt(hub, acc
     if outcome == "cancel":
         svc.stop(account["id"], cid)
     elif outcome == "changed":
+        with hub.db.tx() as c:
+            c.execute("INSERT INTO items(account_id,item_type,source_key,title,first_observed_at,last_observed_at) VALUES (?,'page','racing-source','Changed source',?,?)",
+                      (account['id'], now_iso(), now_iso()))
+    elif outcome == 'live_changed':
         hub.annotations.create(account["id"], kind="note", title="Changed while summarizing")
     gate[1].set()
     svc.wait(cid, 5)
     assert len(calls) == 1 and svc._transcript(cid) == before
+    if outcome == 'live_changed':
+        info = svc.get_conversation(account['id'], cid)['context']
+        assert info['last_summary_status'] == 'completed' and info['live_state_changed'] and not info['stale']
+        assert svc._context_projection(cid, account['id'], before)[0]['context_summary']
+        return
     assert not hub.db.one("SELECT * FROM assistant_context WHERE conversation_id=?", (cid,))
     info = svc.get_conversation(account["id"], cid)["context"]
     assert info["summary_requests"] == 1
@@ -123,13 +140,15 @@ def test_failed_or_racing_compaction_keeps_original_and_records_attempt(hub, acc
 def test_auto_compaction_then_budget_stop_without_paid_retry_loop(hub, account, monkeypatch):
     svc, cid = conversation(hub, account)
     svc.update_config({"context": {"capacity": 64000, "history_tokens": 2500, "auto_compact": True}})
-    calls, _ = mock_provider(monkeypatch)
+    calls, _ = mock_provider(monkeypatch, action=lambda: hub.annotations.create(account['id'], kind='note', title='Changed during summary'))
     svc.send(account["id"], "Continue the goal", cid)
     svc.wait(cid, 5)
     result = svc.get_conversation(account["id"], cid)
     assert result["conversation"]["run_state"] == "idle", result
     assert sum(c[0] == SUMMARY_SYSTEM for c in calls) == 1
     assert len(calls) == 2 and calls[-1][1][0]["context_summary"]
+    assert 'Local tracker/note/to-do state changed' in calls[-1][1][0]['sent_text']
+    assert '_live_state_version' not in calls[-1][1][0]['sent_text']
     # Even schema overhead alone can exceed an endpoint's configured budget.
     # A summary cannot fix that; no provider call should be made.
     calls.clear()

@@ -21,6 +21,13 @@ The shared Assistant changes are limited to:
   retry/restart it can restore a small source only at its recorded version.
   Changed/deleted sources produce an explicit gap, without sending replacement
   content under the old reference.
+- Ordinary follow-ups retain the latest manifest from the same scoped
+  conversation. They selectively restore up to two explicitly named small
+  sources (whole IDs or titles/filenames), or one small source for an unspecified
+  follow-up, with a 6,000-character total bound. A named large source stays a
+  versioned reference; unrelated small text is not substituted. Remaining
+  sources/ranges require deliberate reads, and changed versions are never
+  silently substituted. No source bodies are appended to permanent history.
 - `ContextService._prepare_context(..., request_context=None)` projects source
   evidence after the existing history projection and before budget measurement.
   If an existing compaction policy changes that projection, source coverage is

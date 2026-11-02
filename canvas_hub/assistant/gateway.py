@@ -19,6 +19,7 @@ from urllib.parse import urlsplit, urlunsplit
 import httpx
 
 from .providers import ProviderError, Stopped, ToolCall, Turn
+from .usage import normalize_usage
 
 METADATA_SECONDS = 15
 GENERATION_SECONDS = 135
@@ -251,6 +252,7 @@ class AllowanceGatewayProvider:
     name = 'allowance_gateway'
 
     def __init__(self, cfg):
+        self.last_usage = None
         self.cfg = cfg if cfg.get('_gateway_allowance') else prepare_config(cfg)
         self.info, self.model = self.cfg['_gateway_allowance'], self.cfg['_gateway_model']
         self.closed = False
@@ -278,6 +280,7 @@ class AllowanceGatewayProvider:
             temporary.unlink(missing_ok=True)
 
     def complete(self, system, transcript, tools, on_text=None):
+        self.last_usage = None  # Never reuse counts from a previous model round.
         authorize(self.cfg)
         names = [tool['name'] for tool in tools]
         caps = self.info['capabilities']
@@ -322,14 +325,37 @@ class AllowanceGatewayProvider:
                 raise
             raise GatewayError('Gateway request failed or its outcome could not be saved. Allowance may have been used. No automatic retry or tool execution occurred.') from e
 
+    def _terminal_usage(self, terminal):
+        if terminal.get('finish_reason') not in ('stop', 'tool_calls', 'length') or terminal.get('model') != self.model['id']:
+            raise GatewayError('Gateway terminal model or finish reason is unsupported.')
+        usage = terminal.get('usage')
+        valid = lambda n: type(n) is int and 0 <= n <= 9007199254740991
+        if not isinstance(usage, dict) or any(not valid(usage.get(k)) for k in ('input_tokens', 'output_tokens')):
+            raise GatewayError('Gateway terminal usage is missing or invalid; no tool was executed.')
+        details = ('cached_input_tokens', 'cache_write_input_tokens', 'cache_write_30m_input_tokens',
+                   'cache_write_12h_input_tokens', 'reasoning_tokens')
+        for key in details:
+            value = usage.get(key)
+            bound = usage['output_tokens'] if key == 'reasoning_tokens' else usage['input_tokens']
+            if value is not None and (not valid(value) or value > bound):
+                raise GatewayError('Gateway usage details are invalid; no tool was executed.')
+        cached, written = usage.get('cached_input_tokens'), usage.get('cache_write_input_tokens')
+        ttl = [usage.get(k) for k in ('cache_write_30m_input_tokens', 'cache_write_12h_input_tokens')]
+        if ((cached is not None and written is not None and cached + written > usage['input_tokens'])
+                or (written is not None and sum(v for v in ttl if v is not None) > written)
+                or (written is not None and all(v is not None for v in ttl) and sum(ttl) != written)):
+            raise GatewayError('Gateway usage subsets are inconsistent; no tool was executed.')
+        return {k: usage[k] for k in ('input_tokens', 'output_tokens', *details) if k in usage}
+
     async def _complete(self, body, names, record, on_text):
         text = ''
         calls = {}
         terminal = None
+        terminal_usage = None
         seen_meta = False
 
         async def read_stream():
-            nonlocal text, terminal, seen_meta
+            nonlocal text, terminal, terminal_usage, seen_meta
             headers = {'Authorization': 'Bearer ' + self.cfg['gateway_token'], 'Content-Type': 'application/json',
                        'Accept': 'application/x-ndjson', 'Accept-Encoding': 'identity', 'Idempotency-Key': record['key'],
                        'X-Gateway-Mode': self.cfg['gateway_mode']}
@@ -407,6 +433,8 @@ class AllowanceGatewayProvider:
                             elif kind == 'done':
                                 if event.get('status') != 'completed' or event.get('request_id') != record['request_id']:
                                     raise GatewayError('Gateway did not complete this request successfully.')
+                                terminal_usage = self._terminal_usage(event)
+                                self.last_usage = normalize_usage(terminal_usage, 'gateway')
                                 terminal = event
                             else:
                                 raise GatewayError('Unsupported gateway stream record.')
@@ -430,20 +458,8 @@ class AllowanceGatewayProvider:
             if not task.done():
                 task.cancel()
             await asyncio.gather(task, return_exceptions=True)
-        usage = terminal.get('usage')
-        if not isinstance(usage, dict) or any(type(usage.get(k)) is not int or usage[k] < 0 for k in ('input_tokens', 'output_tokens')):
-            raise GatewayError('Gateway terminal usage is missing or invalid; no tool was executed.')
-        details = ('cached_input_tokens', 'cache_write_input_tokens', 'cache_write_30m_input_tokens',
-                   'cache_write_12h_input_tokens', 'reasoning_tokens')
-        for key in details:
-            value = usage.get(key)
-            bound = usage['output_tokens'] if key == 'reasoning_tokens' else usage['input_tokens']
-            if value is not None and (type(value) is not int or not 0 <= value <= bound):
-                raise GatewayError('Gateway usage details are invalid; no tool was executed.')
-        usage = {k: usage[k] for k in ('input_tokens', 'output_tokens', *details) if k in usage}
+        usage = terminal_usage
         finish = terminal.get('finish_reason')
-        if finish not in ('stop', 'tool_calls', 'length') or terminal.get('model') != self.model['id']:
-            raise GatewayError('Gateway terminal model or finish reason is unsupported.')
         complete_calls, identifiers = [], set()
         if finish == 'tool_calls':
             if not calls or sorted(calls) != list(range(len(calls))):

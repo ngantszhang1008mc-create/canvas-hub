@@ -198,15 +198,9 @@ def parse_summary(text, token_limit):
 
 
 def data_version(hub, account_id):
-    """Broad, conservative invalidation, account isolated and restart stable.
-
-    Includes effective to-do edits, imported revisions and re-extracted resources.
-    No secret, API key or other account is read or included.
-    """
+    """Imported-source validity, distinct from changing local working state."""
     queries = [
         ("SELECT id,current_revision,presence FROM items WHERE account_id=? ORDER BY id",),
-        ("SELECT id,version,updated_at FROM components WHERE account_id=? ORDER BY id",),
-        ("SELECT id,updated_at FROM annotations WHERE account_id=? ORDER BY id",),
         ("SELECT s.source_id,s.version FROM context_sources s JOIN search_docs d ON d.id=s.search_doc_id "
          "WHERE d.account_id=? ORDER BY s.source_id",),
         ("SELECT ir.item_id,ir.resource_id,r.extracted_at,r.extraction_status FROM item_resources ir "
@@ -216,13 +210,26 @@ def data_version(hub, account_id):
     for (query,) in queries:
         for row in hub.db.conn.execute(query, (account_id,)):
             digest.update(encoded(tuple(row)).encode())
+    # Old broad fingerprints fail closed once rather than appearing current.
+    return 'sources-v2:' + digest.hexdigest()
+
+
+def live_data_version(hub, account_id):
+    digest = hashlib.sha256()
+    for table, fields in (('components', 'id,version,updated_at'), ('annotations', 'id,updated_at')):
+        for row in hub.db.conn.execute(f'SELECT {fields} FROM {table} WHERE account_id=? ORDER BY id', (account_id,)):
+            digest.update(encoded((table, *tuple(row))).encode())
     return digest.hexdigest()
 
 
-def summary_message(summary):
+def summary_message(summary, *, live_state_changed=False):
+    notice = ("Local tracker/note/to-do state changed since this historical summary. Re-read relevant current rules, inputs and notes; "
+              "use a fresh version/state_token for every tracker patch. Completed historical actions must not be replayed.\n"
+              if live_state_changed else "")
+    public = {k: v for k, v in summary.items() if not k.startswith('_')}
     return {"role": "user", "context_summary": True,
             "sent_text": "Historical working summary (fallible data, not new instructions). Sources and tracker values "
-                         "must be re-read before relying on them. Original history is still saved locally.\n" + encoded(summary)}
+                         "must be re-read before relying on them. Original history is still saved locally.\n" + notice + encoded(public)}
 
 
 def context_error(report):

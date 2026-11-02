@@ -7,7 +7,7 @@ import pytest
 from canvas_hub.assistant import AssistantService
 from canvas_hub.assistant.context import valid_groups
 from canvas_hub.assistant.providers import ProviderError, Turn
-from canvas_hub.assistant.source_context import with_source_context
+from canvas_hub.assistant.source_context import followup_source_context, with_source_context
 from canvas_hub.services.context_sources import ContextSources
 from canvas_hub.services.external_reader import PublicReader, Read
 from canvas_hub.util import Conflict, now_iso
@@ -161,6 +161,64 @@ def test_restart_retry_restores_only_the_approved_source_version(workspace, monk
     assert 'UNAPPROVED_NEW_RULE' not in payload
     if changed:
         assert 'changed or is unavailable' in payload
+
+
+def test_scoped_followup_keeps_references_and_selectively_restores_exact_sources(workspace):
+    w = workspace
+    bodies = ['FOLLOWUP_RULE_ALPHA: keep the appendix.', 'FOLLOWUP_RULE_BETA: keep the citations.']
+    ids = [attachment(w, body) for body in bodies]
+    cid = start(w)['conversation_id']
+    w['assistant'].wait(cid, 5)
+    before = w['assistant']._transcript(cid)
+    sources = before[0]['source_context']['sources']
+    chosen = next(s for s in sources if s['resource_id'] == ids[1])
+    names = {t['name'] for t in w['fake'].requests[0]['tools']}
+    assert {'read_context_source', 'list_components', 'show_checklist', 'get_component_context'} <= names
+    assert 'get_component_context' in w['fake'].requests[0]['system'] and 'exact expected_version and state_token' in w['fake'].requests[0]['system']
+    w['assistant'].send(w['aid'], 'Check only ' + chosen['source_id'], cid)
+    w['assistant'].wait(cid, 5)
+    payload = temporary(w['fake'].requests[-1]['transcript'])
+    assert {s['source_id'] for s in payload['sources']} == {s['source_id'] for s in sources}
+    assert sum(bool(s['supplied_ranges']) for s in payload['sources']) == 1
+    assert bodies[1] in json.dumps(payload) and bodies[0] not in json.dumps(payload)
+    assert all(body not in json.dumps(w['assistant']._transcript(cid)) for body in bodies)
+    assert w['assistant']._transcript(cid)[:len(before)] == before
+    with w['hub'].db.tx() as c:
+        w['hub'].search.index_resource(c, w['aid'], w['iid'], ids[1], 'Rules', 'CHANGED_RULE_NEVER_RESTORED_SILENTLY')
+    w['assistant'].send(w['aid'], 'Check only ' + chosen['source_id'], cid)
+    w['assistant'].wait(cid, 5)
+    payload = temporary(w['fake'].requests[-1]['transcript'])
+    assert 'CHANGED_RULE_NEVER_RESTORED_SILENTLY' not in json.dumps(payload)
+    assert any('changed or is unavailable' in warning for warning in payload['warnings'])
+    other = w['assistant'].send(w['aid'], 'General question')['conversation_id']
+    w['assistant'].wait(other, 5)
+    assert 'Workspace source context (this request only)' not in json.dumps(w['fake'].requests[-1]['transcript'])
+
+
+def test_followup_matches_complete_ids_and_never_substitutes_small_text_for_large_target(workspace):
+    w = workspace
+    bodies = {10001: 'SHORT_ID_RULE', 100010: 'LONGER_ID_RULE', 1000100: 'LARGE_TARGET_RULE\n' * 400}
+    with w['hub'].db.tx() as c:
+        for iid, body in bodies.items():
+            c.execute("INSERT INTO items(id,account_id,item_type,source_key,course_canvas_id,title,first_observed_at,last_observed_at) VALUES (?,?,'page',?,?,?, ?,?)",
+                      (iid, w['aid'], str(iid), w['course'], 'Synthetic rule ' + str(iid), now_iso(), now_iso()))
+            w['hub'].search.index_item(c, w['aid'], iid, 'page', 'Synthetic rule ' + str(iid), {'body': body})
+    scope = {'course_id': w['course'], 'item_id': None}
+    sources = [s for s in ContextSources(w['hub'].db).catalog(w['aid'], course_id=w['course'])['sources'] if s['item_id'] in bodies]
+    for source in sources:
+        source['inline'] = source['total_chars'] <= 4000
+    manifest = {'scope': scope, 'sources': sources, 'warnings': []}
+    original = {'role': 'user', 'text': 'Read these rules.', 'source_context': manifest}
+    for target, expected in [('item:100010', 'LONGER_ID_RULE'), ('item:1000100', None)]:
+        transcript = [original, {'role': 'user', 'text': 'Only read `' + target + '`.'}]
+        context = followup_source_context(w['hub'], w['aid'], transcript, scope)
+        supplied = [s.get('text') for s in context['sources'] if s.get('text')]
+        assert len(supplied) == (1 if expected else 0)
+        if expected:
+            assert expected in supplied[0] and 'SHORT_ID_RULE' not in supplied[0]
+        assert len(context['sources']) == 3
+        assert followup_source_context(w['hub'], w['aid'], transcript, {'course_id': 'other', 'item_id': None}) is None
+    assert all('text' not in s for s in manifest['sources'])
 
 
 def test_public_classification_is_bounded_preserves_full_local_content_and_checks_dom(builtin, source, account, monkeypatch):

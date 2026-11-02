@@ -361,3 +361,56 @@ def test_retry_history_and_compaction_error_do_not_expand_dispatch(hub, account,
     with patch.object(Policy, 'measure', near), pytest.raises(GatewayError):
         service._prepare_context(cid, account['id'], cfg, 'Synthetic', transcript, [], lambda c: AllowanceGatewayProvider(c))
     assert len(gateway.requests) == 2  # One retry answer and one failed summary; no fallback answer.
+
+
+@pytest.mark.parametrize('failure', ['tool', 'trailing', 'cancel', 'journal'])
+def test_reported_terminal_usage_survives_later_failure_and_resets_before_next_call(hub, gateway, monkeypatch, failure):
+    service, pid = setup(HubAPI(hub), gateway)
+    provider = AllowanceGatewayProvider(service._load(pid))
+    def answer(request):
+        events = gateway.events(request, '', [('list_components', 'not json' if failure == 'tool' else {})])
+        if failure == 'trailing':
+            events.append({'type': 'unexpected'})
+        return events
+    gateway.action = answer
+    journal = provider._journal
+    def save(record):
+        if failure == 'journal' and record['state'] == 'completed':
+            raise OSError('synthetic journal write failure')
+        journal(record)
+    monkeypatch.setattr(provider, '_journal', save)
+    def on_text(_):
+        if failure == 'cancel' and provider.last_usage is not None:
+            raise Stopped()
+    with pytest.raises((GatewayError, Stopped)):
+        provider.complete('Synthetic', [{'role': 'user', 'sent_text': 'List trackers'}], [{'name': 'list_components'}], on_text)
+    usage = provider.last_usage
+    assert usage['input_tokens'] == 100 and usage['output_tokens'] == 20
+    assert usage['final'] and usage['source'] == 'gateway' and usage['cache_read_input_tokens'] == 10
+    service.update_config({'profile_id': pid, 'gateway_consent': False})
+    with pytest.raises(GatewayError):
+        provider.complete('Synthetic', [{'role': 'user', 'sent_text': 'Another request'}], [])
+    assert provider.last_usage is None and len(gateway.requests) == 1
+
+
+@pytest.mark.parametrize('terminal', ['reported', 'missing', 'invalid'])
+def test_failed_gateway_attempt_counts_only_valid_terminal_usage_once(hub, account, gateway, monkeypatch, terminal):
+    service, _ = setup(HubAPI(hub), gateway)
+    def answer(request):
+        events = gateway.events(request, '', [('list_components', {})])
+        if terminal == 'missing':
+            return events[:-1]
+        if terminal == 'invalid':
+            events[-1]['usage'].update(cached_input_tokens=60, cache_write_input_tokens=60)
+        return [*events, {'type': 'unexpected'}]
+    gateway.action = answer
+    executed = []
+    monkeypatch.setattr('canvas_hub.assistant.run_tool_display', lambda *args: executed.append(args))
+    cid = service.send(account['id'], 'List trackers')['conversation_id']
+    service.wait(cid, 5)
+    result = service.get_conversation(account['id'], cid)
+    total = result['context']['total_usage']
+    assert result['conversation']['run_state'] == 'error' and not executed
+    assert len(gateway.requests) == total['requests'] == 1
+    assert total['input_tokens'] == (100 if terminal == 'reported' else 0)
+    assert total['unreported_requests'] == (0 if terminal == 'reported' else 1)

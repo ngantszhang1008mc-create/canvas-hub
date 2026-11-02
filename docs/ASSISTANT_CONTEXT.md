@@ -55,6 +55,9 @@ The circular arrow beside the chat input opens a searchable list of all currentl
 permitted groups and tools. `/tracker` (or another group/tool command) adds a
 removable chip. Selecting tools or entering a slash command alone does **not**
 send a message, call a model or execute a tool. Add a question and press Send.
+Workspace actions preload only the permitted source/tracker tools their prompt
+requires. This passes through the same scope, provider disclosure and send
+validation; selecting schemas does not execute actions or grant permissions.
 Chips apply to that message only and clear after a successful send; changing chat
 or leaving the view discards an unsent selection. The requested selection remains
 in the user message's `tool_selection` metadata and is shown in history. There is
@@ -157,10 +160,13 @@ The gateway is independently authoritative for reservations and settlement;
 local telemetry cannot authorize quota. Source bodies use the separate
 [request-local source contract](SOURCE_CONTEXT_PAYLOADS.md).
 
-Invalidation is conservative and account-wide: source versions, imported revisions,
-resource extraction, tracker versions and local note/to-do changes invalidate the
-checkpoint. The next request uses original history until safely compacted again.
-This can cause extra summary work after unrelated data changes. There is no vector
+Source invalidation remains conservative and account-wide: source versions,
+imported revisions and resource extraction invalidate the checkpoint. The next
+request uses original history until safely compacted again. Tracker and local
+note/to-do changes retain the historical summary and completed-action manifest,
+with a freshness notice requiring current reads and fresh tracker state tokens.
+This also covers live edits during summarization. Older broad fingerprints are
+invalidated once. There is no vector
 search, semantic quality guarantee, exact tokenizer, monetary-price calculation or
 multi-pass summarization of already enormous histories. An active Codex tool turn
 is never restarted for compaction; an oversized turn stops with its results saved.
