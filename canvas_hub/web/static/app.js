@@ -594,7 +594,7 @@ VIEWS.deadlines = async (main, _p, params) => {
         if (location.hash !== "#/deadlines") location.hash = "#/deadlines"; else route();
       }
     } }, t.name))),
-    h("div", { class: "row", style: "margin-top:12px;align-items:end;flex-wrap:wrap" },
+    h("div", { class: "row deadline-filters", style: "margin-top:12px;align-items:end;flex-wrap:wrap" },
       picker("Date range", "range", [["7", "7 days"], ["14", "14 days"], ["30", "30 days"], ["120", "Term"], ["365", "Year"], ["past", "Past 30 days"], ["all", "All dates"]]),
       picker("Deadline course", "course_id", [["", "All courses"], ...coursesData.courses.map((c) => [c.course_id, c.title])]),
       picker("Deadline type", "item_type", [["", "All types"], ["assignment", "Assignments"], ["quiz", "Quizzes"], ["calendar_event", "Calendar events"]]),
@@ -730,7 +730,7 @@ VIEWS.course = async (main, parts, params) => {
         h("p", { class: "muted small" }, "Sections missing here are not guessed. Content they hide is still collected when Home, the syllabus, modules or pages link to it."),
         syl ? h("p", null, h("a", { href: `#/item/${syl.id}` }, "Read the syllabus")) : null,
         pagesHome.items.length ? h("p", { class: "small" }, `${pagesHome.items.length} page(s) collected`) : null),
-      h("div", { class: "card" }, h("h2", null, "Coverage for this course"), coverageTable(cov.records)),
+      h("div", { class: "card" }, h("h2", null, "Coverage for this course"), h("div", { class: "table-wrap" }, coverageTable(cov.records))),
       h("details", {class:"card grade-planning", style:"grid-column:1/-1"}, h("summary",null,"Grade planning"), await gradingCard(cid)));
   } else {
     const list = await api(A("/items") + qs({ course_id: cid, type: tab, limit: 200 }));

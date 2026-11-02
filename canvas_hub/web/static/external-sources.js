@@ -163,11 +163,12 @@ export function makeExternalSources(env) {
     const all=h('button',{class:'primary external-analyse-all',disabled:!eligible.length,onclick:(e)=>{e.preventDefault();e.stopPropagation();list.open=true;review();}},`Analyse all (${eligible.length})`);
     list.append(h('summary',{class:'external-source-heading'},h('span',null,'External sources'),all),batchArea);
     for(const source of result.sources) {
-      list.append(h('div',{class:'external-source-row'},h('div',null,h('a',{href:source.url,target:'_blank',rel:'noopener noreferrer'},source.title),
+      list.append(h('div',{class:'external-source-row'},h('div',{class:'external-source-info'},h('a',{href:source.url,target:'_blank',rel:'noopener noreferrer'},source.title),
         note(`${source.status.replaceAll('_',' ')}${source.request?.status==='declined'?' · latest inspection failed':''}${source.classification?' · '+source.classification.roles.join(', '):''}${source.last_success_at?' · read '+source.last_success_at:''}`)),
-        source.analysis_request_id && !source.analysis_running && !['open','claimed'].includes(source.request?.status) ? h('button',{onclick:()=>show(main,source)},'Re-inspect') : null,
-        launcher([{id:'analyze',icon:'message',label:source.classification||source.decision!=='undecided'?'Review source':'Analyse link',
-          description:'Review the public URL and Assistant API usage before analysis; cached decisions are reused.',run:()=>{dismiss();return show(main,source);} }])));
+        h('div',{class:'external-source-actions'},
+          source.analysis_request_id && !source.analysis_running && !['open','claimed'].includes(source.request?.status) ? h('button',{onclick:()=>show(main,source)},'Re-inspect') : null,
+          launcher([{id:'analyze',icon:'message',label:source.classification||source.decision!=='undecided'?'Review source':'Analyse link',
+            description:'Review the public URL and Assistant API usage before analysis; cached decisions are reused.',run:()=>{dismiss();return show(main,source);} }]))));
     }
     const host=main.querySelector('.workspace-content')||main;
     host.querySelector('.external-source-list')?.remove(); main.querySelector('.external-source-nudge')?.remove(); host.append(list);
