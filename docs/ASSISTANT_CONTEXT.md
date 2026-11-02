@@ -5,8 +5,11 @@ projection. In Chat, **Context & usage → Compact conversation** summarizes old
 complete turns using the selected setup. Provider settings enable automatic
 compaction (default on) and an optional verified context capacity. Both actions
 consume model quota. Summary usage is stored separately and included in the
-conversation's reported totals, including cache counters when supplied. Unknown
-usage after errors, cancellation or restart is labelled unknown, never zero cost.
+conversation's recorded-response totals, including cache counters when supplied.
+Unknown summary usage after errors, cancellation or restart is labelled unknown.
+Ordinary answer attempts that fail or stop before saving a response are not
+tracked in these totals and may have used quota; the UI states that limitation.
+These figures are not a complete billing ledger.
 
 Compaction retains the latest two user turns and all their assistant/tool groups.
 The checkpoint includes goals, decisions, unresolved questions, source/tracker
