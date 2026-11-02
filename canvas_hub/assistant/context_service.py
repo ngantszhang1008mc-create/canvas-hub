@@ -8,9 +8,39 @@ from ..util import InvalidInput, now_iso
 from .context import (Policy, SUMMARY_SYSTEM, context_error, data_version, encoded,
                       estimate, neutral_message, parse_summary, split_for_summary, summary_message)
 from .providers import ProviderError, Stopped
+from .usage import stored_usage, usage_totals
+from .request_shape import stable_tools
 
 
 class ContextService:
+    def _complete_with_usage(self, cid, cfg, provider, system, transcript, tools, on_text):
+        """Persist a dispatch before calling, including failures with no reply.
+
+        The linked message is only a display copy; totals use this row once.
+        A process interruption leaves 'started', marked interrupted on startup.
+        """
+        estimated = (self._context_reports.get(cid) or {}).get("estimated_tokens", 0)
+        with self.hub.db.tx() as c:
+            attempt = c.execute("INSERT INTO assistant_context_usage(conversation_id,provider,model,status,"
+                                "estimated_input_tokens,created_at,purpose) VALUES (?,?,?,'started',?,?,'chat')",
+                                (cid, cfg["provider"], cfg.get("model"), estimated, now_iso())).lastrowid
+        status, usage, model = "failed", None, cfg.get("model")
+        try:
+            turn = provider.complete(system, transcript, stable_tools(tools), on_text=on_text)
+            usage = turn.usage
+            model = turn.model or model
+            status = "completed"
+            return turn, attempt
+        except Stopped:
+            status = "cancelled"
+            raise
+        finally:
+            if usage is None:
+                usage = getattr(provider, "last_usage", None)
+            with self.hub.db.tx() as c:
+                c.execute("UPDATE assistant_context_usage SET status=?,usage_json=?,model=?,finished_at=? WHERE id=?",
+                          (status, encoded(usage) if usage is not None else None, model, now_iso(), attempt))
+
     def _context_projection(self, cid, account_id, transcript):
         row = self.hub.db.one("SELECT * FROM assistant_context WHERE conversation_id=?", (cid,))
         if not row or row["data_version"] != data_version(self.hub, account_id):
@@ -118,6 +148,8 @@ class ContextService:
             status = "cancelled"
             raise
         finally:
+            if usage is None and provider is not None:
+                usage = getattr(provider, "last_usage", None)
             try:
                 if provider and callable(getattr(provider, "close", None)):
                     provider.close()
@@ -187,23 +219,19 @@ class ContextService:
 
     def context_status(self, account_id, cid, transcript):
         row = self.hub.db.one("SELECT * FROM assistant_context WHERE conversation_id=?", (cid,))
-        attempts = [dict(r) for r in self.hub.db.query("SELECT provider,model,status,usage_json,estimated_input_tokens FROM "
+        attempts = [dict(r) for r in self.hub.db.query("SELECT provider,model,status,usage_json,estimated_input_tokens,purpose FROM "
                                                     "assistant_context_usage WHERE conversation_id=? ORDER BY id", (cid,))]
         for attempt in attempts:
-            attempt["usage"] = json.loads(attempt.pop("usage_json") or "null")
-        uses = [m.get("usage") for m in transcript if m["role"] == "assistant" and (m.get("raw") or {}).get("provider") != "canvas_hub"]
-        summary_uses = [a["usage"] for a in attempts]
-
-        def totals(values):
-            return {"input_tokens": sum(u.get("input_tokens") or 0 for u in values if u),
-                    "output_tokens": sum(u.get("output_tokens") or 0 for u in values if u),
-                    "cache_read_input_tokens": sum(u.get("cache_read_input_tokens") or 0 for u in values if u),
-                    "cache_creation_input_tokens": sum(u.get("cache_creation_input_tokens") or 0 for u in values if u),
-                    "unreported_requests": sum(not u or u.get("input_tokens") is None or u.get("output_tokens") is None for u in values)}
+            attempt["usage"] = stored_usage(json.loads(attempt.pop("usage_json") or "null"), attempt["provider"])
+        uses = [stored_usage(m.get("usage"), (m.get("raw") or {}).get("provider")) for m in transcript
+                if m["role"] == "assistant" and not m.get("usage_request_id")
+                and (m.get("raw") or {}).get("provider") != "canvas_hub"]
+        summaries = [a for a in attempts if a["purpose"] == "summary"]
+        summary_uses = [a["usage"] for a in summaries]
 
         return {"compacted_through": row["through_seq"] if row else None,
                 "stale": bool(row and row["data_version"] != data_version(self.hub, account_id)),
-                "summary_usage": totals(summary_uses), "total_usage": totals(uses + summary_uses),
-                "usage_scope": "recorded assistant responses and compaction attempts",
-                "summary_requests": len(attempts), "last_summary_status": attempts[-1]["status"] if attempts else None,
+                "summary_usage": usage_totals(summary_uses), "total_usage": usage_totals(uses + [a["usage"] for a in attempts]),
+                "usage_scope": "recorded assistant attempts and compaction attempts; earlier failed requests may be absent",
+                "summary_requests": len(summaries), "last_summary_status": summaries[-1]["status"] if summaries else None,
                 "budget": self._context_reports.get(cid), "history_preserved": True}

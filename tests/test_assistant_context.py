@@ -70,8 +70,9 @@ def test_manual_compaction_preserves_history_pairs_usage_restart_and_invalidatio
     assert svc._transcript(cid) == before
     result = svc.get_conversation(account["id"], cid)
     assert result["conversation"]["run_state"] == "idle", result
-    assert result["context"]["summary_usage"] == {"input_tokens": 100, "output_tokens": 20, "unreported_requests": 0,
-                                                "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}
+    usage = result["context"]["summary_usage"]
+    assert usage["input_tokens"] == 100 and usage["output_tokens"] == 20 and usage["unreported_requests"] == 0
+    assert usage["cache_read_input_tokens"] == 0 and usage["missing_fields"]["cache_read_input_tokens"] == 1
     assert len(calls) == 1 and calls[0][2] == [] and configs[0]["_single_attempt"]
     projected = svc._context_projection(cid, account["id"], before)
     assert valid_groups(projected) and projected[-4:] == before[-4:]
