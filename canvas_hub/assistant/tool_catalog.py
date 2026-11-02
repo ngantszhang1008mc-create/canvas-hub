@@ -70,7 +70,8 @@ DISCOVER = AgentTool("discover_tools",
     "select replaces the request's discovered selection (manual selections stay). It only loads schemas, never executes tools. "
     "Use group:tracker or tool:get_component_context. On Codex, invoke newly discovered tools with call_discovered_tool.", "read",
     {"query": {"type": "string"}, "offset": {"type": "integer", "minimum": 0},
-     "select": {"type": "array", "items": {"type": "string"}}})
+     "select": {"type": "array", "items": {"type": "string"}},
+     "refresh_schemas": {"type": "boolean", "description": "Explicitly reread selected Codex schemas if their earlier definitions are needed again."}})
 DISPATCH = AgentTool("call_discovered_tool",
     "Invoke one already loaded tool by name and its schema-validated arguments. Primarily for Codex's fixed native tool list. "
     "Discover/load a permitted tool first. This cannot grant permissions or confirm Canvas writes.", "read",
@@ -153,6 +154,9 @@ class ToolSession:
         self.catalog = ToolCatalog(permissions, allowed_names=allowed_names, discovery=discovery)
         self.manual = self.catalog.normalize(manual)
         self.discovered = []
+        # Codex receives the initial schemas natively. Later discovery supplies
+        # only schemas that have not yet been given to this same native turn.
+        self._provided_schemas = set(self.catalog.names(self.manual))
 
     def refresh(self, permissions):
         self.catalog = ToolCatalog(permissions, allowed_names=self.allowed_names, discovery=self.discovery_enabled)
@@ -180,19 +184,23 @@ class ToolSession:
             self.discovered = selected
         query = (args.get("query") or "").casefold()[:200]
         offset = args.get("offset") or 0
-        public = self.catalog.public()
-        matches = [t for t in public["tools"] if query in (t["name"] + " " + t["group"] + " " + t["description"]).casefold()]
-        out = {"groups": [{k: g[k] for k in ("id", "label", "description")} for g in public["groups"]],
-               "tools": [{**t, "description": t["description"][:220]} for t in matches[offset:offset+15]],
-               "next_offset": offset + 15 if offset + 15 < len(matches) else None,
-               "manual_selection": self.manual, "discovered_selection": self.discovered,
+        out = {"manual_selection": self.manual, "discovered_selection": self.discovered,
                "loaded_tools": [t["name"] for t in self.advertised()], "executed": False,
                "note": "Selection only loads tools. To change discovered tools, pass select again. Manual choices remain for this message."}
+        if 'select' not in args or 'query' in args or 'offset' in args:
+            public = self.catalog.public()
+            matches = [t for t in public["tools"] if query in (t["name"] + " " + t["group"] + " " + t["description"]).casefold()]
+            out.update(groups=[{k: g[k] for k in ("id", "label", "description")} for g in public["groups"]],
+                       tools=[{**t, "description": t["description"][:220]} for t in matches[offset:offset+15]],
+                       next_offset=offset + 15 if offset + 15 < len(matches) else None)
         if include_schemas and "select" in args:
-            chosen = self.catalog.names(self.discovered) - DEFAULTS
-            out["schemas"] = [definition(t) for n, t in self.catalog.tools.items() if n in chosen]
+            chosen = self.catalog.names(self.manual + self.discovered)
+            needed = chosen if args.get('refresh_schemas') else chosen - self._provided_schemas
+            out["schemas"] = [definition(t) for n, t in self.catalog.tools.items() if n in needed]
+            out["schemas_already_available"] = sorted(chosen & self._provided_schemas)
+            self._provided_schemas.update(chosen)
             out["invocation"] = "Use call_discovered_tool with the tool name and arguments matching its schema."
-        return json.dumps(out, ensure_ascii=False)
+        return json.dumps(out, ensure_ascii=False, separators=(',', ':'))
 
     def dispatch(self, args):
         if not self.discovery_enabled:

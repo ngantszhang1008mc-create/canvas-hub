@@ -278,7 +278,7 @@ def test_compaction_through_real_provider_adapters(hub, account, fake_codex, pre
 
 
 @pytest.mark.browser
-def test_compaction_control_keeps_chat_and_discloses_usage(hub, account, monkeypatch):
+def test_compaction_control_keeps_chat_and_discloses_usage(hub, account, monkeypatch, tmp_path):
     from playwright.sync_api import expect, sync_playwright
     from .test_components_ui import serve
     _, cid = conversation(hub, account)
@@ -299,5 +299,16 @@ def test_compaction_control_keeps_chat_and_discloses_usage(hub, account, monkeyp
         page.reload()
         expect(page.locator(".msg.user")).to_have_count(before)
         assert api.assistant.get_conversation(account["id"], cid)["context"]["history_preserved"]
+        from canvas_hub.assistant.context import context_error
+        cfg = {'provider': 'codex', 'context': {'tool_tokens': 512}}
+        report = Policy.for_config(cfg).measure(cfg, 'system', [
+            {'role': 'tool', 'results': [{'name': 'get_component', 'content': 'x' * 9000}]}], [])
+        api.assistant._record_final_state(cid, 'error', str(context_error(report)))
+        page.set_viewport_size({'width': 380, 'height': 900})
+        page.reload()
+        expect(page.get_by_text('Retry answer cannot run tools', exact=False)).to_be_visible()
+        expect(page.get_by_role('button', name='Retry answer', exact=True)).to_have_count(0)
+        expect(page.locator('.composer textarea')).to_be_enabled()
+        page.screenshot(path=str(tmp_path / 'tracker-budget-380.png'), full_page=True)
         browser.close()
     assert not errors

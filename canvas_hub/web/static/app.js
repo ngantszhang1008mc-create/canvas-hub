@@ -1525,6 +1525,7 @@ VIEWS.assistant = async (main, parts, params) => {
       log.append(h("div", { class: "msg assistant live", "aria-busy": "true" }, typer("live", d.draft.text, true)));
     } else typers.delete("live");
     const st = d.conversation.run_state;
+    const contextBlocked = (d.conversation.run_error || '').startsWith('Context budget exceeded');
     const busy = st === "running" || st === "cancelling";
     sendBtn.disabled = busy || settingsUnavailable || catalogLoading || sending; stopBtn.hidden = !busy;
     toolPicker.setBusy(busy || settingsUnavailable || catalogLoading || sending);
@@ -1543,7 +1544,7 @@ VIEWS.assistant = async (main, parts, params) => {
       d.conversation.context_notice ? h("p", null, d.conversation.context_notice) : null);
     mount(status, busy ? h("span", { class: "working" }, st === "cancelling" ? "Stopping…" : "Working…")
       : st === "error" ? h("div", { class: "banner bad", style: "margin:0" }, h("div", { class: "b-body" }, h("div", { class: "b-title" }, "The assistant stopped"), h("div", { class: "small" }, d.conversation.run_error || ""),
-        !settingsUnavailable ? h("div", null, h("button", { onclick: retry }, "Retry answer"), h("span", { class: "small" }, " Retry makes a new provider request with tools disabled. If more tools are needed, review previous results and send a new message.")) : null)) : null);
+        !settingsUnavailable && !contextBlocked ? h("div", null, h("button", { onclick: retry }, "Retry answer"), h("span", { class: "small" }, " Retry makes a new provider request with tools disabled. If more tools are needed, review previous results and send a new message.")) : null)) : null);
     const seq = all.length ? all[all.length - 1].seq : 0;
     scroller.scrollTop = atBottom && (seq !== lastSeq || stick || busy) ? scroller.scrollHeight : prevTop;
     lastSeq = seq; stick = false;

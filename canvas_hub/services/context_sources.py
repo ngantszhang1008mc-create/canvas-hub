@@ -6,6 +6,7 @@ ownership/deletion, including replacement of current attachment revisions.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 
 from ..util import Conflict, InvalidInput, NotFound
@@ -97,15 +98,28 @@ class ContextSources:
         return {k: row[k] for k in ("source_id", "version", "title", "total_chars", "chunk_count", "item_id",
                                     "resource_id", "course_canvas_id", "source_url", "current_revision", "presence")}
 
-    def catalog(self, account_id, *, course_id=None, item_id=None, offset=0, limit=15):
+    def catalog(self, account_id, *, course_id=None, item_id=None, offset=0, limit=15, include_preview=False, byte_limit=None):
         self._backfill(account_id, course_id, item_id)
         where, args = self._scope(account_id, course_id, item_id)
         limit, offset = max(1, min(20, int(limit))), max(0, int(offset))
         rows = self.db.query("SELECT s.*,d.item_id,d.resource_id,i.course_canvas_id,i.source_url,i.current_revision,i.presence "
                              "FROM context_sources s JOIN search_docs d ON d.id=s.search_doc_id JOIN items i ON i.id=d.item_id "
                              f"WHERE {where} ORDER BY s.source_id LIMIT ? OFFSET ?", (*args, limit + 1, offset))
-        return {"sources": [{**self._metadata(r), "preview": r["preview"], "preview_kind": "opening excerpt, not a complete summary"} for r in rows[:limit]],
-                "next_offset": offset + limit if len(rows) > limit else None,
+        sources, size = [], 0
+        for row in rows[:limit]:
+            source = self._metadata(row)
+            if include_preview:
+                source['preview'] = row['preview']
+            cost = len(json.dumps(source, ensure_ascii=False).encode('utf-8'))
+            if sources and byte_limit is not None and size + cost > byte_limit:
+                break
+            sources.append(source)
+            size += cost
+        return {"sources": sources,
+                "next_offset": offset + len(sources) if len(rows) > len(sources) else None,
+                "preview_included": bool(include_preview),
+                "preview_kind": "opening excerpt, not a complete summary" if include_preview else None,
+                "note": "Metadata only by default. Set include_preview=true for opening excerpts, or read_context_source with source_id/version for full original ranges. Listing does not establish reading coverage.",
                 "coverage": self.coverage(account_id, course_id, item_id), "untrusted_data": True}
 
     def search(self, account_id, query, *, course_id=None, item_id=None, source_id=None, offset=0, limit=2):

@@ -35,7 +35,7 @@ configuration, not forwarded as provider request settings.
 | `auto_threshold_percent` | `80` |
 | `keep_turns` | `2` |
 | `summary_tokens` | `2000` |
-| `history_tokens`, `tool_tokens`, `document_tokens` | 60%, 40%, 40% of remaining input space, with an additional aggregate ceiling |
+| `history_tokens`, `tool_tokens`, `document_tokens` | Share remaining input space; an explicitly configured category ceiling still applies |
 
 These are configurable **application budgets, not advertised model limits**.
 Unknown models/endpoints are not assigned invented capacities. Verify the actual
@@ -71,6 +71,10 @@ names, independent of discovery order. Each discoverable set is capped at 32 sch
 and 8,000 estimated schema tokens; excessive selections fail visibly and
 atomically. These are schema bounds, not a new step limit. Discovery can switch
 tools later, so absent schemas do not mean a capability is unavailable.
+Selecting tools returns a compact acknowledgement unless catalog search/paging
+was also requested. Codex receives only schemas not already supplied in the same
+native turn; `refresh_schemas: true` explicitly rereads selected definitions.
+Prior discovery results remain in the saved history unchanged.
 
 Permissions remain authoritative and are rechecked during a run. Selection never
 enables a permission or confirms Canvas writes. Historical calls/results stay
@@ -117,8 +121,10 @@ launcher with a searchable list; it does not change the separate tracker layout.
 
 ## Documents and coverage
 
-`list_context_sources` catalogs metadata and opening excerpts. These are labelled
-previews, not complete or model-generated summaries. `search_context_sources`
+`list_context_sources` catalogs identity, version and provenance metadata, with
+bounded pages and explicit `next_offset`. `include_preview: true` adds opening
+excerpts, labelled as incomplete previews. Full rules remain accessible through
+the versioned reader; a catalog never establishes complete reading coverage. `search_context_sources`
 returns at most four 1,400-character chunks (two by default), filtered by course,
 item or source. `read_context_source` reads up to 8,000 original extracted-text
 characters with required source/version checks and a `next_offset` for exhaustive

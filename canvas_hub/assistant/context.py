@@ -125,17 +125,24 @@ class Policy:
         overhead = estimate(system) + estimate(tools) + 512 + 32 * len(tools)
         # Ten percent headroom is in addition to the reserved output/reasoning.
         available = max(0, int(self.capacity * .9) - self.response_tokens - overhead)
-        # Category ceilings may overlap; the aggregate limit still bounds their
-        # sum. This leaves room for a document-heavy or tool-heavy question.
-        limits = {"history": self.history_tokens or int(available * .6),
-                  "tools": self.tool_tokens or int(available * .4),
-                  "documents": self.document_tokens or int(available * .4)}
+        # Unspecified categories share the input budget. A tool-heavy question
+        # must not fail merely because tools exceed an arbitrary 40% share.
+        # Explicit per-category ceilings and the aggregate limit still apply.
+        limits = {"history": self.history_tokens if self.history_tokens is not None else available,
+                  "tools": self.tool_tokens if self.tool_tokens is not None else available,
+                  "documents": self.document_tokens if self.document_tokens is not None else available}
         used = {"history": history, "tools": tool_total, "documents": documents}
         total = sum(used.values())
         over = overhead + self.response_tokens > int(self.capacity * .9) or total > available
         over = over or any(used[k] > limits[k] for k in used)
         near = total > available * self.threshold or any(used[k] > limits[k] * self.threshold for k in used)
+        largest = sorted(({"name": r.get("executed_tool") or r.get("name") or "unknown",
+                           "estimated_tokens": estimate(r.get("content", ""))}
+                          for m in transcript if m["role"] == "tool" for r in m.get("results", [])),
+                         key=lambda r: r["estimated_tokens"], reverse=True)[:3]
         return {"estimated_tokens": overhead + total, "overhead_tokens": overhead,
+                "schema_tokens": estimate(tools), "system_tokens": estimate(system),
+                "framing_tokens": 512 + 32 * len(tools), "largest_tool_results": largest,
                 "response_reserved": self.response_tokens, "capacity": self.capacity,
                 "capacity_source": self.capacity_source, "estimator": "conservative UTF-8 heuristic, not exact",
                 "used": used, "limits": limits, "available": available, "over_budget": over, "near_limit": near}
@@ -220,8 +227,13 @@ def summary_message(summary):
 
 def context_error(report):
     used = report["used"]
-    return ProviderError(f"Context budget exceeded (estimated history {used['history']}, tools {used['tools']}, "
-                         f"documents {used['documents']}; schemas/system {report['overhead_tokens']}, "
-                         f"response reserve {report['response_reserved']}). Original history and tool outcomes are saved. "
-                         "Use bounded source/tracker reads, a narrower request or a new chat, or configure this setup's "
-                         "verified context capacity. No oversized request was sent.")
+    largest = ", ".join(f"{r['name']} ~{r['estimated_tokens']}" for r in report["largest_tool_results"])
+    return ProviderError(f"Context budget exceeded (estimated history {used['history']}, tool results {used['tools']}, "
+                         f"documents {used['documents']}; tool schemas {report['schema_tokens']}, system {report['system_tokens']}, "
+                         f"framing {report['framing_tokens']}; response reserve {report['response_reserved']}; "
+                         f"capacity {report['capacity']}, {report['capacity_source']}). "
+                         + (f"Largest tool results: {largest}. " if largest else "")
+                         + "Original history and completed actions are saved; no oversized request was sent. "
+                         "Retry answer cannot run tools and tool selection does not remove saved results. "
+                         "Verify this setup's capacity, then continue with a new message; or start a focused chat "
+                         "with tracker IDs and ask it to check current state first. Do not repeat completed changes.")

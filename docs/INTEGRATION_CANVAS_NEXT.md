@@ -124,3 +124,24 @@ history, no automatic summary, usage counted twice (once per request), preserved
 manual tracker state and no remaining quota hold. The synthetic preview launcher
 also started successfully. No full suite, live login, real provider call,
 production deployment or main-branch merge was performed.
+
+## Tracker context-budget repair
+
+The former implicit 40% tool-result allowance could stop tracker work even while
+the complete request fitted the 64,000-token application budget. Unconfigured
+categories now share the available input space. Explicit category limits, total
+capacity, output reserve and headroom remain enforced; no capacity was raised
+and automatic compaction stays off.
+
+Discovery avoids resending schemas already supplied to a Codex turn, while an
+explicit schema refresh remains possible. Source catalogs retain IDs, versions,
+titles and provenance; opening excerpts are optional and complete original text
+remains range-readable. No old history or completed tool outcome is masked.
+Budget errors distinguish tool results from schemas and identify large results.
+The UI no longer offers ineffective tool-free Retry for a budget stop.
+
+Synthetic regression cases reproduce tool-result estimates 20,461/19,693 within
+available aggregate budgets 46,918/44,299/43,198. They also exercise a new
+`/tracker` message, blocked retry writes, saved state/proposal preservation,
+discovery rereads and source pagination. These are application estimates, not
+measured provider usage or billed tokens.
