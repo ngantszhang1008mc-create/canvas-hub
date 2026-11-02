@@ -8,6 +8,7 @@ from ..util import InvalidInput, now_iso
 from .context import (Policy, SUMMARY_SYSTEM, context_error, data_version, encoded,
                       estimate, neutral_message, parse_summary, split_for_summary, summary_message)
 from .providers import ProviderError, Stopped
+from .source_context import with_source_context
 
 
 class ContextService:
@@ -129,10 +130,11 @@ class ContextService:
                               (status, encoded(usage) if usage else None, now_iso(), attempt))
 
     def _prepare_context(self, cid, account_id, cfg, system, transcript, tools, make_provider,
-                         *, allow_compact=True, provider_pending=False):
+                         *, allow_compact=True, provider_pending=False, request_context=None):
         policy = Policy.for_config(cfg)
         transcript = self._context_projection(cid, account_id, transcript)
-        report = policy.measure(cfg, system, transcript, tools)
+        projected = with_source_context(transcript, request_context)
+        report = policy.measure(cfg, system, projected, tools)
         if report["overhead_tokens"] + report["response_reserved"] >= int(policy.capacity * .9):
             self._context_reports[cid] = report
             raise context_error(report)
@@ -144,11 +146,12 @@ class ContextService:
             except ProviderError as e:
                 with self.hub.db.tx() as c:
                     c.execute("UPDATE assistant_conversations SET context_notice=? WHERE id=?", (str(e), cid))
-            report = policy.measure(cfg, system, transcript, tools)
+            projected = with_source_context(transcript, request_context)
+            report = policy.measure(cfg, system, projected, tools)
         self._context_reports[cid] = report
         if report["over_budget"]:
             raise context_error(report)
-        return transcript, attempted
+        return projected, attempted
 
     def compact(self, account_id, cid, profile_id=None, reasoning=None, model=None):
         with self._cfg_lock:
