@@ -56,7 +56,7 @@ export function makeExternalSources(env) {
         if(!alive())return;
         const repeat=!!req||!!c||source.decision!=='undecided';
         if(disclosure.available) {
-          content.append(note(`Read only this public URL: ${disclosure.urls.join(', ')}. Its page text will be sent to ${disclosure.setup || disclosure.provider} (${disclosure.endpoint}), model ${disclosure.model}. This uses your API quota. No Canvas cookies or login are used.`),
+          content.append(note(`Read only this public URL: ${disclosure.urls.join(', ')}. Its page text will be sent to ${disclosure.setup || disclosure.provider} (${disclosure.endpoint}), model ${disclosure.model}. ${disclosure.provider === 'codex' ? 'This may use your Codex quota.' : 'This uses your API quota.'} No Canvas cookies or login are used.`),
             h('button',{class:'primary',onclick:()=>action('/analyze',{token:disclosure.token,consent:true,reanalyze:repeat})},repeat?'Approve and reanalyse':'Approve and analyse'));
         } else content.append(note(disclosure.message),h('a',{href:'#/assistant/settings'},'Open Assistant settings'));
         content.append(h('button',{onclick:()=>action('/analyze',{executor:'mcp',reanalyze:repeat})},'Use connected Agent instead'));
@@ -146,7 +146,7 @@ export function makeExternalSources(env) {
         if(!valid()||reviewVersion!==polling)return;
         if(!d.available) {mount(batchArea,note(d.message),h('a',{href:'#/assistant/settings'},'Open Assistant settings'));return;}
         mount(batchArea,h('h3',{tabindex:'-1'},`Analyse ${d.count} links · ${scopeLabel}`),
-          note(`These public pages will be read and their text sent to ${d.setup||d.provider} (${d.endpoint}), model ${d.model}. This uses your API quota. No Canvas cookies or login are used. Existing decisions and previous attempts are excluded.`),
+          note(`These public pages will be read and their text sent to ${d.setup||d.provider} (${d.endpoint}), model ${d.model}. ${d.provider === 'codex' ? 'This may use your Codex quota.' : 'This uses your API quota.'} No Canvas cookies or login are used. Existing decisions and previous attempts are excluded.`),
           h('ul',null,d.urls.map(url=>h('li',null,url))),
           h('button',{class:'primary',onclick:async(e)=>{
             e.currentTarget.disabled=true;

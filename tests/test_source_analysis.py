@@ -14,9 +14,65 @@ from canvas_hub.services.external_reader import PublicReader, Read
 from canvas_hub.util import InvalidInput, Conflict, NotFound
 from canvas_hub.web.app import create_app
 from .test_external_sources import source, URL, SPEC
+from .test_codex import fake_codex
 
 RESULT = {'roles':['course_website','material'],'confidence':0.9,'summary':'Course material',
           'adapter_spec': {'version':1,'pages':[URL],'format':'html'}}
+
+
+def test_codex_source_analysis_discloses_then_uses_sandboxed_cli(hub, source, account, fake_codex):
+    setup, messages = fake_codex
+    setup(reply=json.dumps(RESULT))
+    api = HubAPI(hub)
+    api.assistant = AssistantService(hub, api)
+    api.assistant.update_config({'preset': 'codex', 'model': '', 'name': 'Codex fixture'})
+    service = SourceAnalysis(api)
+    svc, sid, reads = source
+    aid = account['id']
+
+    disclosure = service.disclosure(aid, sid)
+    assert disclosure['available'] and disclosure['provider'] == 'codex'
+    assert disclosure['endpoint'] == 'Codex CLI (OpenAI)'
+    assert disclosure['model'] == 'Provider default'
+    assert not messages() and not reads
+    with pytest.raises(InvalidInput):
+        service.start(aid, sid, disclosure['token'])
+    assert not messages() and not reads
+
+    service.start(aid, sid, disclosure['token'], consent=True)
+    finish(service)
+    assert svc.get(aid, sid)['request']['status'] == 'done'
+    assert svc.get(aid, sid)['classification']['evidence_url'] == URL
+    assert reads == [URL]
+    requests = {m['method']: m.get('params') for m in messages() if 'method' in m}
+    thread = requests['thread/start']
+    assert thread['ephemeral'] and thread['sandbox'] == 'read-only'
+    assert thread['dynamicTools'] == [] and thread['config']['mcp_servers'] == {}
+    assert thread['config']['web_search'] == 'disabled'
+    assert thread['config']['features.shell_tool'] is False
+
+
+def test_codex_batch_discloses_and_requires_consent(hub, source, account, fake_codex):
+    setup, messages = fake_codex
+    setup(reply=json.dumps(RESULT))
+    api = HubAPI(hub)
+    api.assistant = AssistantService(hub, api)
+    api.assistant.update_config({'preset': 'codex', 'model': ''})
+    service = SourceAnalysis(api)
+    svc, sid, reads = source
+    aid = account['id']
+    disclosure = service.batch_disclosure(aid, course_id='4242')
+    assert disclosure['available'] and disclosure['count'] == 1
+    assert disclosure['endpoint'] == 'Codex CLI (OpenAI)' and disclosure['model'] == 'Provider default'
+    with pytest.raises(InvalidInput):
+        service.batch_start(aid, disclosure['token'])
+    assert not reads and not messages()
+    service.batch_start(aid, disclosure['token'], consent=True)
+    for thread in list(service.batch_threads.values()):
+        thread.join(10)
+        assert not thread.is_alive()
+    assert service.batch_view(aid, disclosure['token'])['state'] == 'done'
+    assert svc.get(aid, sid)['request']['status'] == 'done' and reads == [URL]
 
 @pytest.fixture
 def builtin(hub, source, monkeypatch):
