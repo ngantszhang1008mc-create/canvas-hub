@@ -34,7 +34,6 @@ right-click → **Extract All** on Windows. Open the extracted `canvas-hub-main`
 folder; keep the whole folder together and do not run launchers inside the ZIP.
 
 Install [uv](https://docs.astral.sh/uv/), which obtains a suitable Python when needed.
-**The commands below install uv only, not Canvas Hub.**
 
 On macOS:
 
