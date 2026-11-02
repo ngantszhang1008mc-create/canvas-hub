@@ -118,7 +118,8 @@ class BrowserConnection:
         self.transport, self.headless = transport, headless
         self.events = queue.Queue()
         self.lock = threading.Lock()
-        self.state = {'state': 'opening', 'blocked_origins': [], 'pending_post': None, 'blocked_submission_origin':None}
+        self.state = {'state': 'opening', 'blocked_origins': [], 'pending_post': None,
+                      'blocked_submission_origin':None, 'redirect_blocked':False}
         self._post_approval = None
         self._post_pending = None
         self._request_count = 0
@@ -204,6 +205,14 @@ class BrowserConnection:
             if data and len(data) > MAX_REQUEST:
                 route.abort(); return
             status, headers, cookies, body = self.transport(request.url, method, headers, data)
+            # Playwright does not invoke route handlers for subsequent HTTP
+            # redirect hops. Never hand a redirect to the browser: it could
+            # bypass DNS pinning/scope or replay an approved POST's credentials.
+            # Redirect-dependent sign-in remains unsupported until every hop
+            # can be revalidated without spoofing the final document's origin.
+            if 300 <= status < 400:
+                self.update(redirect_blocked=True)
+                route.abort(); return
             _set_cookies(context, request.url, cookies)
             route.fulfill(status=status, headers=headers, body=body)
         except Exception:
@@ -434,6 +443,9 @@ class SiteConnections:
             return session if session and session.target == source['url'] and session._owner_hash == self._owner(aid) else None
 
     def status(self, aid, sid):
+        source = self._source(aid, sid)
+        if urlsplit(source['url']).scheme != 'https':
+            return {'state':'not_supported', 'message':'Site connections require HTTPS. Public link analysis is still available.'}
         session = self._session(aid, sid)
         return session.snapshot() if session else {'state':'not_connected'}
 

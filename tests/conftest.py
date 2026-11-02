@@ -19,14 +19,15 @@ def configured_browser_executable(request, monkeypatch):
     executable = os.environ.get("CANVAS_HUB_CHROMIUM")
     if executable and request.node.get_closest_marker("browser"):
         from playwright.sync_api import BrowserType
-        launch = BrowserType.launch
+        def configure(launch):
+            def configured_launch(browser_type, *args, **kwargs):
+                if browser_type.name == "chromium" and not kwargs.get("executable_path") and not kwargs.get("channel"):
+                    kwargs["executable_path"] = executable
+                return launch(browser_type, *args, **kwargs)
+            return configured_launch
 
-        def configured_launch(browser_type, *args, **kwargs):
-            if browser_type.name == "chromium" and not kwargs.get("executable_path") and not kwargs.get("channel"):
-                kwargs["executable_path"] = executable
-            return launch(browser_type, *args, **kwargs)
-
-        monkeypatch.setattr(BrowserType, "launch", configured_launch)
+        for method in ("launch", "launch_persistent_context"):
+            monkeypatch.setattr(BrowserType, method, configure(getattr(BrowserType, method)))
 
 
 @pytest.fixture

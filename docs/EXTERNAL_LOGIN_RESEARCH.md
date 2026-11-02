@@ -13,7 +13,11 @@ open an interactive browser for the user's own sign-in. Unknown origins and
 non-HTTPS requests are blocked. Sign-in POSTs are limited to recognized paths;
 each requires separate one-time user approval and expires after 60 seconds.
 Requests are routed through a public-address DNS-pinned transport, with bounded
-response size; redirects are intercepted and must stay within approved origins. WebSockets and service workers are
+response size. HTTP redirect responses are blocked before the browser sees them:
+Playwright does not re-run route handlers on subsequent redirect hops, so letting
+the browser follow them could escape the approved origins and pinned transport.
+Redirect-dependent sign-in/SSO is currently unsupported, even between approved
+origins. WebSockets and service workers are
 blocked. Unsupported cookie syntax and other network requests fail closed.
 
 Checking the requested page is a separate action: it makes a single GET for the
@@ -37,7 +41,7 @@ No public adapter is created for an authenticated snapshot and no authenticated
 background crawling is enabled. The existing public Analyze link flow remains
 separate. Every connected-page analysis requires a fresh explicit approval.
 
-Limitations requiring real-world validation include multi-cookie and SSO flows,
+Limitations requiring real-world validation include multi-cookie flows,
 login POST paths not recognized by the conservative policy, sites requiring a
 Referrer header or script-rendered course pages, native HTTP Basic sign-in,
 CAPTCHAs, and cross-origin assets. Such sites may remain unverified even when

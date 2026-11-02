@@ -73,6 +73,7 @@ export function makeExternalSources(env) {
         async function connectionPanel() {
           const cp=aidPath+'/site-connection';
           let state=await api(cp); if(!alive())return;
+          if(state.state==='not_supported') {mount(connectBox,note(state.message));return;}
           const output=h('div',{'aria-live':'polite'});
           const button=(label,fn)=>h('button',{onclick:async e=>{
             const b=e.currentTarget; b.disabled=true;
@@ -96,6 +97,7 @@ export function makeExternalSources(env) {
                   }));
               }));
           } else {
+            if(state.redirect_blocked)connectBox.append(note('This sign-in flow uses an HTTP redirect, which is currently blocked. Redirect-dependent sign-in is not supported; saved source data is unchanged.'));
             if(state.blocked_origins?.length)connectBox.append(note(`Blocked origins: ${state.blocked_origins.join(', ')}. Close and reopen after reviewing any identity-provider origin you need.`));
             if(state.blocked_submission_origin)connectBox.append(note(`A submission to ${state.blocked_submission_origin} was blocked because its purpose could not be verified. This sign-in flow may not be supported.`));
             if(state.pending_post)connectBox.append(note(`A sign-in submission to ${state.pending_post.origin} is waiting for approval. Approve once, then submit again in the site window.`),

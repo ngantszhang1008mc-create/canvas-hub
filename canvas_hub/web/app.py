@@ -476,8 +476,11 @@ def create_app(api: HubAPI, *, token: str, port: int) -> FastAPI:
     @app.post("/api/accounts/{aid}/external-sources/{sid}/analyze-connected")
     async def analyze_connected(aid: int, sid: int, request: Request):
         b = await body(request)
-        return source_analysis.start(aid, sid, b.get('token'), consent=b.get('consent') is True,
-                                     reanalyze=True, connected=True)
+        # Connected approval rechecks the page synchronously in its browser.
+        # Keep that wait off the event loop so status/cancel requests can run.
+        return await run_in_threadpool(lambda: source_analysis.start(
+            aid, sid, b.get('token'), consent=b.get('consent') is True,
+            reanalyze=True, connected=True))
 
     @app.post("/api/accounts/{aid}/external-sources/{sid}/analyze")
     async def external_analyze(aid: int, sid: int, request: Request):

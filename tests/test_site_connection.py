@@ -93,6 +93,7 @@ def test_profile_symlink_is_not_opened(tmp_path):
     assert not list(outside.iterdir())
 
 
+@pytest.mark.browser
 def test_user_initiated_synthetic_login_and_expiry(tmp_path):
     requests=[]; expired=[False]
     page=(b'<main>' + b'Course lecture and assignment information. '*12 +
@@ -100,7 +101,9 @@ def test_user_initiated_synthetic_login_and_expiry(tmp_path):
     def transport(url, method, headers, body):
         requests.append((url,method))
         if method=='POST':
-            return 302, {'location':'https://course.example.edu/course'}, ['session=fixture; Path=/; Secure; HttpOnly'], b''
+            # This fixture covers supported non-redirect sign-in. Redirects
+            # must be blocked before Chromium can bypass request interception.
+            return 200, {'content-type':'text/html'}, ['session=fixture; Path=/; Secure; HttpOnly'], page
         if 'session=fixture' in headers.get('cookie','') and not expired[0]:
             return 200, {'content-type':'text/html'}, [], page
         return 200, {'content-type':'text/html'}, [], b'''<form method="post" action="/login"><input type="password" value="fixture"><button>Log in</button></form><script>document.querySelector('form').requestSubmit()</script>'''
@@ -131,6 +134,8 @@ def test_user_initiated_synthetic_login_and_expiry(tmp_path):
         assert requests[before:]==[('https://course.example.edu/course','GET')]
     finally:
         if session.snapshot()['state'] not in ('closed','error'): session.call('cancel')
+        session.thread.join(timeout=5)
+        assert not session.thread.is_alive()
 
 
 def test_connection_endpoints_require_explicit_consent(hub,account,source):
