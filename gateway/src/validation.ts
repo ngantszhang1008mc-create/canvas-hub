@@ -1,4 +1,4 @@
-import { exactKeys, integer, record, type Policy, type ModelPolicy } from "./config";
+import { exactKeys, integer, MAX_TOOLS, MAX_TOOL_CALLS, record, type Policy, type ModelPolicy } from "./config";
 import { GatewayError } from "./errors";
 
 export interface ToolCall {
@@ -71,9 +71,9 @@ export function generation(body: Record<string, unknown>, policy: Policy): { inp
   exactKeys(body, ["model", "messages", "max_output_tokens", "tools"], ["model", "messages", "max_output_tokens"]);
   if (typeof body.model !== "string" || !Object.hasOwn(policy.models, body.model)) throw new GatewayError(400, "model_not_allowed");
   const model = policy.models[body.model];
-  if (!integer(body.max_output_tokens, 1, model.max_output_tokens)) throw new GatewayError(400, "invalid_output_limit");
+  if (!integer(body.max_output_tokens, model.provider === "openai_responses" ? 16 : 1, model.max_output_tokens)) throw new GatewayError(400, "invalid_output_limit");
   const tools = body.tools ?? [];
-  if (!Array.isArray(tools) || tools.length > 32 || new Set(tools).size !== tools.length
+  if (!Array.isArray(tools) || tools.length > MAX_TOOLS || new Set(tools).size !== tools.length
     || tools.some(t => typeof t !== "string" || !Object.hasOwn(policy.tools, t))) throw new GatewayError(400, "tool_not_allowed");
   if (!Array.isArray(body.messages) || body.messages.length < 1 || body.messages.length > 128) throw new GatewayError(400, "invalid_messages");
   const pending = new Set<string>();
@@ -87,11 +87,14 @@ export function generation(body: Record<string, unknown>, policy: Policy): { inp
     } else if (m.role === "assistant") {
       exactKeys(m, ["role", "content", "tool_calls"], ["role", "content"]);
       const calls = m.tool_calls ?? [];
-      if (!Array.isArray(calls) || calls.length > 32) throw new GatewayError(400, "invalid_tool_calls");
+      if (!Array.isArray(calls) || calls.length > MAX_TOOL_CALLS) throw new GatewayError(400, "invalid_tool_calls");
       for (const c of calls) {
         if (!record(c)) throw new GatewayError(400, "invalid_tool_calls");
         exactKeys(c, ["id", "name", "arguments"]);
-        if (!callId(c.id) || seenCalls.has(c.id) || !tools.includes(c.name)
+        // History remains valid when current tools=[] disables new tool use.
+        // These are inert function-call records; only newly generated calls
+        // must belong to the current server-approved selection.
+        if (!callId(c.id) || seenCalls.has(c.id) || typeof c.name !== "string" || !/^[a-z][a-z0-9_]{0,63}$/.test(c.name)
           || !text(c.arguments, 16_384)) throw new GatewayError(400, "invalid_tool_calls");
         let args: unknown;
         try { args = JSON.parse(c.arguments); } catch { throw new GatewayError(400, "invalid_tool_calls"); }

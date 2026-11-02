@@ -1,6 +1,7 @@
-import { integer, MAX_USAGE_TOKENS, price, type ModelPolicy, type Policy } from "./config";
+import { integer, MAX_TOOLS, MAX_TOOL_CALLS, MAX_USAGE_TOKENS, price, type ModelPolicy, type Policy } from "./config";
 import { GatewayError } from "./errors";
 import type { Completion } from "./providers";
+import { reservePrice, settlementPrice, snapshotPricing, type Pricing } from "./pricing";
 
 type Bind = string | number | null;
 export type RequestStatus = "reserved" | "dispatched" | "completed" | "failed_before_dispatch" | "uncertain" | "overrun";
@@ -18,6 +19,7 @@ export interface RequestRow {
   day_bucket: string; month_bucket: string; global_month: string;
   input_rate: number; output_rate: number; max_input: number; max_output: number;
   input_tokens: number | null; output_tokens: number | null; error_code: string | null;
+  pricing_json: string | null; usage_details_json: string | null;
 }
 
 const day = (now: number) => new Date(now).toISOString().slice(0, 10);
@@ -74,6 +76,10 @@ export class Ledger {
           target_id TEXT, values_json TEXT NOT NULL
         );
       `);
+      // Additive migration: retain old mock accounting/idempotency rows.
+      const columns = this.all<{ name: string }>("PRAGMA table_info(requests)").map(r => r.name);
+      if (!columns.includes("pricing_json")) this.exec("ALTER TABLE requests ADD COLUMN pricing_json TEXT");
+      if (!columns.includes("usage_details_json")) this.exec("ALTER TABLE requests ADD COLUMN usage_details_json TEXT");
     });
   }
 
@@ -174,7 +180,8 @@ export class Ledger {
       const control = this.control();
       if (control.paused || control.breached) throw new GatewayError(503, "gateway_paused");
       const user = this.user(session.user_id);
-      const cost = price(model, model.max_input_tokens, maxOutput);
+      const cost = reservePrice(model, maxOutput);
+      const pricing = snapshotPricing(model);
       const dayBucket = `${day(now)}:${user.day_generation}`;
       const monthBucket = `${month(now)}:${user.month_generation}`;
       const globalMonth = month(now);
@@ -193,10 +200,10 @@ export class Ledger {
       this.exec("UPDATE users SET held=? WHERE id=?", String(userHeld + cost), user.id);
       this.exec("UPDATE control SET held=? WHERE id=1", String(globalHeld + cost));
       this.exec(`INSERT INTO requests(id,user_id,key_hash,body_hash,model,status,created_at,deadline_at,reserve_microusd,
-        day_bucket,month_bucket,global_month,input_rate,output_rate,max_input,max_output)
-        VALUES (?,?,?,?,?,'reserved',?,?,?,?,?,?,?,?,?,?)`,
+        day_bucket,month_bucket,global_month,input_rate,output_rate,max_input,max_output,pricing_json)
+        VALUES (?,?,?,?,?,'reserved',?,?,?,?,?,?,?,?,?,?,?)`,
       id, user.id, keyHash, bodyHash, modelName, now, now + policy.request_timeout_ms, String(cost), dayBucket, monthBucket, globalMonth,
-      model.input_microusd_per_million_tokens, model.output_microusd_per_million_tokens, model.max_input_tokens, maxOutput);
+      pricing.short.input, pricing.short.output, model.max_input_tokens, maxOutput, JSON.stringify(pricing));
       return { row: this.request(id)!, replay: false };
     });
   }
@@ -252,22 +259,31 @@ export class Ledger {
       const r = this.request(id)!;
       if (!held(r.status)) return r;
       const usage = completion?.usage;
+      const counts = [usage?.cached_input_tokens ?? 0, usage?.cache_write_input_tokens ?? 0,
+        usage?.cache_write_30m_input_tokens ?? 0, usage?.cache_write_12h_input_tokens ?? 0, usage?.reasoning_tokens ?? 0];
+      const validDetails = counts.every(n => integer(n, 0, MAX_USAGE_TOKENS))
+        && BigInt(counts[1]) === BigInt(counts[2]) + BigInt(counts[3])
+        && usage && integer(usage.input_tokens, 0, MAX_USAGE_TOKENS) && integer(usage.output_tokens, 0, MAX_USAGE_TOKENS)
+        && BigInt(counts[0]) + BigInt(counts[1]) <= BigInt(usage.input_tokens) && counts[4] <= usage.output_tokens;
       if (!usage || !integer(usage.input_tokens, 0, MAX_USAGE_TOKENS) || !integer(usage.output_tokens, 0, MAX_USAGE_TOKENS)
-        || !["stop", "tool_calls", "length"].includes(completion.finish_reason)) {
+        || !validDetails || !["stop", "tool_calls", "length"].includes(completion.finish_reason)) {
         this.exec("UPDATE requests SET status='uncertain',completed_at=?,error_code='usage_missing_or_invalid' WHERE id=?", now, id);
         this.exec("UPDATE control SET breached=1,paused=1 WHERE id=1");
         this.audit(now, "provider_breach", id, { code: "usage_missing_or_invalid" });
         return this.request(id)!;
       }
-      const cost = price({ input_microusd_per_million_tokens: r.input_rate, output_microusd_per_million_tokens: r.output_rate }, usage.input_tokens, usage.output_tokens);
-      const overrun = cost > BigInt(r.reserve_microusd) || usage.input_tokens > r.max_input || usage.output_tokens > r.max_output;
+      const cost = r.pricing_json ? settlementPrice(JSON.parse(r.pricing_json) as Pricing, usage)
+        : price({ input_microusd_per_million_tokens: r.input_rate, output_microusd_per_million_tokens: r.output_rate }, usage.input_tokens, usage.output_tokens);
+      const overrun = Boolean(completion.bound_violation) || cost > BigInt(r.reserve_microusd) || usage.input_tokens > r.max_input || usage.output_tokens > r.max_output;
+      const details = usage.cached_input_tokens === undefined ? null : JSON.stringify({ cached_input_tokens: counts[0], cache_write_input_tokens: counts[1],
+        cache_write_30m_input_tokens: counts[2], cache_write_12h_input_tokens: counts[3], reasoning_tokens: counts[4] });
       this.releaseHold(r);
       this.addSpent(`user-day:${r.user_id}`, r.day_bucket, cost);
       this.addSpent(`user-month:${r.user_id}`, r.month_bucket, cost);
       this.addSpent("global-month", r.global_month, cost);
       this.exec("UPDATE control SET lifetime_spent=? WHERE id=1", String(BigInt(this.control().lifetime_spent) + cost));
-      this.exec("UPDATE requests SET status=?,charged_microusd=?,input_tokens=?,output_tokens=?,completed_at=?,error_code=? WHERE id=?",
-        overrun ? "overrun" : "completed", String(cost), usage.input_tokens, usage.output_tokens, now, overrun ? "provider_bound_exceeded" : null, id);
+      this.exec("UPDATE requests SET status=?,charged_microusd=?,input_tokens=?,output_tokens=?,completed_at=?,error_code=?,usage_details_json=? WHERE id=?",
+        overrun ? "overrun" : "completed", String(cost), usage.input_tokens, usage.output_tokens, now, overrun ? "provider_bound_exceeded" : null, details, id);
       if (overrun) {
         // Commit the full cost AND permanent circuit breaker together. Never
         // throw here: a rollback would conceal spend and undo the freeze.
@@ -297,8 +313,8 @@ export class Ledger {
     const monthlyReset = Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 1);
     const window = (limit: number, spent: bigint, resetsAt: number) => ({ limit_microusd: String(limit), spent_microusd: String(spent), held_microusd: String(userHeld), remaining_microusd: String(nonnegative(BigInt(limit) - spent - userHeld)), resets_at: resetsAt });
     const c = this.control();
-    return { user_id: u.id, reset_timezone: "UTC", daily: window(u.daily_limit, daySpent, dailyReset), monthly: window(u.monthly_limit, monthSpent, monthlyReset),
-      gateway_paused: Boolean(c.paused || c.breached), models: Object.entries(policy.models).map(([id, m]) => ({ id, max_output_tokens: m.max_output_tokens })) };
+    return { user_id: u.id, mode: policy.mode, tools: Object.keys(policy.tools), capabilities: { protocol_version: 1, max_tools: MAX_TOOLS, max_tool_calls_per_response: MAX_TOOL_CALLS, max_messages: 128, max_body_bytes: policy.max_body_bytes }, reset_timezone: "UTC", daily: window(u.daily_limit, daySpent, dailyReset), monthly: window(u.monthly_limit, monthSpent, monthlyReset),
+      gateway_paused: Boolean(c.paused || c.breached), models: Object.entries(policy.models).map(([id, m]) => ({ id, min_output_tokens: m.provider === "openai_responses" ? 16 : 1, max_output_tokens: m.max_output_tokens })) };
   }
 
   status(policy: Policy, now: number) {
@@ -350,5 +366,5 @@ export class Ledger {
 export function publicRequest(row: RequestRow) {
   return { request_id: row.id, model: row.model, status: row.status, created_at: row.created_at, deadline_at: row.deadline_at,
     reserved_microusd: row.reserve_microusd, charged_microusd: row.charged_microusd, error: row.error_code,
-    usage: row.input_tokens === null ? null : { input_tokens: row.input_tokens, output_tokens: row.output_tokens } };
+    usage: row.input_tokens === null ? null : { input_tokens: row.input_tokens, output_tokens: row.output_tokens, ...(row.usage_details_json ? JSON.parse(row.usage_details_json) : {}) } };
 }

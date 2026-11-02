@@ -1,8 +1,9 @@
 # Operator guide
 
-This version is mock-only. It can be developed and tested without a Cloudflare
-account, provider account, or paid API call. These instructions describe a future
-deployment path; this change does not deploy or create accounts.
+This version includes a real OpenAI Responses adapter and an explicit offline
+mock mode. It can be developed and tested without a Cloudflare account, provider
+account, or paid API call. These instructions describe a future deployment path;
+this change does not deploy or create accounts.
 
 ## Local development
 
@@ -19,7 +20,8 @@ Wrangler with `--dry-run`; it bundles the Worker without deploying it. Tests use
 synthetic credentials and course-free messages, isolated storage, and mock
 provider behavior. They never need an upstream key.
 
-For the local HTTP server, create a disposable admin credential without printing
+`npm run dev` explicitly selects Wrangler's `mock` environment. It never selects
+the real adapter. For that local HTTP server, create a disposable admin credential without printing
 it or putting it in shell history:
 
 ```bash
@@ -40,21 +42,26 @@ development server binds only to `127.0.0.1`; use its printed port. Keep its
 storage and `.dev.vars` out of version control. Removing local Wrangler storage
 also removes local accounts, spending records, and idempotency protection.
 
-All four budget fields in the checked-in `POLICY` are zero. For a local mock
-exercise, explicitly set positive synthetic values in `wrangler.jsonc`'s policy
-before starting the server; keep them out of a production configuration. The
-standalone `policy.example.json` shows the same schema but is not automatically
-loaded by Wrangler. Tests supply their own positive synthetic budgets.
+All four budget fields in both checked-in policies are zero. For a local mock
+exercise, explicitly set positive synthetic values in `wrangler.jsonc` under
+`env.mock.vars.POLICY` before starting the server; keep them out of production.
+The default `vars.POLICY` is production and cannot run without `OPENAI_API_KEY`.
+`policy.example.json` is the standalone mock example and
+`policy.production.example.json` is the reviewed Luna example; Wrangler does not
+automatically read either file. Tests supply explicit mock configuration and
+mocked production upstream responses, never a live key.
 
 ## Policy
 
 The `POLICY` binding is server-owned configuration. Amounts are integer micro-USD
 (`1,000,000` units = one USD). Rates are integer micro-USD per million tokens.
-The values in the sample are synthetic; choose actual allowance amounts and
-funding limits before any real rollout.
+Choose actual allowance amounts and funding limits before any real rollout.
+Mock model rates are synthetic; production model rates must meet the reviewed
+provider floors or use more conservative operator-selected values.
 
 | Fields | Meaning |
 | --- | --- |
+| `mode` | Required `mock` or `production`; mixed provider modes are rejected |
 | `user_daily_microusd`, `user_monthly_microusd` | Default new-account limits |
 | `global_monthly_microusd`, `global_lifetime_microusd` | Owner limits across every account |
 | `session_ttl_seconds`, `invite_ttl_max_seconds` | Session validity and maximum invite lifetime |
@@ -85,11 +92,25 @@ automatically restoring an uncertain allowance. Authoritative completion can
 settle it; this version has no administrative button that refunds uncertain
 holds. Do not treat a user reset as such a refund.
 
-Model reservations use the configured full input bound plus the accepted output
-bound at server prices. Do not tune this bound downward merely to make more
-requests fit: a future real adapter must prove the provider cannot accept a more
-expensive request. A request retains its reservation-time price and accounting
-periods through settlement, including across policy changes and UTC boundaries.
+Production model entries use `provider:"openai_responses"`,
+`native_model:"gpt-6-luna"`, and the reviewed full `max_input_tokens:1050000` bound.
+`pricing` contains `unit:"microusd_per_million_tokens"`,
+`long_context_threshold_tokens:272000`, and `short`/`long` rate sets. Each rate set
+has `input`, `cached_input`, `cache_write_30m`, `cache_write_12h`, and `output`.
+The production example supplies the complete shape; unsupported models, reduced
+input bounds, or rates below the reviewed floors fail configuration validation.
+The tool catalog can contain up to 128 definitions. The client discovers names
+and versioned limits through `GET /v1/allowance`; a larger catalog or request is
+rejected rather than silently shortened. Historical call/result records do not
+need to remain in the tools selected for the current turn.
+
+Reservations cover the full input bound at the most expensive category plus the
+accepted output bound at the highest output rate. The 12-hour cache-write rate is
+included conservatively, even though requests explicitly select 30-minute writes.
+Reported 12-hour writes are fully priced and trigger the breach circuit breaker.
+A request retains its price snapshot and accounting periods through settlement,
+including across policy changes and UTC boundaries. See the
+[adapter notes](openai-provider.md) for exact usage arithmetic.
 
 ## Administration
 
@@ -134,26 +155,34 @@ charge. Do not manually delete uncertain requests or edit totals in SQL.
 2. Use a dedicated Worker and preserve its Durable Object class, namespace, and
    fixed ledger name across releases. Keep migrations additive. A new namespace
    is a fresh spending ledger, not a harmless deployment rename.
-3. Add the admin secret with Wrangler's secret mechanism or the Cloudflare
-   dashboard. A future paid adapter must receive its provider key the same way;
+3. Add `ADMIN_SECRET` and `OPENAI_API_KEY` with Wrangler's secret mechanism or the Cloudflare
+   dashboard. The production adapter receives its provider key only this way;
    never add it to `vars`, source, a client bundle, or a public repository.
 4. Protect operator access with an appropriate identity boundary and MFA. Disable
    request body/header logging and any tracing that captures conversation data.
    Set edge abuse controls and monitor infrastructure costs independently.
-5. Run the documented tests and dry-run build. Enabling a real provider requires
-   its separately reviewed adapter and approved staging exercise first. A provider
-   secret alone cannot enable a paid model in this mock-only build.
+5. Run focused tests and the dry-run build after relevant changes. The real adapter
+   has only been exercised with mocked upstream HTTP/SSE; conduct a separately
+   approved staging exercise before issuing funded invitations. Explicit
+   production policy, secrets, and positive user/global budgets are all required.
 6. Deploy only after a separate deployment decision. Verify the fixed ledger,
    configured budgets, TLS, secret bindings, and restricted operator access before
    issuing real invitations.
 
 For an authorized future deployment, typical secret/deployment commands are
-`npx wrangler secret put ADMIN_SECRET` and `npx wrangler deploy`. Do not run them
+`npx wrangler secret put ADMIN_SECRET`, `npx wrangler secret put OPENAI_API_KEY`,
+and `npx wrangler deploy`. Do not run them
 as part of local development. See Cloudflare's
 [secret instructions](https://developers.cloudflare.com/workers/configuration/secrets/)
 for environment-specific bindings.
 
 ## Recovery
+
+The SQLite ledger adds nullable `pricing_json` and `usage_details_json` columns
+on startup within a transaction. This additive migration preserves existing
+accounts, holds, totals, and request keys; old requests retain their stored
+input/output rates. Keep the existing `v1` Durable Object class migration and
+singleton identity. No new namespace or manual SQL migration is needed.
 
 Pause admissions before investigating accounting discrepancies, changing provider
 cost assumptions, or restoring data. A restore to an older ledger can forget

@@ -1,5 +1,5 @@
 # Local development only. Generate a fresh >=32-character random value.
 # No working admin or upstream credential is committed.
 ADMIN_SECRET=
-# Reserved for a future reviewed adapter; the current build is mock-only.
+# Required for POLICY.mode=production; never set for offline mock development.
 # OPENAI_API_KEY=

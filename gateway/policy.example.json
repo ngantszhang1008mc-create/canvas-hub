@@ -1,5 +1,6 @@
 {
   "version": 1,
+  "mode": "mock",
   "user_daily_microusd": 0,
   "user_monthly_microusd": 0,
   "global_monthly_microusd": 0,
@@ -29,7 +30,11 @@
   "tools": {
     "demo_read_only": {
       "description": "Offline demonstration function; execution is the local caller's responsibility.",
-      "parameters": { "type": "object", "properties": {}, "additionalProperties": false }
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
     }
   }
 }

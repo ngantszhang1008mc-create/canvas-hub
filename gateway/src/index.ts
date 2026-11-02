@@ -1,6 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import { adminMatches, bearer, bodyFingerprint, digest, opaqueToken, peerDigest } from "./crypto";
-import { exactKeys, integer, MAX_AMOUNT, parsePolicy, SINGLETON, validAdminSecret, type Env, type Policy } from "./config";
+import { assertConfigured, exactKeys, integer, MAX_AMOUNT, parsePolicy, SINGLETON, type Env, type ModelPolicy, type Policy } from "./config";
 import { errorResponse, GatewayError, json, responseHeaders } from "./errors";
 import { Ledger, publicRequest, type RequestRow, type SessionRow } from "./ledger";
 import { adapterFor, PreflightError, type Completion, type Delta, type PreparedCall } from "./providers";
@@ -9,7 +9,7 @@ import { generation, idempotencyKey, readJson, type GenerationRequest } from "./
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     try {
-      if (!validAdminSecret(env.ADMIN_SECRET)) throw new GatewayError(503, "configuration_error");
+      assertConfigured(parsePolicy(env.POLICY), env);
       if (request.headers.has("Origin") || request.headers.has("Cookie")) throw new GatewayError(403, "local_process_only");
       if (new URL(request.url).search) throw new GatewayError(400, "query_not_allowed");
       const headers = new Headers(request.headers);
@@ -28,7 +28,7 @@ export class AllowanceGateway extends DurableObject<Env> {
   // These local seams are exercised inside workerd by runInDurableObject.
   // There are no HTTP endpoints to select time, adapter, or usage.
   private clock = () => Date.now();
-  private adapter = adapterFor;
+  private adapter = (model: ModelPolicy) => adapterFor(model, this.env);
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -51,7 +51,7 @@ export class AllowanceGateway extends DurableObject<Env> {
 
   async fetch(request: Request): Promise<Response> {
     try {
-      if (!validAdminSecret(this.env.ADMIN_SECRET)) throw new GatewayError(503, "configuration_error");
+      assertConfigured(this.policy, this.env);
       if (request.headers.has("Origin") || request.headers.has("Cookie")) throw new GatewayError(403, "local_process_only");
       const url = new URL(request.url);
       if (url.search) throw new GatewayError(400, "query_not_allowed");

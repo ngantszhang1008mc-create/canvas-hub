@@ -91,7 +91,7 @@ describe("independent protocol boundary review", () => {
     expect(await errorResponse(new GatewayError(429, "user_daily_limit")).json()).toEqual({ error: "user_daily_limit" });
   });
 
-  it("fails closed for a nonmock provider even if its shape otherwise matches", () => {
+  it("fails closed for an unimplemented provider even if its shape otherwise matches", () => {
     const invalid = structuredClone(example);
     invalid.models["mock-text"].provider = "openai";
     expect(() => parsePolicy(invalid)).toThrowError("configuration_error");

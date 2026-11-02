@@ -5,9 +5,11 @@ allowance. It handles invitations, sessions, an approved model contract, streami
 and a transactional usage ledger. Canvas collection, local databases, browser
 sessions, and tool execution remain in the existing local application.
 
-This first implementation uses an offline mock provider. It performs no model
-network calls and requires no real provider key. It is a backend foundation, not
-an enabled free tier in the current Canvas Hub UI. No service has been deployed.
+The production adapter implements OpenAI Responses for the approved `gpt-6-luna`
+model. Development uses an explicit offline mock mode. Production defaults have
+zero allowance and require server-side configuration and secrets before serving
+requests. No live model call or deployment was performed to validate this change.
+The local app's provider integration remains a separate task.
 
 ## What is implemented
 
@@ -21,10 +23,13 @@ an enabled free tier in the current Canvas Hub UI. No service has been deployed.
   request-rate limits, and user/global concurrency limits.
 - Streaming text and function-call fragments, with functions executed only by
   the local client. No automatic provider retry or paid fallback.
+- A bounded OpenAI HTTP/SSE adapter with cached-input/cache-write accounting,
+  long-context price snapshots, and output totals that include reasoning once.
 - Offline functional tests against the Workers runtime and its SQLite storage.
 
-Amounts and model rates in the example policy are test configuration. They are
-not a settled monetary entitlement or a claim about any provider's current price.
+Allowance defaults are zero and do not establish a monetary entitlement. Mock
+rates are synthetic; the production example records reviewed provider price
+floors, which operators must review before enabling paid traffic.
 
 ## Reading and integration
 
@@ -32,6 +37,10 @@ not a settled monetary entitlement or a claim about any provider's current price
   administrative controls, and the deployment path.
 - [Client contract](docs/client-contract.md): transport, streaming, retries,
   quota handling, and the future Python adapter seam.
+- [Minimal integration handoff](docs/integration-handoff.md): the exact local
+  provider mapping and explicit mock setup for the combined test version.
+- [OpenAI adapter](docs/openai-provider.md): supported requests, authoritative
+  usage, conservative reservation, and official references.
 - [Security and cost boundaries](docs/security.md): data transit, accounting
   assumptions, tool permissions, and production limitations.
 
@@ -50,7 +59,7 @@ Cloudflare Worker
 one fixed SQLite Durable Object
   | validate auth/model, atomically reserve all budgets
   v
-provider adapter (offline mock in this version)
+provider adapter (explicit mock or approved OpenAI Responses)
   | text / function-call fragments + authoritative final usage
   v
 settlement + streamed result to local process
@@ -69,15 +78,15 @@ the [storage API](https://developers.cloudflare.com/durable-objects/api/sqlite-s
 provides synchronous transactions. Tests exercise the runtime locally, following
 the [Workers test guidance](https://developers.cloudflare.com/workers/testing/vitest-integration/).
 
-## Real provider readiness
+## Supported provider and remaining rollout work
 
-The adapter seam is intended to support an explicitly reviewed OpenAI Responses
-or Luna implementation later. Before enabling one, define an enforceable input
-bound, enforce the output bound (including billed reasoning), price every
-chargeable feature, parse authoritative terminal usage, and test ambiguous
-cancellation/failure. Keep provider credentials in server-side secret bindings.
-Do not turn the mock adapter into an arbitrary upstream URL proxy.
+The real adapter is limited to global Standard Responses requests for Luna,
+text/function input, and fixed reasoning effort `none`. It reserves the reviewed
+full context bound and enforced output cap; the client cannot supply native
+options or an upstream URL. Keep `OPENAI_API_KEY` in a server-side secret binding.
+Upstream HTTP/SSE tests are mocked with unmatched network disabled.
 
 Cloudflare/infrastructure spending is outside the model allowance ceiling. A
 paid rollout also needs operator access controls, provider billing safeguards,
-retention/recovery policy, monitoring, and a separately verified staging test.
+retention/recovery policy, monitoring, app integration, and a separately approved
+staging test against a real provider account.

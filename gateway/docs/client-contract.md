@@ -1,7 +1,7 @@
 # Local client contract
 
 The gateway is a separate service. The existing Canvas Hub app is unchanged by
-this directory. A future Python provider adapter should call this API from the
+this directory. A Python provider adapter can call this API from the
 local companion process and leave collection, storage, and tool dispatch local.
 
 ## Transport and identity
@@ -37,9 +37,22 @@ and administrative limits use bounded integer JSON numbers.
 
 `GET /v1/allowance` reports `daily` and `monthly` objects containing
 `limit_microusd`, `spent_microusd`, `held_microusd`, `remaining_microusd`, and
-`resets_at`, plus `reset_timezone: "UTC"`, `gateway_paused`, and the approved
-`models` (each with `id` and `max_output_tokens`). This is a display snapshot;
-only a successful server reservation authorizes another call.
+`resets_at`, plus `reset_timezone: "UTC"`, `gateway_paused`, `mode` (`mock` or
+`production`), approved `tools` names, and `models` (each with `id`,
+`min_output_tokens`, and `max_output_tokens`). This is a display snapshot; only a
+successful server reservation authorizes another call.
+
+The same response advertises the versioned wire limits:
+
+```json
+{"capabilities":{"protocol_version":1,"max_tools":128,"max_tool_calls_per_response":32,"max_messages":128,"max_body_bytes":65536}}
+```
+
+`max_body_bytes` reflects deployment policy; the other limits above are this
+protocol version's bounds. Up to 128 approved definitions can be enabled for a
+turn, covering the current app's 61–78 tools. This does not raise the separate
+32-call limit in one response. Check the version and limits explicitly; do not
+silently truncate tools, messages, or user context to fit them.
 
 Request status includes `request_id`, `model`, `status`, `created_at`,
 `deadline_at`, `reserved_microusd`, `charged_microusd`, `error`, and `usage`.
@@ -47,6 +60,11 @@ Request status includes `request_id`, `model`, `status`, `created_at`,
 `dispatched`, `completed`, `failed_before_dispatch`, `uncertain`, or `overrun`.
 Uncertain requests retain a hold rather than pretending their actual bill is
 known; those holds also reduce later periods until authoritatively settled.
+Settled `usage` always includes `input_tokens` and `output_tokens`. The real
+adapter also reports `cached_input_tokens`, `cache_write_input_tokens`,
+`cache_write_30m_input_tokens`, `cache_write_12h_input_tokens`, and
+`reasoning_tokens`. Cache counts are subsets of input; reasoning is a subset of
+output. Do not add these details to the totals a second time.
 
 ## Sending one model request
 
@@ -131,10 +149,11 @@ The existing integration seam is `canvas_hub/assistant/providers.py`:
 | `Stopped` | Cancel transport, retain the request key/status, treat usage as potentially charged |
 | `ProviderError` | Preserve quota/auth/ambiguous-result distinctions; disable automatic paid retries |
 
-Provider-native reasoning or continuation state is not part of this first
-contract. Adding a Responses/Luna adapter may require a versioned continuation
-envelope and exact model-specific validation; it must not become an unrestricted
-`extra_body` passthrough.
+The included Responses/Luna adapter uses reasoning effort `none` and this
+stateless text/function contract. Provider-native continuation state is not a
+request field. Enabling broader reasoning modes may require a versioned
+continuation envelope and model-specific validation; it must not become an
+unrestricted `extra_body` passthrough.
 
 ## Request example
 
@@ -169,8 +188,9 @@ Allowed message shapes:
 ```
 
 Every assistant call ID in submitted history must be unique and have exactly one
-matching subsequent tool result. Its name must be included among the selected
-approved tools. Arguments must encode a JSON object; the local tool layer remains
+matching subsequent tool result. Historical calls are validated separately from
+the tools enabled for this turn: `tools:[]` may disable new calls while preserving
+earlier call/result history. Arguments must encode a JSON object; the local tool layer remains
 responsible for validating them against the actual schema. Messages accept text
 only; attachments, screenshots, remote URLs for fetching, and arbitrary native
 provider blocks are outside this first protocol.

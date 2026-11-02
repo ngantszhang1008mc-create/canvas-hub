@@ -137,7 +137,10 @@ describe("transactional monetary bounds in real SQLite DO storage", () => {
     const user = await enroll(stub);
     const provider = await controlled(stub);
     const first = await respond(stub, user.token);
-    await inside(stub, i => { i.policy.models["mock-text"].input_microusd_per_million_tokens *= 100; });
+    await inside(stub, i => {
+      const model = i.policy.models["mock-text"];
+      if (model.provider === "mock") model.input_microusd_per_million_tokens *= 100;
+    });
     provider.finish();
     expect((await events(first)).at(-1).charged_microusd).toBe("20");
   });

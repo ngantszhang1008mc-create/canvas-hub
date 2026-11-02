@@ -1,5 +1,7 @@
-import type { ModelPolicy, Policy } from "./config";
+import type { Env, ModelPolicy, Policy } from "./config";
 import type { GenerationRequest } from "./validation";
+import type { MeteredUsage } from "./pricing";
+import { OpenAIResponsesAdapter } from "./openai-responses";
 
 export type Delta =
   | { type: "text.delta"; delta: string }
@@ -8,8 +10,9 @@ export type Delta =
 export interface Completion {
   // Only a complete provider stream with terminal authoritative usage may
   // release any reservation. Intermediate usage estimates are not accepted.
-  usage: { input_tokens: number; output_tokens: number } | null;
+  usage: MeteredUsage | null;
   finish_reason: "stop" | "tool_calls" | "length";
+  bound_violation?: boolean;
 }
 
 export interface PreparedCall {
@@ -57,7 +60,7 @@ export class MockAdapter implements ProviderAdapter {
   }
 }
 
-export function adapterFor(model: ModelPolicy): ProviderAdapter {
-  if (model.provider !== "mock") throw new PreflightError("provider_unavailable");
-  return new MockAdapter();
+export function adapterFor(model: ModelPolicy, env: Env): ProviderAdapter {
+  if (model.provider === "mock") return new MockAdapter();
+  return new OpenAIResponsesAdapter(env.OPENAI_API_KEY);
 }

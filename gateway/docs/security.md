@@ -8,7 +8,7 @@ profiles, file access, and tool execution stay in the local Python process.
 
 The selected conversation, system instructions, function descriptions, and any
 course excerpts included in messages or tool results pass through the gateway.
-A network provider adapter also sends them to its configured provider. A local
+The production OpenAI Responses adapter also sends them to OpenAI. A local
 client must disclose that transfer before first use and let the user choose
 which context to include. An allowance is not a promise that processing is local.
 
@@ -51,7 +51,7 @@ metadata; provider retention depends on the selected provider's configuration.
 The model budget does **not** cap Cloudflare requests, storage, CPU, networking,
 taxes, currency conversion, or charges made with the same provider account outside
 this gateway. It depends on correct server model limits/rates and a provider
-honoring those limits. Before a paid adapter is enabled, use a dedicated provider
+honoring those limits. Before the production adapter receives paid traffic, use a dedicated provider
 project/key, configure the provider's available billing controls, and reconcile
 the ledger with provider billing. Treat invoice discrepancies as an incident.
 
@@ -63,7 +63,7 @@ URLs, screenshots, analytics, or shared logs. Invitation issuance must be limite
 to the intended people: one person with several independently issued accounts can
 otherwise receive several allowances.
 
-Session tokens are bearer credentials too. The future local client should keep
+Session tokens are bearer credentials too. The local client should keep
 them in its private credential storage, exclude them from backups, and use HTTPS
 for a remote gateway. Session expiry and revocation prevent future admission;
 they cannot undo provider work already dispatched. Recover access through an
@@ -99,6 +99,8 @@ another paid key, change models/providers, or expand the owner's spending limit.
 - Review model pricing, context/output bounds, reasoning-token billing, caching,
   and all chargeable extras for each real adapter. Bind each request to the price
   snapshot used at reservation; never calculate settlement from client data.
+  The included adapter fixes the endpoint, Luna model, standard processing and
+  reasoning modes, and cache lifetime; see [its supported surface](openai-provider.md).
 - Preserve the Durable Object namespace and fixed ledger identity across releases.
   Changing identity or restoring old database state can forget spend and replay
   protection. Pause admission during recovery, reconcile provider totals, and
