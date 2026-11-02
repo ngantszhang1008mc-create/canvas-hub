@@ -16,6 +16,7 @@ DEFAULT_SCOPE: dict[str, Any] = {
     "calendar_days_back": 14,
     "calendar_days_ahead": 120,
     "download_files": True,
+    "experimental_network_concurrency": False,  # bounded concurrent Canvas requests (opt-in)
     "max_file_mb": 100,
     "discussion_replies": "staff_only",   # staff_only | counts_only
     "allow_view_completion": False,       # opening "must view" module items advances progress
@@ -51,7 +52,7 @@ def normalize_scope(raw: dict | None, base: dict | None = None) -> dict:
             raise InvalidInput(f"scope.{k} must be an integer between 0 and 3650")
     if scope["discussion_replies"] not in ("staff_only", "counts_only"):
         raise InvalidInput("scope.discussion_replies must be 'staff_only' or 'counts_only'")
-    for k in ("download_files", "allow_view_completion"):
+    for k in ("download_files", "allow_view_completion", "experimental_network_concurrency"):
         if not isinstance(scope[k], bool):
             raise InvalidInput(f"scope.{k} must be true or false")
     return scope

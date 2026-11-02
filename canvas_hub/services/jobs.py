@@ -64,7 +64,14 @@ class JobService:
         d["stats"] = json.loads(d.pop("stats_json"))
         d["tasks"] = {r["state"]: r["n"] for r in self.db.query(
             "SELECT state, COUNT(*) n FROM job_tasks WHERE job_id=? GROUP BY state", (job_id,))}
-        d["resumable"] = d["state"] in RESUMABLE_STATES
+        d["phases"] = {name: {"total": 0} for name in ("core", "downloads", "processing", "verification")}
+        for r in self.db.query("SELECT kind, state, COUNT(*) n FROM job_tasks WHERE job_id=? GROUP BY kind,state", (job_id,)):
+            phase = {"download": "downloads", "process_document": "processing", "supplemental": "verification"}.get(r["kind"], "core")
+            counts = d["phases"][phase]
+            counts[r["state"]] = counts.get(r["state"], 0) + r["n"]
+            counts["total"] += r["n"]
+        retryable = self.db.one("SELECT 1 FROM job_tasks WHERE job_id=? AND state IN ('failed','blocked') AND attempts<3", (job_id,))
+        d["resumable"] = d["state"] in RESUMABLE_STATES or (d["state"] == "completed_with_gaps" and bool(retryable))
         d["cancellable"] = d["state"] in ("queued", "running", "needs_login", "paused", "interrupted")
         return d
 
@@ -132,14 +139,25 @@ class JobService:
         return self.get(job_id)
 
     def resume(self, job_id: int, account_id: int | None = None) -> dict:
-        job = self.get(job_id, account_id)
-        if job["state"] not in RESUMABLE_STATES:
-            raise InvalidInput(f"job is {job['state']} and cannot be resumed", code="job_not_resumable")
         with self.db.tx() as c:
+            job = self.get(job_id, account_id)
+            if not job["resumable"]:
+                raise InvalidInput(f"job is {job['state']} and cannot be resumed", code="job_not_resumable")
+            if job["kind"] == "collect":
+                other = c.execute("SELECT 1 FROM jobs WHERE account_id=? AND id!=? AND kind='collect' AND state IN ('queued','running','cancel_requested','paused','interrupted','needs_login')", (job["account_id"], job_id)).fetchone()
+                if other:
+                    raise Conflict("Another collection is unfinished", code="job_already_active")
+            c.execute("UPDATE job_tasks SET state='pending' WHERE job_id=? AND state='running'", (job_id,))
             # Failed tasks get another bounded attempt on explicit resume.
             c.execute("UPDATE job_tasks SET state='pending', updated_at=? WHERE job_id=? AND state IN ('failed','blocked') AND attempts < 3",
                       (now_iso(), job_id))
-        self.set_state(job_id, "queued", message="Resumed; continuing from the saved checkpoint")
+            core_pending = c.execute("""SELECT 1 FROM job_tasks WHERE job_id=? AND state='pending'
+                AND kind NOT IN ('download','process_document','supplemental') LIMIT 1""", (job_id,)).fetchone()
+            if core_pending:
+                self.update_stats(job_id, core_status=None)
+            # The conflict check, task reset and queue transition are one write
+            # transaction, so simultaneous create/resume cannot both win.
+            self.set_state(job_id, "queued", message="Resumed; continuing from the saved checkpoint")
         return self.get(job_id)
 
     def recover_after_restart(self) -> list[int]:
@@ -148,6 +166,8 @@ class JobService:
         for r in rows:
             self.set_state(r["id"], "interrupted",
                            message="The app stopped while this job was running. Verified results were kept; resume to continue.")
+        with self.db.tx() as c:
+            c.execute("UPDATE job_tasks SET state='pending' WHERE state='running' AND job_id IN (SELECT id FROM jobs WHERE state='interrupted')")
         return [r["id"] for r in rows]
 
     def next_queued(self) -> dict | None:
@@ -166,8 +186,25 @@ class JobService:
             )
             return cur.rowcount > 0
 
-    def next_task(self, job_id: int) -> dict | None:
-        row = self.db.one("SELECT * FROM job_tasks WHERE job_id=? AND state='pending' ORDER BY id LIMIT 1", (job_id,))
+    def pending_tasks(self, job_id: int, *, kinds=None, exclude=None, limit=4) -> list[dict]:
+        sql = "SELECT * FROM job_tasks WHERE job_id=? AND state='pending'"
+        params = [job_id]
+        if kinds:
+            sql += " AND kind IN (" + ",".join("?" for _ in kinds) + ")"
+            params.extend(kinds)
+        if exclude:
+            sql += " AND kind NOT IN (" + ",".join("?" for _ in exclude) + ")"
+            params.extend(exclude)
+        rows = self.db.query(sql + " ORDER BY id LIMIT ?", (*params, limit))
+        return [{**dict(r), "payload": json.loads(r["payload_json"])} for r in rows]
+
+    def mark_running(self, task_id):
+        with self.db.tx() as c:
+            c.execute("UPDATE job_tasks SET state='running', updated_at=? WHERE id=? AND state='pending'", (now_iso(), task_id))
+
+    def next_task(self, job_id: int, *, exclude=None) -> dict | None:
+        rows = self.pending_tasks(job_id, exclude=exclude, limit=1)
+        row = rows[0] if rows else None
         if not row:
             return None
         d = dict(row)
@@ -183,7 +220,7 @@ class JobService:
         """Leave the task pending (e.g. login expired mid-task) without
         consuming an attempt."""
         with self.db.tx() as c:
-            c.execute("UPDATE job_tasks SET last_error=?, updated_at=? WHERE id=?", (error, now_iso(), task_id))
+            c.execute("UPDATE job_tasks SET state='pending', last_error=?, updated_at=? WHERE id=?", (error, now_iso(), task_id))
 
     def tasks(self, job_id: int, *, state: str | None = None, limit: int = 200) -> list[dict]:
         sql = "SELECT id, task_key, kind, course_canvas_id, category, state, attempts, last_error, updated_at FROM job_tasks WHERE job_id=?"

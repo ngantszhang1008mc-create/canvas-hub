@@ -843,3 +843,11 @@ body.chat-focus .chat-scroll { overscroll-behavior: contain; }     /* the page i
 .proposal-dialog::backdrop { background:rgb(0 0 0 / 45%); }
 
 .nav details a { display:block; }
+
+/* Collection phases stay distinct while background work finishes. */
+.job-phases { display: grid; gap: 10px; margin: 12px 0; min-width: 0; }
+.job-phase .spread { gap: 6px 16px; flex-wrap: wrap; }
+.job-phase .progress { margin-top: 5px; }
+.job-core-notice { padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; }
+.collection-job { min-width: 0; overflow-wrap: anywhere; }
+.job-current-task { white-space: normal; overflow-wrap: anywhere; }
