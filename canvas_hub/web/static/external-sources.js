@@ -24,6 +24,7 @@ export function makeExternalSources(env) {
     const version = {}; versions.set(target,version);
     const alive = () => target.isConnected && !target.hidden && versions.get(target)===version && location.hash===route && A(`/external-sources/${source.id}`)===aidPath;
     const close = h('button',{class:'workspace-icon-button',title:'Close source Agent','aria-label':'Close source Agent',onclick:()=>{
+      target.querySelectorAll('input[type="password"],input[aria-label="Site username"]').forEach(input=>{input.value='';});
       generation++; versions.delete(target); target.hidden=true; main.querySelector('.workspace-context')?.classList.remove('agent-open','external-open');
     }},'×');
     const content = h('div',{class:'external-agent-content'});
@@ -36,11 +37,13 @@ export function makeExternalSources(env) {
     async function draw() {
       if (!alive()) return;
       generation++;
+      const drawGeneration=generation;
+      const current=()=>alive()&&generation===drawGeneration;
       const c=source.classification, req=source.request;
       const proposal=source.adapters.find(a=>a.revision===source.proposed_revision);
       const status=h('p',{role:'status'},source.status.replaceAll('_',' '));
       mount(content,h('h3',null,source.title),h('a',{href:source.url,target:'_blank',rel:'noopener noreferrer'},source.url),status,
-        note('Local adapters read public pages only. Login and JavaScript-only sites may need a connected Agent. Adapter approval stays separate.'),
+        note('Local adapters read public pages only. Connect this site for sign-in; JavaScript-only pages may need a connected Agent. Adapter approval stays separate.'),
         c ? h('div',null,note(`${c.roles.join(' · ')} · ${Math.round(c.confidence*100)}% confidence`),h('p',null,c.summary||''),note(`Read ${c.read_at} · ${c.provided_by}`)) : note('No successful classification saved.'),
         source.error ? h('p',{role:'alert'},source.error):null);
       if (source.analysis_running || (req && ['open','claimed'].includes(req.status))) {
@@ -51,39 +54,83 @@ export function makeExternalSources(env) {
         const token=++generation;
         setTimeout(async()=>{ if(token!==generation||!alive())return; try{source=await api(aidPath);await draw();if(!source.analysis_running&&!['open','claimed'].includes(source.request?.status))window.dispatchEvent(new Event('external-sources-updated'));}catch(e){status.textContent=e.message;} },1200);
       } else {
-        const checkResult=h('p',{role:'status'});
-        content.append(note('Check login requirement anonymously in a new temporary browser. No saved sessions or model calls are used.'),
+        const checkResult=h('div',{role:'status'});
+        let probePoll=0;
+        function showProbe(result) {
+          if(!current())return;
+          if(result.failure_id&&!result.manual&&(req?.status!=='declined'||req?.id!==result.failure_id)) {mount(checkResult);return;}
+          if(result.state==='not_checked')return;
+          if(result.state==='running') {mount(checkResult,note('Checking whether sign-in is needed. This anonymous check uses no saved session or model call.'));return;}
+          const message={
+            login_required:result.auth_scheme==='basic'?'This site requires HTTP Basic authentication. Use the local connection form to enter your credentials.':'This page shows an authentication challenge. Sign in, then check the requested course page.',
+            access_denied:'The site denied access. This does not establish that login is required; check your permissions or connect manually.',
+            readable:'The anonymous page is readable. The failed inspection may have another cause; course access is still unverified.',
+            unknown:'Login requirement is unknown. A chooser, security challenge or incomplete page is not proof of a login requirement.',
+            unsupported_unavailable:result.evidence?.includes('timeout')?'The anonymous check timed out. Login requirement is unknown.':result.evidence?.includes('probe_busy')?'Login checks are busy. Retry the check or connect manually.':'The anonymous check could not read this site. Login requirement is unknown.'
+          }[result.outcome]||'Login requirement is unknown.';
+          mount(checkResult,note(message),result.final_host?note(`Checked host: ${result.final_host}. Course access after login is not verified.`):null,
+            h('button',{class:result.outcome==='login_required'?'primary':'',onclick:()=>{
+              connectBox.scrollIntoView({block:'center'});connectBox.querySelector('button')?.focus();
+            }},result.outcome==='login_required'?'Sign in to this site':'Connect manually'));
+        }
+        async function followProbe() {
+          const poll=++probePoll;
+          for(let i=0;i<30&&current()&&poll===probePoll;i++) {
+            const result=await api(aidPath+'/login-check');
+            if(!current()||poll!==probePoll)return;
+            showProbe(result);
+            if(result.state!=='running')return;
+            await new Promise(resolve=>setTimeout(resolve,1000));
+          }
+        }
+        content.append(note('Failed inspections automatically check for login anonymously. Saved sessions and model calls are never used for this check.'),
           h('button',{onclick:async e=>{
             const button=e.currentTarget; button.disabled=true;
             try {
               await api(aidPath+'/login-check',{method:'POST',body:{}});
-              while(alive()) {
-                await new Promise(resolve=>setTimeout(resolve,1000));
-                const result=await api(aidPath+'/login-check');
-                if(result.state!=='running') {
-                  checkResult.textContent=`${(result.outcome||'unknown').replaceAll('_',' ')} · ${result.final_host||'site unavailable'} · course access after login is not verified.`;
-                  break;
-                }
-              }
-            } catch(err) { if(alive())checkResult.textContent=err.message; }
-            finally { if(alive())button.disabled=false; }
+              await followProbe();
+            } catch(err) { if(current())checkResult.textContent=err.message; }
+            finally { if(current())button.disabled=false; }
           }},'Check login requirement'),checkResult);
         const connectBox=h('section',{'aria-label':'Site connection'});
         content.append(connectBox);
+        let connectionGeneration=0;
         async function connectionPanel() {
+          const connectionVersion=++connectionGeneration;
           const cp=aidPath+'/site-connection';
-          let state=await api(cp); if(!alive())return;
-          if(state.state==='not_supported') {mount(connectBox,note(state.message));return;}
+          let state=await api(cp); if(!current()||connectionVersion!==connectionGeneration)return;
           const output=h('div',{'aria-live':'polite'});
           const button=(label,fn)=>h('button',{onclick:async e=>{
             const b=e.currentTarget; b.disabled=true;
+            // A review opened by this action must stay visible until the user
+            // acts again. In-flight status polls may not remount it away.
+            connectionGeneration++;
             try { await fn(); } catch(err) { if(alive())output.append(h('p',{role:'alert'},err.message)); }
             finally { if(alive())b.disabled=false; }
           }},label);
+          if(state.state==='not_supported') {
+            const secure=new URL(source.url);secure.protocol='https:';
+            mount(connectBox,note(state.message),note('To connect, first review the separate HTTPS version. Its availability has not been verified; credentials are never sent over HTTP.'),
+              h('a',{href:secure.href,target:'_blank',rel:'noopener noreferrer'},secure.href),
+              button('Use HTTPS version',async()=>{
+                const upgraded=await api(aidPath+'/https-source',{method:'POST',body:{consent:true}});
+                if(!current())return;
+                window.dispatchEvent(new Event('external-sources-updated'));
+                await show(main,upgraded);
+              }),output);return;
+          }
           mount(connectBox,h('h3',null,'Connect this site'),
-            note('Use a separate local browser profile for this account and site. You enter your own credentials and MFA in its window. No page text or session is sent to the Assistant.'),
+            note('Use a separate local browser profile for this account and site. Enter credentials and MFA in its window; HTTP Basic authentication uses a local form below. No page text or session is sent to the Assistant.'),
             note('Only the site and identity-provider origins you approve may receive requests. Login form submissions require a separate one-time approval.'),
             note(`Connection: ${state.state.replaceAll('_',' ')}`),output);
+          const failure={
+            browser_unavailable:'The sign-in browser could not open. Check that Chromium or your configured Chrome installation is available and that a desktop window can open.',
+            browser_closed:'The sign-in browser closed unexpectedly. Reopen the connection to retry.',
+            request_failed:'The requested page could not be reached safely. Check the address and connection; this does not establish that login is required.',
+            access_denied:'The site denied access. Login or course permission has not been verified.',
+            page_unavailable:'The site returned an unsuccessful response. Retry later; login requirement is unknown.'
+          }[state.failure_reason];
+          if(failure)connectBox.append(note(failure));
           if(['not_connected','closed','error'].includes(state.state)) {
             const ids=h('input',{type:'text',placeholder:'https://identity.example.edu', 'aria-label':'Additional identity-provider origins'});
             connectBox.append(note('Optional: enter identity-provider HTTPS origins separated by commas. Unknown origins are blocked.'),ids,
@@ -97,6 +144,19 @@ export function makeExternalSources(env) {
                   }));
               }));
           } else {
+            if(state.popup_blocked)connectBox.append(note('This site tried to open another sign-in popup. This connection supports sign-in in its main window only. Try a same-window sign-in option; popup-only SSO is not supported.'));
+            if(state.http_auth?.scheme==='basic') {
+              const username=h('input',{type:'text',autocomplete:'off','aria-label':'Site username'});
+              const password=h('input',{type:'password',autocomplete:'off','aria-label':'Site password'});
+              connectBox.append(note(`HTTP Basic sign-in for ${state.http_auth.origin}. Credentials are used only for this exact page over HTTPS, kept in memory until the connection closes, and excluded from Assistant requests and exports.`),
+                username,password,button('Sign in to requested page',async()=>{
+                  const request={challenge:state.http_auth,username:username.value,password:password.value};
+                  username.value='';password.value='';
+                  try {await api(cp+'/http_auth',{method:'POST',body:{request}});}
+                  finally {request.username='';request.password='';}
+                  if(current())await connectionPanel();
+                }));
+            } else if(state.http_auth)connectBox.append(note('This HTTP authentication scheme is not supported. Use an authorized browser or connected Agent; do not paste credentials into chat.'));
             if(state.redirect_blocked) {
               const reason={
                 unapproved_origin:'The destination has not been approved. Review the blocked origin before reconnecting.',
@@ -132,9 +192,22 @@ export function makeExternalSources(env) {
                   result.content?h('details',null,h('summary',null,'View retrieved page text'),h('pre',{class:'text'},result.content)):null,
                   result.review_token?button('Confirm this is the requested course page',async()=>{await api(cp+'/confirm_content',{method:'POST',body:{request:result.review_token}});if(alive())await connectionPanel();}):null);
               }),button('Close connection',async()=>{await api(cp+'/cancel',{method:'POST',body:{}});if(alive())await connectionPanel();}));
+            // Read status without remounting unchanged credential fields or reviews.
+            const seen=JSON.stringify(state);
+            const poll=async()=>{
+              if(!current()||connectionVersion!==connectionGeneration)return;
+              try {
+                const next=await api(cp);
+                if(!current()||connectionVersion!==connectionGeneration)return;
+                if(JSON.stringify(next)!==seen) {await connectionPanel();return;}
+                setTimeout(poll,1200);
+              } catch(err) {if(current())output.append(note(err.message));}
+            };
+            setTimeout(poll,1200);
           }
         }
         await connectionPanel(); if(!alive())return;
+        followProbe().catch(err=>{if(current())checkResult.textContent=err.message;});
         if(req?.status==='declined') content.append(note('Latest inspection failed. Previous successful results are retained; you can re-inspect after reviewing the disclosure.'));
         if(req?.result_note) content.append(note(req.result_note));
         if (!disclosure) disclosure=await api(aidPath+'/disclosure');

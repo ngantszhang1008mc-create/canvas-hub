@@ -171,6 +171,9 @@ class PublicReader:
             text = r.body.decode('utf-8', errors='replace')[:200_000]
         else:
             soup = BeautifulSoup(r.body, 'html.parser')
+            visible_text = soup.get_text(' ', strip=True)
+            if re.search(r'join classes|add another class', visible_text, re.I) and re.search(r'log[ -]?in|sign[ -]?in', visible_text, re.I):
+                raise InvalidInput('Login or enrollment chooser; course access is unknown', code='needs_attention')
             # Optional sign-in forms often sit next to public course content.
             # Treat a form as a gate only if there is no substantial main content.
             has_form = bool(soup.select('input[type="password" i], form[action*="login" i]'))

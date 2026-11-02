@@ -13,6 +13,83 @@ from .test_codex import fake_codex
 pytestmark=pytest.mark.browser
 
 
+@pytest.mark.parametrize('outcome,scheme,message,button', [
+    ('login_required','basic','HTTP Basic authentication','Sign in to this site'),
+    ('unknown',None,'Login requirement is unknown','Connect manually'),
+    ('access_denied',None,'The site denied access','Connect manually'),
+])
+def test_failed_read_automatically_offers_login_or_manual_connection(hub, account, source, monkeypatch, outcome, scheme, message, button):
+    from playwright.sync_api import expect, sync_playwright
+    from canvas_hub.services.external_reader import PublicReader, Read
+    sources, sid, _ = source
+    url = sources.get(account['id'], sid)['url']
+    sources.reader = PublicReader(lambda u: Read(u, 401, 'text/html', b'', auth_challenge=True))
+    probes, models = [], []
+    monkeypatch.setattr('canvas_hub.services.login_detection.inspect', lambda u: probes.append(u) or {
+        'outcome':outcome,'auth_scheme':scheme,'evidence':[], 'course_access':'unknown'})
+    monkeypatch.setattr('canvas_hub.services.source_analysis.make_provider', lambda cfg: models.append(cfg))
+    with serve(hub, []) as (base, token, _), sync_playwright() as pw:
+        browser = pw.chromium.launch()
+        try:
+            page = browser.new_page()
+            page.goto(f'{base}/?token={token}'); page.goto(f'{base}/#/course/4242')
+            row = page.locator('.external-source-row')
+            row.get_by_role('button', name='Workspace actions', exact=True).click()
+            row.locator('.workspace-action-icon[aria-label="Analyse link"]').click()
+            panel = page.get_by_role('complementary', name='Source Agent', exact=True)
+            page.wait_for_timeout(100)
+            assert not probes
+            panel.get_by_role('button', name='Approve and analyse', exact=True).click()
+            expect(panel).to_contain_text(message, timeout=10000)
+            expect(panel.get_by_role('button', name=button, exact=True)).to_be_visible()
+            assert probes == [url] and not models
+            # Reading the panel again is not another paid analysis or probe.
+            page.reload()
+            page.locator('.external-source-list').get_by_role('button', name='Re-inspect', exact=True).click()
+            expect(panel).to_contain_text(message)
+            assert probes == [url] and not models
+        finally:
+            browser.close()
+
+
+def test_basic_entry_is_local_and_empty_after_submit(hub, account, source, monkeypatch):
+    from playwright.sync_api import expect, sync_playwright
+    from .test_site_connection import FakeBrowser
+    challenge = {'scheme':'basic','origin':'https://course.example.edu','request_id':'fixture'}
+    actions = []
+    class Browser(FakeBrowser):
+        def __init__(self,*args): super().__init__(*args); self.state='login_open'; self.challenge=challenge
+        def snapshot(self): return {**super().snapshot(),'http_auth':self.challenge}
+        def call(self, action, arg=None, **kwargs):
+            if action=='http_auth':
+                actions.append(dict(arg)); self.challenge=None
+            return super().call(action,arg,**kwargs)
+    monkeypatch.setattr('canvas_hub.services.site_connection.BrowserConnection', Browser)
+    with serve(hub, []) as (base, token, _), sync_playwright() as pw:
+        browser = pw.chromium.launch()
+        try:
+            page = browser.new_page()
+            page.goto(f'{base}/?token={token}'); page.goto(f'{base}/#/course/4242')
+            row = page.locator('.external-source-row')
+            row.get_by_role('button',name='Workspace actions',exact=True).click()
+            row.locator('.workspace-action-icon[aria-label="Analyse link"]').click()
+            box = page.get_by_role('region',name='Site connection')
+            box.get_by_role('button',name='Review connection').click()
+            box.get_by_role('button',name='Agree and open sign-in window').click()
+            expect(box).to_contain_text('HTTP Basic sign-in')
+            box.get_by_label('Site username').fill('fixture-user')
+            box.get_by_label('Site password').fill('fixture-password')
+            page.wait_for_timeout(1400)  # Status polling must preserve typed values.
+            expect(box.get_by_label('Site password')).to_have_value('fixture-password')
+            box.get_by_role('button',name='Sign in to requested page').click()
+            expect(box.get_by_label('Site password')).to_have_count(0)
+            assert actions == [{'challenge':challenge,'username':'fixture-user','password':'fixture-password'}]
+            assert 'fixture-password' not in page.content()
+            assert 'fixture-password' not in page.evaluate('JSON.stringify(localStorage)')
+        finally:
+            browser.close()
+
+
 def test_failed_inspection_can_be_retried_and_reinspected(hub, account, source, monkeypatch):
     from playwright.sync_api import expect, sync_playwright
     from canvas_hub.assistant.providers import Turn
@@ -325,10 +402,12 @@ def test_connected_page_review_analysis_and_saved_source(hub, account, source, m
         box.get_by_role('button',name='Agree and open sign-in window').click()
         expect(box).to_contain_text('Connection: login open')
         box.get_by_role('button',name='Check requested page').click()
+        page.wait_for_timeout(1600)  # Status polling must not discard this review.
         box.get_by_role('button',name='Confirm this is the requested course page').click()
         expect(box).to_contain_text('Connection: connected')
         box.get_by_role('button',name='Review connected source analysis').click()
         expect(box).to_contain_text('Exact text to send and save')
+        page.wait_for_timeout(1600)
         assert 'NeverSendThis' not in box.locator('pre').inner_text() and not calls
         box.get_by_role('button',name='Approve, analyse and save').click()
         expect(panel).to_contain_text('Stored observations',timeout=15000)

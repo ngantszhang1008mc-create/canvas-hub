@@ -14,6 +14,14 @@ FIXTURE = Path(__file__).parent / "fixtures" / "observation_package_v1.json"
 
 
 @pytest.fixture(autouse=True)
+def anonymous_probe_is_synthetic(monkeypatch):
+    # Analysis failures now schedule a probe. Existing fixture-based tests must
+    # never turn that recovery path into real DNS/browser/network access.
+    monkeypatch.setattr('canvas_hub.services.login_detection.inspect', lambda url: {
+        'outcome': 'unknown', 'evidence': ['insufficient_rendered_evidence'], 'course_access': 'unknown'})
+
+
+@pytest.fixture(autouse=True)
 def configured_browser_executable(request, monkeypatch):
     """Use the app's browser override for UI tests as well as the collector."""
     executable = os.environ.get("CANVAS_HUB_CHROMIUM")

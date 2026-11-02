@@ -10,6 +10,7 @@ from canvas_hub.services import login_detector as probe
     ('<a>Log in</a><article>' + 'Public course information. ' * 10 + '</article>', 'readable', 'rendered_readable_content'),
     ('<h1>Verify you are human</h1><p>' + 'security challenge ' * 10 + '</p>', 'unknown', 'bot_or_security_challenge'),
     ('<button>Log in</button><button>Join Classes</button><p>' + 'Welcome ' * 20 + '</p>', 'unknown', 'login_or_enrollment_shell'),
+    ('<button>Log in</button><button>Join Classes</button><input type=password>', 'unknown', 'login_or_enrollment_shell'),
     ('<article>' + 'Public lecture notes. ' * 30 + '</article><form><input type="password"></form>', 'unknown', 'mixed_public_content_and_login'),
 ])
 def test_rendered_fixtures(monkeypatch, body, expected, evidence):
@@ -32,7 +33,11 @@ def test_sso_redirect_plus_login_page(monkeypatch):
 @pytest.mark.parametrize('status,headers,expected', [(401, {}, 'access_denied'), (403, {}, 'access_denied'), (401, {'WWW-Authenticate':'Basic realm="test"'}, 'login_required')])
 def test_http_denials(monkeypatch,status,headers,expected):
     monkeypatch.setattr(probe, 'fetch', lambda url:(status, headers, b''))
-    assert probe._inspect('https://fixture.example/')['outcome']==expected
+    result = probe._inspect('https://fixture.example/')
+    assert result['outcome']==expected
+    if headers:
+        assert result['auth_scheme']=='basic'
+        assert 'realm' not in str(result)
 
 
 def test_timeout_is_not_guessed_as_login(monkeypatch):
