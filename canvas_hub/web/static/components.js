@@ -578,8 +578,10 @@ footer{margin-top:24px;font-size:12px;color:#8b8170}</style></head><body><h1>${h
         "aria-label": `Resize ${v.title} tracker`, "aria-valuemin": minimum, "aria-valuemax": maximum,
         title: "Drag to resize. Use Up or Down to adjust; Home to fit content." }, h("span", { "aria-hidden": "true" }));
       const reset = h("button", { class: "sm ghost cmp-fit-content", "aria-label": `Fit ${v.title} to content`, onclick: () => setHeight(null) }, "Fit content");
+      let wasConnected = false;
       const syncSize = () => {
-        if (!body.isConnected) return;
+        if (!body.isConnected) { if (wasConnected) observer.disconnect(); return; }
+        wasConnected = true;
         const side = body.querySelector(":scope > .sl-side");
         const columns = getComputedStyle(body).gridTemplateColumns.split(" ");
         minimum = side ? Math.max(180, Math.ceil(side.getBoundingClientRect().height) + (columns.length === 1 ? 180 + 16 : 0)) : 180;
@@ -619,10 +621,11 @@ footer{margin-top:24px;font-size:12px;color:#8b8170}</style></head><body><h1>${h
       handle.addEventListener("pointercancel", () => { drag = null; });
       handle.addEventListener("dblclick", () => setHeight(null));
       frame.append(h("div", { class: "cmp-resize-controls" }, handle, reset));
-      sizeObserver = new ResizeObserver(syncSize);
-      sizeObserver.observe(body);
+      const observer = new ResizeObserver(syncSize);
+      sizeObserver = observer;
+      observer.observe(body);
       const side = body.querySelector(":scope > .sl-side");
-      if (side) sizeObserver.observe(side);
+      if (side) observer.observe(side);
       requestAnimationFrame(syncSize);
       return frame;
     }
