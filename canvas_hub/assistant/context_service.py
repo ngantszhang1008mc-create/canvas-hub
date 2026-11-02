@@ -90,7 +90,7 @@ class ContextService:
                     error = payload.get("error") if isinstance(payload, dict) else None
                 except (ValueError, TypeError):
                     pass
-                executions.append({"result_seq": m.get("seq"), "call_id": result["id"], "tool": result["name"],
+                executions.append({"result_seq": m.get("seq"), "call_id": result["id"], "tool": result.get("executed_tool") or result["name"],
                                    "outcome": "unknown" if error == "interrupted" else "error" if result.get("is_error") else "completed",
                                    "error": error})
         anchors = list({encoded(x): x for x in anchors}.values())

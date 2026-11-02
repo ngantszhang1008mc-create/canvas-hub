@@ -2,8 +2,8 @@
 
 The Assistant keeps original messages append-only and builds a separate provider
 projection. In Chat, **Context & usage → Compact conversation** summarizes older
-complete turns using the selected setup. Provider settings enable automatic
-compaction (default on) and an optional verified context capacity. Both actions
+complete turns using the selected setup. Provider settings offer automatic
+compaction (default off) and an optional verified context capacity. Both actions
 consume model quota. Summary usage is stored separately and included in the
 conversation's recorded-response totals, including cache counters when supplied.
 Unknown summary usage after errors, cancellation or restart is labelled unknown.
@@ -30,7 +30,7 @@ configuration, not forwarded as provider request settings.
 | --- | --- |
 | `capacity` | Application safety ceiling: Anthropic/Codex 64,000; compatible endpoints 32,768 |
 | `response_tokens` | Anthropic 16,000; others 4,096 |
-| `auto_compact` | `true` |
+| `auto_compact` | `false` (manual compaction remains available) |
 | `auto_threshold_percent` | `80` |
 | `keep_turns` | `2` |
 | `summary_tokens` | `2000` |
@@ -46,6 +46,52 @@ compatible calls set an output bound; Codex's app-server retains control of its
 native output limit, so its reserve is a planning allowance. Actual provider usage
 may differ from estimates. The existing normal-chat provider retry behavior is
 unchanged; the new single-attempt rule applies to compaction.
+
+## Tool selection and discovery
+
+The circular arrow beside the chat input opens a searchable list of all currently
+permitted groups and tools. `/tracker` (or another group/tool command) adds a
+removable chip. Selecting tools or entering a slash command alone does **not**
+send a message, call a model or execute a tool. Add a question and press Send.
+Chips apply to that message only and clear after a successful send; changing chat
+or leaving the view discards an unsent selection. The requested selection remains
+in the user message's `tool_selection` metadata and is shown in history. There is
+no sticky conversation permission or tool preference. Slash syntax is recognized
+only at the start of a message; normal slash text elsewhere is unchanged.
+
+The account-scoped `GET .../assistant/tools` returns permitted metadata; the send
+endpoint accepts `tool_selection` such as `["group:tracker", "tool:read_document"]`.
+The server validates it before storing a message. A small default set plus
+`discover_tools` remains available even with no explicit selection. Discovery can
+search/page tool metadata and use `select` to replace discovered choices while
+retaining manual choices for the current run. Tool order follows fixed groups and
+names, independent of discovery order. Each advertised set is capped at 32 schemas
+and 8,000 estimated schema tokens; excessive selections fail visibly and
+atomically. These are schema bounds, not a new step limit. Discovery can switch
+tools later, so absent schemas do not mean a capability is unavailable.
+
+Permissions remain authoritative and are rechecked during a run. Selection never
+enables a permission or confirms Canvas writes. Historical calls/results stay
+intact even after the advertised set changes; the shared registry still validates
+current tool calls independently of historical advertisement. Retry continues to
+send `tools=[]` and rejects discovery/dispatch as well as all other tool calls.
+Codex's native tool list is fixed within a turn: discovery returns the selected
+schemas and `call_discovered_tool` invokes only a loaded, permitted tool through
+the existing validated registry, without restarting a pending native turn.
+Dispatched document results retain their document budget classification and
+original execution name. No automatic old-tool-output masking is introduced.
+
+For `allowance_gateway`, its reviewed setup remains the tool authority. The picker
+filters to that setup's approved names (`profile_id` selects the catalog); changing
+setups clears chips and reloads the list before another send. No chips preserves
+the reviewed list, and chips narrow it to the selected tools plus permitted
+defaults. Local discovery/dispatch names are not advertised to this fixed-registry
+provider. Additional gateway tools require the existing setup review. No gateway
+consent, request journaling, usage normalization or accounting is changed.
+
+The picker supports keyboard navigation, removable chips, Escape, outside click,
+focus restoration, viewport clamping and route cleanup. It uses a leftward circular
+launcher with a searchable list; it does not change the separate tracker layout.
 
 ## Tracker state API v2
 

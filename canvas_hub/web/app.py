@@ -818,6 +818,10 @@ def create_app(api: HubAPI, *, token: str, port: int) -> FastAPI:
         api.get_account(aid)
         return {"conversations": _assistant().list_conversations(aid)}
 
+    @app.get("/api/accounts/{aid}/assistant/tools")
+    def assistant_tools(aid: int, profile_id: str | None = None):
+        return _assistant().tool_catalog(aid, profile_id)
+
     @app.post("/api/accounts/{aid}/assistant/messages")
     async def assistant_send(aid: int, request: Request):
         b = await body(request)
@@ -825,7 +829,7 @@ def create_app(api: HubAPI, *, token: str, port: int) -> FastAPI:
         cid = b.get("conversation_id")
         pid, reasoning, model = b.get("profile_id"), b.get("reasoning"), b.get("model")
         return _assistant().send(aid, b.get("text", ""), int(cid) if cid else None, str(pid) if pid else None,
-                                 str(reasoning) if reasoning else None, str(model) if model else None)
+                                 str(reasoning) if reasoning else None, str(model) if model else None, b.get("tool_selection"))
 
     @app.get("/api/accounts/{aid}/assistant/conversations/{cid}")
     def assistant_conversation(aid: int, cid: int, after: int = 0):
