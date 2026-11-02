@@ -46,7 +46,7 @@ export function makeExternalSources(env) {
       if (req && ['open','claimed'].includes(req.status)) {
         content.append(note(req.claimed_by==='Canvas Hub built-in Assistant' ? `Request #${req.id} · Assistant is reading and analysing. Cancel discards the result; a model request already sent may still use API quota.` : `Request #${req.id} · ${req.status}. Connect an MCP Agent with --allow-fulfil and ask it to claim this request and submit_source_analysis.`),
           h('a',{href:'#/requests'},'Connected Agent requests'),h('button',{onclick:async()=>{
-            await api(aidPath.replace(/external-sources\/\d+$/,`requests/${req.id}/cancel`),{method:'POST'}); source=await api(aidPath); disclosure=null; await draw();
+            await api(aidPath.replace(/external-sources\/\d+$/,`requests/${req.id}/cancel`),{method:'POST'}); source=await api(aidPath); disclosure=null; await draw(); if(alive())window.dispatchEvent(new Event('external-sources-updated'));
           }},'Cancel analysis'));
         const token=++generation;
         setTimeout(async()=>{ if(token!==generation||!alive())return; try{source=await api(aidPath);await draw();if(source.request?.status==='done')window.dispatchEvent(new Event('external-sources-updated'));}catch(e){status.textContent=e.message;} },1200);
@@ -126,7 +126,7 @@ export function makeExternalSources(env) {
       if(batch.state==='running') {
         batchArea.append(h('button',{onclick:async(e)=>{
           e.currentTarget.disabled=true;
-          try { const stopped=await api(batchPath+'/'+batch.token+'/cancel',{method:'POST'});await progress(stopped); }
+          try { const stopped=await api(batchPath+'/'+batch.token+'/cancel',{method:'POST'});await progress(stopped); if(valid())window.dispatchEvent(new Event('external-sources-updated')); }
           catch(error){if(valid())batchArea.append(h('p',{role:'alert'},error.message));}
         }},'Cancel batch'));
         setTimeout(async()=>{

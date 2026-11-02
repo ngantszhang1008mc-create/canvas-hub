@@ -139,6 +139,7 @@ def test_batch_cancel_ui_and_item_scope(hub,account,source,monkeypatch):
         try:
             batch.get_by_role('button',name='Cancel batch',exact=True).click()
             expect(batch).to_contain_text('cancelled')
+            expect(listing.get_by_role('button',name='Analyse all (1)',exact=True)).to_be_visible()
             page.goto(f'{base}/#/item/{origin}')
             expect(page.get_by_role('heading',name='Analysis · this course',exact=True)).to_have_count(0)
         finally:resume.set()
