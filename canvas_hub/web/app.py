@@ -43,6 +43,9 @@ def mcp_command() -> list[str]:
 
 def create_app(api: HubAPI, *, token: str, port: int) -> FastAPI:
     app = FastAPI(title="Canvas Hub", docs_url=None, redoc_url=None, openapi_url=None)
+    from ..services.source_analysis import SourceAnalysis
+    source_analysis = SourceAnalysis(api)
+    app.state.source_analysis = source_analysis
     hosts = allowed_hosts(port)
     own_origins = {f"http://{h}" for h in hosts}
 
@@ -393,14 +396,44 @@ def create_app(api: HubAPI, *, token: str, port: int) -> FastAPI:
         service.backfill(aid)
         return {"sources": service.list(aid, course_id, item_id)}
 
+    @app.get("/api/accounts/{aid}/external-analysis/disclosure")
+    def batch_disclosure(aid: int, course_id: str | None = None, item_id: int | None = None):
+        return source_analysis.batch_disclosure(aid, course_id, item_id)
+
+    @app.get("/api/accounts/{aid}/external-analysis/current")
+    def batch_current(aid: int, course_id: str | None = None, item_id: int | None = None):
+        return source_analysis.batch_current(aid, course_id, item_id)
+
+    @app.get("/api/accounts/{aid}/external-analysis/{batch_token}")
+    def batch_view(aid: int, batch_token: str):
+        return source_analysis.batch_view(aid, batch_token)
+
+    @app.post("/api/accounts/{aid}/external-analysis/{batch_token}/start")
+    async def batch_start(aid: int, batch_token: str, request: Request):
+        b = await body(request)
+        return source_analysis.batch_start(aid, batch_token, consent=b.get('consent') is True)
+
+    @app.post("/api/accounts/{aid}/external-analysis/{batch_token}/cancel")
+    def batch_cancel(aid: int, batch_token: str):
+        return source_analysis.batch_cancel(aid, batch_token)
+
     @app.get("/api/accounts/{aid}/external-sources/{sid}")
     def external_get(aid: int, sid: int):
         return external(aid).get(aid, sid)
 
+    @app.get("/api/accounts/{aid}/external-sources/{sid}/disclosure")
+    def external_disclosure(aid: int, sid: int):
+        return source_analysis.disclosure(aid, sid)
+
     @app.post("/api/accounts/{aid}/external-sources/{sid}/analyze")
     async def external_analyze(aid: int, sid: int, request: Request):
         b = await body(request)
-        return external(aid).analyze(aid, sid, reanalyze=b.get("reanalyze") is True)
+        if b.get("executor") == "mcp":
+            return external(aid).analyze(aid, sid, reanalyze=b.get("reanalyze") is True)
+        if b.get("executor", "builtin") != "builtin":
+            raise InvalidInput("Unknown analysis executor")
+        return source_analysis.start(aid, sid, b.get("token"), consent=b.get("consent") is True,
+                                     reanalyze=b.get("reanalyze") is True)
 
     @app.post("/api/accounts/{aid}/external-sources/{sid}/decision")
     async def external_decision(aid: int, sid: int, request: Request):
