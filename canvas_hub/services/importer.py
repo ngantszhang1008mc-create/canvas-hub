@@ -111,7 +111,7 @@ class Importer:
                 # before consuming the durable component-refresh outbox.
                 changed_sync = getattr(self, "after_changed_import", None)
                 if changed_sync is not None:
-                    changed_sync(account_id)
+                    self.db.after_commit(lambda: changed_sync(account_id))
                 return {"status": "already_imported", "job_id": prior["id"], "account_id": account_id,
                         "stats": prior["stats"]}
             job = self.jobs.create(account_id=account_id, instance_id=acct["instance_id"], kind="import",
@@ -156,24 +156,26 @@ class Importer:
         self.jobs.update_stats(job_id, **stats)
         if own_job:
             self.jobs.set_state(job_id, "completed", message="Observation package imported")
-        discovery = getattr(self, "after_discovery", None)
-        if discovery is not None:
-            discovery(account_id, pkg)
-        changed_sync = getattr(self, "after_changed_import", None)
-        if changed_sync is not None:
-            started = time.monotonic()
-            refreshed = changed_sync(account_id, item_ids=set(touched), course_ids={
-                cov.course_id for cov in pkg.coverage if cov.category == "assignments" and cov.course_id
-            })
-            sync_stats = {"component_sync_seconds": time.monotonic() - started,
-                          "components_refreshed": len(refreshed)}
-            self.jobs.update_stats(job_id, **sync_stats)
-            stats.update(sync_stats)
-        # Keep the original hook for integrations that need every completed
-        # package. The built-in component service uses the dependency hook above.
-        sync = getattr(self, "after_import", None)
-        if sync is not None:
-            sync(account_id)
+        def completed_import():
+            discovery = getattr(self, "after_discovery", None)
+            if discovery is not None:
+                discovery(account_id, pkg)
+            changed_sync = getattr(self, "after_changed_import", None)
+            if changed_sync is not None:
+                started = time.monotonic()
+                refreshed = changed_sync(account_id, item_ids=set(touched), course_ids={
+                    cov.course_id for cov in pkg.coverage if cov.category == "assignments" and cov.course_id
+                })
+                sync_stats = {"component_sync_seconds": time.monotonic() - started,
+                              "components_refreshed": len(refreshed)}
+                self.jobs.update_stats(job_id, **sync_stats)
+                stats.update(sync_stats)
+            # Keep the original hook for integrations that need every completed
+            # package. The built-in component service uses the dependency hook above.
+            sync = getattr(self, "after_import", None)
+            if sync is not None:
+                sync(account_id)
+        self.db.after_commit(completed_import)
         return {"status": "imported", "job_id": job_id, "account_id": account_id, "stats": stats}
 
     # ------------------------------------------------------------------

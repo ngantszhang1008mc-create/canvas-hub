@@ -160,7 +160,7 @@ def test_migration_backfills_and_accepts_gap_then_late_0015(monkeypatch):
     conn = database.connect(":memory:")
     try:
         with monkeypatch.context() as m:
-            m.setattr(database, "_migration_files", lambda: [f for f in files if f[0] < 16])
+            m.setattr(database, "_migration_files", lambda: [f for f in files if f[0] < 15])
             database.migrate(conn)
         conn.execute("INSERT INTO instances(id,origin,created_at) VALUES (1,'https://example.edu','now')")
         conn.execute("INSERT INTO accounts(id,instance_id,canvas_user_id,first_verified_at,last_verified_at) VALUES (1,1,'a','now','now')")
@@ -168,15 +168,15 @@ def test_migration_backfills_and_accepts_gap_then_late_0015(monkeypatch):
                    "collection": {"course_id": "4242"}, "review_sources": [{"item_id": 234}]}
         conn.execute("""INSERT INTO components(id,account_id,kind,title,spec_json,state_json,source_config_json,created_at,updated_at)
                         VALUES (1,1,'checklist','Saved','{}','{}',?,'now','now')""", (json.dumps(sources),))
-        assert database.migrate(conn) == [16]
+        with monkeypatch.context() as m:
+            m.setattr(database, "_migration_files", lambda: [f for f in files if f[0] != 15])
+            assert database.migrate(conn) == [16]
         assert {(r["dependency_kind"],r["dependency_key"]) for r in conn.execute("SELECT * FROM component_source_dependencies")} == {
             ("item", "123"), ("item", "234"), ("collection", "4242")}
         # A later independently integrated migration must still run despite MAX=16.
-        missing = (15, "0015_synthetic_parallel_feature.sql", "CREATE TABLE synthetic_parallel_feature (id INTEGER);")
-        with monkeypatch.context() as m:
-            m.setattr(database, "_migration_files", lambda: sorted([*files, missing]))
-            assert database.migrate(conn) == [15]
-            assert database.migrate(conn) == []
+        assert database.migrate(conn) == [15]
+        assert database.migrate(conn) == []
+        assert conn.execute("SELECT 1 FROM sqlite_master WHERE name='source_analysis_attempts'").fetchone()
         conn.execute("DELETE FROM components WHERE id=1")
         assert not conn.execute("SELECT 1 FROM component_source_dependencies").fetchone()
     finally:
