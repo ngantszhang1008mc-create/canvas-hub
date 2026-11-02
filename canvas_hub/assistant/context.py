@@ -84,9 +84,16 @@ class Policy:
         for name in ("max_tokens", "max_completion_tokens"):
             if type(extra.get(name)) is int:
                 response = max(response, extra[name])
+        summary = settings.get('summary_tokens', 2000)
+        if cfg.get('provider') == 'allowance_gateway' and cfg.get('_gateway_model'):
+            model = cfg['_gateway_model']
+            response = min(response, model['max_output_tokens'])
+            summary = min(summary, model['max_output_tokens'])
+            if min(response, summary) < model['min_output_tokens']:
+                raise ProviderError('Configured response or summary budget is below the gateway minimum.')
         return cls(settings.get("capacity", capacity), response,
                    settings.get("history_tokens"), settings.get("tool_tokens"), settings.get("document_tokens"),
-                   settings.get("summary_tokens", 2000), settings.get("keep_turns", 2),
+                   summary, settings.get("keep_turns", 2),
                    settings.get("auto_compact", True), settings.get("auto_threshold_percent", 80) / 100,
                    "configured" if "capacity" in settings else "application fallback; verify endpoint capacity")
 

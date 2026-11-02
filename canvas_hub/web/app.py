@@ -783,13 +783,22 @@ def create_app(api: HubAPI, *, token: str, port: int) -> FastAPI:
 
     @app.put("/api/assistant/config")
     async def assistant_set_config(request: Request):
-        return _assistant().update_config(await body(request))
+        data = await body(request)
+        return await run_in_threadpool(_assistant().update_config, data)
 
     @app.post("/api/assistant/test")
     async def assistant_test(request: Request):
         # The provider call can take minutes; keep it off the event loop.
         pid = (await body(request)).get("profile_id")
         return await run_in_threadpool(_assistant().test, pid)
+
+    @app.post('/api/assistant/gateway/enroll')
+    async def assistant_gateway_enroll(request: Request):
+        data = await body(request)
+        if set(data) - {'profile_id', 'invite', 'consent'}:
+            raise InvalidInput('Unsupported gateway enrollment fields.')
+        return await run_in_threadpool(lambda: _assistant().gateway_enroll(
+            data.get('profile_id'), data.get('invite'), consent=data.get('consent') is True))
 
     @app.get("/api/assistant/codex/models")
     async def assistant_codex_models(refresh: bool = False):

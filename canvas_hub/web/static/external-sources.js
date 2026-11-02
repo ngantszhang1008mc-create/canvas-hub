@@ -97,7 +97,21 @@ export function makeExternalSources(env) {
                   }));
               }));
           } else {
-            if(state.redirect_blocked)connectBox.append(note('This sign-in flow uses an HTTP redirect, which is currently blocked. Redirect-dependent sign-in is not supported; saved source data is unchanged.'));
+            if(state.redirect_blocked) {
+              const reason={
+                unapproved_origin:'The destination has not been approved. Review the blocked origin before reconnecting.',
+                unsafe_target:'The destination could not be used safely.',
+                post_replay:'The sign-in flow would repeat a submission. It cannot be continued automatically.',
+                verification:'The requested page redirected instead of showing course content. Reopen sign-in, then check the requested page again.',
+                loop:'The sign-in page redirected in a loop.',
+                limit:'The sign-in page redirected too many times.',
+                timeout:'The sign-in redirects took too long.',
+                navigation_changed:'The sign-in destination changed unexpectedly. Reopen the sign-in page to try again.',
+                subresource:'A page resource tried to redirect. This sign-in flow may not be supported.',
+                request_failed:'The next sign-in page could not be reached safely.'
+              }[state.redirect_reason]||'This redirect is not supported.';
+              connectBox.append(note(`A sign-in redirect was stopped. ${reason} Saved source data is unchanged.`));
+            }
             if(state.blocked_origins?.length)connectBox.append(note(`Blocked origins: ${state.blocked_origins.join(', ')}. Close and reopen after reviewing any identity-provider origin you need.`));
             if(state.blocked_submission_origin)connectBox.append(note(`A submission to ${state.blocked_submission_origin} was blocked because its purpose could not be verified. This sign-in flow may not be supported.`));
             if(state.pending_post)connectBox.append(note(`A sign-in submission to ${state.pending_post.origin} is waiting for approval. Approve once, then submit again in the site window.`),
@@ -105,7 +119,7 @@ export function makeExternalSources(env) {
             if(state.state==='connected')connectBox.append(button('Review connected source analysis',async()=>{
               const offer=await api(aidPath+'/connected-disclosure',{method:'POST',body:{}}); if(!alive())return;
               if(!offer.available){mount(output,note(offer.message));return;}
-              mount(output,note(`The exact text below and the website origin will be sent to ${offer.setup||offer.provider} (${offer.endpoint}), model ${offer.model}; this may use your quota. The reviewed text and classification will be saved locally and included in data backups.`),
+              mount(output,note(`The exact text below and the website origin will be sent to ${offer.setup||offer.provider} (${offer.endpoint}), model ${offer.model}; ${offer.usage_note||'this may use your quota.'} The reviewed text and classification will be saved locally and included in data backups.`),
                 note('Forms, common credential patterns, links and email addresses are removed automatically, but no filter can recognize every secret. Review the entire text and do not approve if it contains credentials, tokens, or information you do not want sent.'),
                 h('details',{open:true},h('summary',null,'Exact text to send and save'),h('pre',{class:'text'},offer.content)),
                 button('Approve, analyse and save',()=>action('/analyze-connected',{token:offer.token,consent:true})));
@@ -127,7 +141,7 @@ export function makeExternalSources(env) {
         if(!alive())return;
         const repeat=!!req||!!c||source.decision!=='undecided';
         if(disclosure.available) {
-          content.append(note(`Read only this public URL: ${disclosure.urls.join(', ')}. Its page text will be sent to ${disclosure.setup || disclosure.provider} (${disclosure.endpoint}), model ${disclosure.model}. ${disclosure.provider === 'codex' ? 'This may use your Codex quota.' : 'This uses your API quota.'} No Canvas cookies or login are used.`),
+          content.append(note(`Read only this public URL: ${disclosure.urls.join(', ')}. Its page text will be sent to ${disclosure.setup || disclosure.provider} (${disclosure.endpoint}), model ${disclosure.model}. ${disclosure.usage_note||(disclosure.provider === 'codex' ? 'This may use your Codex quota.' : 'This uses your API quota.')} No Canvas cookies or login are used.`),
             h('button',{class:'primary',onclick:()=>action('/analyze',{token:disclosure.token,consent:true,reanalyze:repeat})},repeat?'Approve and re-inspect':'Approve and analyse'));
         } else content.append(note(disclosure.message),h('a',{href:'#/assistant/settings'},'Open Assistant settings'));
         content.append(h('button',{onclick:()=>action('/analyze',{executor:'mcp',reanalyze:repeat})},'Use connected Agent instead'));
@@ -220,7 +234,7 @@ export function makeExternalSources(env) {
         if(!valid()||reviewVersion!==polling)return;
         if(!d.available) {mount(batchArea,note(d.message),h('a',{href:'#/assistant/settings'},'Open Assistant settings'));return;}
         mount(batchArea,h('h3',{tabindex:'-1'},`Analyse ${d.count} links · ${scopeLabel}`),
-          note(`These public pages will be read and their text sent to ${d.setup||d.provider} (${d.endpoint}), model ${d.model}. ${d.provider === 'codex' ? 'This may use your Codex quota.' : 'This uses your API quota.'} No Canvas cookies or login are used. New: ${d.new_count}; previously failed and to be retried: ${d.retry_count}. Successful inspections are excluded.`),
+          note(`These public pages will be read and their text sent to ${d.setup||d.provider} (${d.endpoint}), model ${d.model}. ${d.usage_note||(d.provider === 'codex' ? 'This may use your Codex quota.' : 'This uses your API quota.')} No Canvas cookies or login are used. New: ${d.new_count}; previously failed and to be retried: ${d.retry_count}. Successful inspections are excluded.`),
           h('ul',null,d.urls.map(url=>h('li',null,url))),
           h('button',{class:'primary',onclick:async(e)=>{
             e.currentTarget.disabled=true;

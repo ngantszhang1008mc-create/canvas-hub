@@ -345,6 +345,9 @@ def thinking_params(preset: str | None, level: str) -> dict:
 
 def make_provider(cfg: dict):
     kind = cfg.get("provider")
+    if kind == 'allowance_gateway':
+        from .gateway import AllowanceGatewayProvider
+        return AllowanceGatewayProvider(cfg)
     if kind == "anthropic":
         return AnthropicProvider(cfg)
     if kind == "openai_compatible":

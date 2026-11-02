@@ -1523,7 +1523,8 @@ VIEWS.assistant = async (main, parts, params) => {
     const budget = cx.budget;
     mount(contextInfo,
       h("p", null, cx.compacted_through ? (cx.stale ? "Saved summary is stale after data changes; original context will be used." : `Older turns compacted through message ${cx.compacted_through}.`) : "Using original conversation context."),
-      h("p", null, `${cx.summary_requests || 0} summary requests · reported summary tokens: ${cost.input_tokens || 0} in / ${cost.output_tokens || 0} out. Total reported tokens: ${total.input_tokens || 0} in / ${total.output_tokens || 0} out; cache read ${total.cache_read_input_tokens || 0}, cache write ${total.cache_creation_input_tokens || 0}.${total.unreported_requests ? ` Usage unavailable or incomplete for ${total.unreported_requests} request(s); these are not counted as zero cost.` : ""}`),
+      h("p", null, `${cx.summary_requests || 0} summary requests · reported summary tokens: ${cost.input_tokens || 0} in / ${cost.output_tokens || 0} out. Recorded response and summary tokens: ${total.input_tokens || 0} in / ${total.output_tokens || 0} out; cache read ${total.cache_read_input_tokens || 0}, cache write ${total.cache_creation_input_tokens || 0}.${total.unreported_requests ? ` Usage unavailable or incomplete for ${total.unreported_requests} recorded request(s); these are not counted as zero cost.` : ""}`),
+      h("p", null, "Answer requests that failed or were stopped before a response was saved are not included and may have used quota."),
       budget ? h("p", null, `Last request estimate: ${budget.estimated_tokens} input tokens; ${budget.response_reserved} reserved for output/reasoning. Safety budget: ${budget.capacity} (${budget.capacity_source}).`) : null,
       d.conversation.context_notice ? h("p", null, d.conversation.context_notice) : null);
     mount(status, busy ? h("span", { class: "working" }, st === "cancelling" ? "Stopping…" : "Working…")
@@ -1677,6 +1678,10 @@ VIEWS.assistant = async (main, parts, params) => {
   input.focus({ preventScroll: true });
 };
 
+function assistantSetupSummary(x) {
+  return [x.model || "default model", x.provider === "allowance_gateway" ? `${x.gateway_mode || "mock"} gateway · ${x.gateway_session_saved ? "session saved" : "not connected"}` : x.api_key_saved ? "key saved" : null].filter(Boolean).join(" · ");
+}
+
 function assistantSettingsView(main, head, tabs, cfg, params) {
   const sel = params.get("p") || cfg.active_profile || "new";
   const prof = cfg.profiles.find((x) => x.id === sel) || null;
@@ -1684,10 +1689,10 @@ function assistantSettingsView(main, head, tabs, cfg, params) {
     h("div", { class: "card-head" }, h("h2", null, "Saved setups"), h("a", { class: "btn sm", href: "#/assistant/settings?p=new" }, "+ Add setup")),
     cfg.profiles.length ? cfg.profiles.map((x) => h("div", { class: "setup-row" + (x.id === sel ? " on" : "") },
       h("a", { class: "setup-main", href: `#/assistant/settings?p=${encodeURIComponent(x.id)}` },
-        h("span", { class: "strong" }, x.name), h("span", { class: "tiny muted" }, [x.model || "default model", x.api_key_saved ? "key saved" : null].filter(Boolean).join(" · "))),
+        h("span", { class: "strong" }, x.name), h("span", { class: "tiny muted", "data-setup-summary": x.id }, assistantSetupSummary(x))),
       x.id === cfg.active_profile ? pill("ok", "In use") : h("button", { class: "sm ghost", disabled: x.configured ? null : true, onclick: async () => {
         if (await guard(() => api(`/api/assistant/profiles/${encodeURIComponent(x.id)}/activate`, { method: "POST" }))) { toast(`Now using ${x.name}`); route(); }
-      } }, "Use"))) : h("p", { class: "muted small" }, "No setups yet. Add an API provider or connect your Codex CLI login."));
+      } }, "Use"))) : h("p", { class: "muted small" }, "No setups yet. Add an API provider, connect your Codex CLI login, or use a gateway invitation."));
   mount(main, head, tabs, h("div", { class: "settings-layout" }, list,
     h("div", { class: "stack" }, assistantSettingsCard(cfg, prof), assistantPermissionsCard(cfg))));
 }
@@ -1752,84 +1757,266 @@ function assistantSettingsCard(cfg, prof) {
     h("label", null, autoCompact, " Automatically compact older turns near the context budget"),
     h("label", null, "Context token capacity (optional)", capacity),
     h("p", { class: "tiny muted" }, "Set this to a capacity verified for your model and endpoint. Defaults are conservative application budgets, not advertised model limits. Compaction uses model quota; original history stays saved. Replies and reasoning have reserved space."));
+  const isGateway = () => presetSel.value === "allowance_gateway"
+    || cfg.presets.some((p) => p.id === presetSel.value && p.provider === "allowance_gateway");
+  const gatewayMode = h("select", { "aria-label": "Gateway mode" },
+    h("option", { value: "mock", selected: cur.gateway_mode !== "production" }, "Mock — synthetic responses"),
+    h("option", { value: "production", selected: cur.gateway_mode === "production" }, "Production — OpenAI"));
+  const gatewayConsent = h("input", { type: "checkbox", checked: cur.gateway_consent === true });
+  const invitation = h("input", { type: "password", autocomplete: "off", autocapitalize: "off", spellcheck: "false", maxlength: 128,
+    placeholder: "Invitation from your gateway operator" });
+  const gatewaySession = h("p", { class: "small", "aria-live": "polite" });
+  const gatewayToolSummary = h("summary");
+  const gatewayToolNames = h("p", { class: "tiny wrap-anywhere" });
+  const gatewayToolChoices = h("div", { class: "perm-list" });
+  const gatewayModels = h("div", { class: "tiny muted" });
+  const gatewayDetails = h("details", null, gatewayToolSummary, gatewayToolNames, gatewayToolChoices,
+    h("p", { class: "tiny muted" }, "Save to apply tool changes. Local permissions and scope are checked again before any tool runs."), gatewayModels);
+  const gatewayAllowance = h("div", { class: "small", "aria-live": "polite" });
+  const enrollBtn = h("button", { type: "button" }, "Connect with invitation");
+  const removeSessionBtn = h("button", { type: "button", class: "ghost" }, "Remove saved gateway session");
+  const gatewayField = h("div", { class: "field", style: "grid-column:1/-1", hidden: true },
+    h("label", { class: "field" }, h("span", null, "Gateway mode (must match your operator's gateway)"), gatewayMode),
+    h("label", { class: "check" }, gatewayConsent,
+      "I allow selected conversation and course excerpts to pass through this gateway. Production mode also sends them to OpenAI. Tools still run under local permissions. Canvas Hub will not switch to an API-key provider automatically."),
+    gatewaySession,
+    h("label", { class: "field" }, h("span", null, "Invitation"), invitation),
+    h("div", { class: "row" }, enrollBtn, removeSessionBtn),
+    h("p", { class: "tiny muted" }, "Connecting saves these settings and uses the invitation once. The invitation is cleared immediately and enrollment is never retried automatically."),
+    gatewayDetails, gatewayAllowance);
+  let gatewayProfile = cur.provider === "allowance_gateway" || cur.preset === "allowance_gateway" ? { ...cur } : null;
+  let reportedAllowance = null;
+  let gatewayToolsChanged = false;
+  let gatewaySelectedTools = new Set(cur.gateway_tools || []);
+  const sameGateway = () => gatewayProfile && gatewayMode.value === (gatewayProfile.gateway_mode || "mock")
+    && base.value.trim().replace(/\/+$/, "") === (gatewayProfile.base_url || "").replace(/\/+$/, "");
+  const activeGatewaySession = () => sameGateway() && gatewayProfile.gateway_session_saved
+    && (!Number.isSafeInteger(gatewayProfile.gateway_expires_at) || gatewayProfile.gateway_expires_at > Date.now());
+  const utcTime = (value) => {
+    if (!Number.isSafeInteger(value) || value < 0) return "not reported";
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? "not reported" : date.toISOString().replace("T", " ").replace(/\.000Z$/, " UTC");
+  };
+  const microUsd = (value) => typeof value === "string" && /^\d{1,40}$/.test(value)
+    ? `${value.replace(/^0+(?=\d)/, "")} micro-USD` : "not reported";
+  const toolSummary = () => {
+    gatewayToolSummary.textContent = `${gatewaySelectedTools.size} enabled tools · model limits`;
+    gatewayToolNames.textContent = gatewaySelectedTools.size ? `Enabled: ${[...gatewaySelectedTools].join(", ")}` : "No tools enabled.";
+  };
+  const renderGateway = () => {
+    const matches = sameGateway();
+    const saved = matches && gatewayProfile.gateway_session_saved;
+    gatewaySession.textContent = saved
+      ? `Gateway session saved · ${gatewayMode.value} mode · expires ${utcTime(gatewayProfile.gateway_expires_at)}${Number.isSafeInteger(gatewayProfile.gateway_expires_at) && gatewayProfile.gateway_expires_at <= Date.now() ? " (expired)" : ""}.${activeGatewaySession() ? " Remove the saved session before using another invitation." : ""}`
+      : "No session saved for these gateway settings. Check the URL and mode, give consent, then connect with an invitation.";
+    const available = matches && Array.isArray(gatewayProfile.gateway_available_tools) ? gatewayProfile.gateway_available_tools : [];
+    gatewayDetails.hidden = !matches;
+    toolSummary();
+    const choices = [...new Set([...available, ...gatewaySelectedTools])];
+    mount(gatewayToolChoices, choices.length ? choices.map((tool) => {
+      const unavailable = !available.includes(tool);
+      const toggle = h("input", { type: "checkbox", checked: gatewaySelectedTools.has(tool) });
+      toggle.addEventListener("change", () => {
+        if (toggle.checked) gatewaySelectedTools.add(tool); else gatewaySelectedTools.delete(tool);
+        if (unavailable && !toggle.checked) toggle.disabled = true;
+        gatewayToolsChanged = true; toolSummary();
+      });
+      return h("label", { class: "check" }, toggle, `${tool}${unavailable ? " (unavailable; uncheck to remove)" : ""}`);
+    }) : h("p", { class: "tiny muted" }, "No available local tools reported. Connect or check allowance to refresh capabilities."));
+    const models = matches ? reportedAllowance?.models || gatewayProfile.gateway_models || [] : [];
+    mount(gatewayModels, h("strong", null, "Reported model output limits"), models.length ? models.map((entry) => h("div", null,
+      `${entry.id}: ${Number.isSafeInteger(entry.min_output_tokens) ? entry.min_output_tokens : "unknown"}–${Number.isSafeInteger(entry.max_output_tokens) ? entry.max_output_tokens : "unknown"} output tokens`))
+      : h("div", null, "No model limits reported yet."));
+    if (!reportedAllowance || !matches) mount(gatewayAllowance);
+    else mount(gatewayAllowance,
+      h("p", null, h("strong", null, `Reported allowance · ${reportedAllowance.mode || gatewayMode.value} mode`),
+        reportedAllowance.gateway_paused ? " · gateway paused" : ""),
+      h("div", { style: "overflow-x:auto" }, h("table", null,
+        h("thead", null, h("tr", null, ["Period", "Remaining", "Held", "Spent", "Resets (UTC)"].map((title) => h("th", { scope: "col" }, title)))),
+        h("tbody", null, ["daily", "monthly"].map((period) => {
+          const amount = reportedAllowance[period] || {};
+          return h("tr", null, h("th", { scope: "row" }, period === "daily" ? "Daily" : "Monthly"),
+            h("td", null, microUsd(amount.remaining_microusd)), h("td", null, microUsd(amount.held_microusd)),
+            h("td", null, microUsd(amount.spent_microusd)), h("td", null, utcTime(amount.resets_at)));
+        })))),
+      h("p", { class: "tiny muted" }, "1,000,000 micro-USD = US$1. Held amounts are reservations, not final charges. Checking allowance does not generate a model response."));
+    updateButtons();
+  };
+  const adoptProfile = (response, syncFields = true) => {
+    const updated = response?.profiles?.find((p) => p.id === (response.saved_profile || cur.id));
+    if (updated) {
+      Object.assign(cur, updated);
+      const listed = document.querySelector(`[data-setup-summary="${CSS.escape(cur.id)}"]`);
+      if (listed) listed.textContent = assistantSetupSummary(cur);
+      if (cur.provider === "allowance_gateway" || cur.preset === "allowance_gateway") {
+        gatewayProfile = { ...cur }; gatewaySelectedTools = new Set(cur.gateway_tools || []); gatewayToolsChanged = false;
+        if (syncFields) {
+          gatewayMode.value = cur.gateway_mode || "mock"; gatewayConsent.checked = cur.gateway_consent === true;
+          base.value = cur.base_url || "";
+        }
+      } else {
+        gatewayProfile = null; gatewaySelectedTools = new Set(); gatewayToolsChanged = false; reportedAllowance = null;
+      }
+    }
+  };
   const hint = h("div", { class: "tiny muted" });
+  const reasoningHint = h("div", { class: "tiny muted" }, "Reasoning effort is not part of a setup: choose it next to the message box for each message.");
   const sync = () => {
     const p = cfg.presets.find((x) => x.id === presetSel.value);
     const isAnthropic = p && p.provider === "anthropic";
     const isCodex = p && p.provider === "codex";
-    extraField.hidden = !p || isAnthropic || isCodex;
-    baseField.hidden = keyField.hidden = !!isCodex;
-    model.placeholder = isCodex ? "Codex default (optional)" : "model name";
+    const gateway = isGateway();
+    extraField.hidden = !p || isAnthropic || isCodex || gateway;
+    baseField.hidden = !!isCodex;
+    keyField.hidden = !!isCodex || gateway;
+    gatewayField.hidden = !gateway; reasoningHint.hidden = gateway;
+    model.placeholder = isCodex ? "Codex default (optional)" : gateway ? "Model alias supplied by your operator" : "model name";
+    base.placeholder = gateway ? "https://your-gateway.example" : "https://…/v1";
 
-    baseField.querySelector("span").textContent = isAnthropic ? "Base URL (leave empty for the Claude API)" : "Base URL";
-    if (p && presetSel.value !== cur.preset) { base.value = p.base_url; if (p.model) model.value = p.model; else if (cur.provider !== p.provider) model.value = ""; }
+    baseField.querySelector("span").textContent = gateway ? "Gateway URL" : isAnthropic ? "Base URL (leave empty for the Claude API)" : "Base URL";
+    if (p && presetSel.value !== cur.preset) { base.value = p.base_url || ""; if (p.model) model.value = p.model; else if (cur.provider !== p.provider) model.value = ""; }
     if (isCodex) listCodexModels();
     modelPick.hidden = !isCodex || !modelPick.options.length || modelPick.options[0].textContent.startsWith("Loading");
     model.hidden = !!isCodex && !modelPick.hidden;
     if (!modelPick.hidden) modelPick.value = model.value;
-    mount(hint, p ? (isCodex ? "Install Codex CLI 0.163.0 or newer and run `codex login` on this computer, then Save & test. Canvas Hub uses that login without storing its credentials. Pick a model or keep your Codex default; you can also switch models next to the message box. Questions and selected course data are sent to Codex." : isAnthropic ? "Without a pasted key, ANTHROPIC_API_KEY or an `ant auth login` profile is used." : p.id === "ollama" ? "Runs on your own computer; no key and nothing leaves it." : `Key format: ${p.key_hint || "provider API key"}. For OpenAI-compatible providers OPENAI_API_KEY is used if no key is saved.`) : "");
+    mount(hint, p ? (gateway ? "Use your operator's gateway origin, model alias and invitation. The URL must have no /v1 path, query or fragment. Production requires HTTPS; mock mode also permits HTTP on localhost, 127.0.0.1 or [::1]. Mock responses are synthetic. The saved session stays on this computer, outside course backups." : isCodex ? "Install Codex CLI 0.163.0 or newer and run `codex login` on this computer, then Save & test. Canvas Hub uses that login without storing its credentials. Pick a model or keep your Codex default; you can also switch models next to the message box. Questions and selected course data are sent to Codex." : isAnthropic ? "Without a pasted key, ANTHROPIC_API_KEY or an `ant auth login` profile is used." : p.id === "ollama" ? "Runs on your own computer; no key and nothing leaves it." : `Key format: ${p.key_hint || "provider API key"}. For OpenAI-compatible providers OPENAI_API_KEY is used if no key is saved.`) : "");
+    testBtn.textContent = gateway ? "Check allowance" : "Save & test";
+    removeKeyBtn.hidden = gateway || !cur.api_key_saved;
+    renderGateway();
   };
-  presetSel.addEventListener("change", sync); sync();
-  const result = h("div", { class: "small" });
+  presetSel.addEventListener("change", () => {
+    key.value = ""; invitation.value = ""; gatewayConsent.checked = false; reportedAllowance = null;
+    mount(result); sync();
+  });
+  gatewayConsent.addEventListener("change", () => updateButtons());
+  const changeGateway = () => { gatewayConsent.checked = false; invitation.value = ""; reportedAllowance = null; mount(result); renderGateway(); };
+  gatewayMode.addEventListener("change", changeGateway);
+  base.addEventListener("input", () => { if (isGateway()) changeGateway(); });
+  const result = h("div", { class: "small", "aria-live": "polite" });
   const save = async () => {
     if (!presetSel.value) { toast("Choose a provider first", true); return null; }
     let extraParams = {};
     const isCodex = presetSel.value === "codex";
-    if (!isCodex && extra.value.trim()) {
+    const gateway = isGateway();
+    if (gateway) {
+      let url;
+      try { url = new URL(base.value.trim()); } catch { toast("Enter your gateway's full origin URL", true); return null; }
+      if (url.username || url.password || url.pathname !== "/" || /[?#]/.test(base.value)) {
+        toast("Use only the gateway origin, without credentials, paths such as /v1, queries or fragments", true); return null;
+      }
+      if (url.protocol !== "https:" && !(gatewayMode.value === "mock" && url.protocol === "http:"
+        && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname))) {
+        toast("Use HTTPS; HTTP is allowed only for a loopback gateway in mock mode", true); return null;
+      }
+      base.value = url.origin;
+    }
+    if (!isCodex && !gateway && extra.value.trim()) {
       try { extraParams = JSON.parse(extra.value); } catch { toast("Extra request settings must be valid JSON", true); return null; }
     }
     const body = { profile_id: cur.id, name: name.value, preset: presetSel.value, model: model.value };
     body.context = { ...(cur.context || {}), auto_compact: autoCompact.checked };
     if (capacity.value.trim()) body.context.capacity = Number(capacity.value); else delete body.context.capacity;
-    if (!isCodex) Object.assign(body, { base_url: base.value, extra_params: extraParams, ...(key.value ? { api_key: key.value } : {}) });
+    if (gateway) Object.assign(body, { base_url: base.value, gateway_mode: gatewayMode.value, gateway_consent: gatewayConsent.checked,
+      ...(gatewayToolsChanged && sameGateway() ? { gateway_tools: [...gatewaySelectedTools] } : {}) });
+    else if (!isCodex) Object.assign(body, { base_url: base.value, extra_params: extraParams, ...(key.value ? { api_key: key.value } : {}) });
     const r = await guard(() => api("/api/assistant/config", { method: "PUT", body }));
-    if (r) { key.value = ""; cur.id = r.saved_profile; toast("Setup saved"); return r; }   // later saves edit this setup
+    if (r) { key.value = ""; cur.id = r.saved_profile; adoptProfile(r); renderGateway(); toast("Setup saved"); return r; }   // later saves edit this setup
     return null;
   };
   // One save or test at a time: overlapping clicks would each send profile_id "new" and create duplicates.
   const saveBtn = h("button", { class: "primary" }, "Save");
   const testBtn = h("button", null, "Save & test");
+  const useBtn = h("button", { class: "ghost", hidden: isNew || cur.id === cfg.active_profile }, "Use this setup");
+  const removeKeyBtn = h("button", { class: "ghost", hidden: !cur.api_key_saved }, "Remove saved key");
+  const deleteBtn = h("button", { class: "danger", hidden: isNew }, "Delete setup");
   let busy = false;
+  const updateButtons = () => {
+    const gateway = isGateway();
+    saveBtn.disabled = deleteBtn.disabled = removeKeyBtn.disabled = busy;
+    testBtn.disabled = busy || (gateway && (!gatewayConsent.checked || !sameGateway() || !gatewayProfile.gateway_session_saved));
+    enrollBtn.disabled = busy || !gatewayConsent.checked || !!activeGatewaySession();
+    invitation.disabled = !!activeGatewaySession();
+    removeSessionBtn.disabled = busy;
+    removeSessionBtn.hidden = !gateway || !gatewayProfile?.gateway_session_saved;
+    useBtn.disabled = busy || !cur.configured || (gateway && (!gatewayConsent.checked || !sameGateway()));
+  };
   const exclusive = (fn) => async () => {
     if (busy) return;
-    busy = true; saveBtn.disabled = testBtn.disabled = true;
-    try { await fn(); } finally { busy = false; saveBtn.disabled = testBtn.disabled = false; }
+    busy = true; fields.disabled = true; updateButtons();
+    try { await fn(); } finally { busy = false; fields.disabled = false; updateButtons(); }
   };
   saveBtn.addEventListener("click", exclusive(async () => { const r = await save(); if (r && card.isConnected) goTo(r.saved_profile); }));
   testBtn.addEventListener("click", exclusive(async () => {
+    const gateway = isGateway();
     const r = await save(); if (!r) return;
-    mount(result, h("span", { class: "muted" }, "Testing…"));
-    const t = await guard(() => api("/api/assistant/test", { method: "POST", body: { profile_id: r.saved_profile } }));
-    if (t) mount(result, t.ok ? pill("ok", `Connected · ${t.model || ""}`) : h("span", { style: "color:var(--bad)" }, t.message));
+    if (gateway) { reportedAllowance = null; renderGateway(); }
+    mount(result, h("span", { class: "muted" }, gateway ? "Checking allowance…" : "Testing…"));
+    const t = await guard(() => api("/api/assistant/test", { method: "POST", body: { profile_id: r.saved_profile } }), result);
+    if (t) {
+      if (gateway && t.ok) {
+        const latest = await guard(() => api("/api/assistant/config"));
+        if (latest) adoptProfile({ ...latest, saved_profile: r.saved_profile });
+        reportedAllowance = t.allowance || null; renderGateway();
+      }
+      mount(result, t.ok ? pill("ok", `${gateway ? "Allowance checked" : "Connected"} · ${t.model || ""}`) : h("span", { style: "color:var(--bad)" }, t.message || "Connection check failed."),
+        t.ok && t.message ? h("span", { class: "tiny muted" }, ` ${t.message}`) : null);
+    }
     // Show the new setup's own page, unless the user has moved on meanwhile.
-    if (isNew) setTimeout(() => { if (card.isConnected) goTo(r.saved_profile); }, t && t.ok ? 1200 : 4000);
+    if (isNew && !gateway) setTimeout(() => { if (card.isConnected) goTo(r.saved_profile); }, t && t.ok ? 1200 : 4000);
+  }));
+  enrollBtn.addEventListener("click", exclusive(async () => {
+    if (!isGateway() || !gatewayConsent.checked) { toast("Give gateway consent before connecting", true); return; }
+    if (activeGatewaySession()) { toast("Remove the saved gateway session before using another invitation", true); return; }
+    const invite = invitation.value.trim(); invitation.value = "";
+    if (!invite) { toast("Enter an invitation from your gateway operator", true); return; }
+    const saved = await save(); if (!saved) return;
+    if (!gatewayConsent.checked) { mount(result, "Review and enable gateway consent before connecting."); return; }
+    mount(result, h("span", { class: "muted" }, "Connecting with invitation…"));
+    const connected = await guard(() => api("/api/assistant/gateway/enroll", { method: "POST",
+      body: { profile_id: saved.saved_profile, invite, consent: true } }), result);
+    if (!connected) {
+      // Enrollment may have saved its one-time session before allowance failed.
+      // Recover that local state without redeeming the invitation again.
+      const latest = await guard(() => api('/api/assistant/config'));
+      if (latest) { adoptProfile(latest); renderGateway(); }
+      return;
+    }
+    adoptProfile(connected); reportedAllowance = connected.allowance || null; renderGateway();
+    mount(result, connected.ok ? pill("ok", "Gateway connected") : h("span", { style: "color:var(--bad)" }, connected.message || "Gateway connection failed."));
+  }));
+  removeSessionBtn.addEventListener("click", exclusive(async () => {
+    const removed = await guard(() => api("/api/assistant/config", { method: "PUT", body: { profile_id: cur.id, clear_gateway_session: true } }), result);
+    if (!removed) return;
+    adoptProfile(removed, false); reportedAllowance = null; invitation.value = ""; renderGateway();
+    mount(result, "Saved gateway session removed from this computer.");
+  }));
+  useBtn.addEventListener("click", exclusive(async () => {
+    if (await guard(() => api(`/api/assistant/profiles/${encodeURIComponent(cur.id)}/activate`, { method: "POST" }))) { toast(`Now using ${cur.name}`); route(); }
+  }));
+  removeKeyBtn.addEventListener("click", exclusive(async () => {
+    if (await guard(() => api("/api/assistant/config", { method: "PUT", body: { profile_id: cur.id, clear_key: true } }))) { toast("Saved key removed"); route(); }
+  }));
+  deleteBtn.addEventListener("click", exclusive(async () => {
+    if (!confirm(`Delete the setup “${cur.name}” and its saved credentials?`)) return;
+    if (await guard(() => api(`/api/assistant/profiles/${encodeURIComponent(cur.id)}`, { method: "DELETE" }))) {
+      toast("Setup deleted");
+      if (location.hash === "#/assistant/settings") route(); else location.hash = "#/assistant/settings";
+    }
   }));
   const goTo = (pid) => { const h2 = `#/assistant/settings?p=${encodeURIComponent(pid)}`; if (location.hash === h2) route(); else location.hash = h2; };
+  const fields = h("fieldset", { class: "grid cols-2", style: "border:0;padding:0;margin:0;min-width:0", "aria-label": "Assistant provider settings" },
+    h("label", { class: "field", style: "grid-column:1/-1" }, h("span", null, "Name"), name),
+    h("label", { class: "field" }, h("span", null, "Provider"), presetSel), h("label", { class: "field" }, h("span", null, "Model"), model, modelPick),
+    baseField, keyField, extraField, gatewayField, contextField);
   const card = h("div", { class: "card" },
     h("div", { class: "card-head" }, h("h2", null, isNew ? "New setup" : cur.name),
       !isNew && cur.id === cfg.active_profile ? pill("ok", "In use") : h("span", { class: "sub" }, "provider settings stored only on this computer")),
     h("div", { class: "banner info" }, h("div", { class: "b-body small" }, cfg.privacy, " Keys are kept in a private file outside your course data, so they are never included in backups or exports.")),
-    h("div", { class: "grid cols-2" }, h("label", { class: "field", style: "grid-column:1/-1" }, h("span", null, "Name"), name),
-      h("label", { class: "field" }, h("span", null, "Provider"), presetSel), h("label", { class: "field" }, h("span", null, "Model"), model, modelPick),
-      baseField, keyField, extraField, contextField),
-    hint,
-    h("div", { class: "tiny muted" }, "Reasoning effort is not part of a setup: choose it next to the message box for each message."),
+    fields, hint, reasoningHint,
     h("div", { class: "row", style: "margin-top:14px" },
-      saveBtn, testBtn,
-      !isNew && cur.id !== cfg.active_profile ? h("button", { class: "ghost", disabled: cur.configured ? null : true, onclick: async () => {
-        if (await guard(() => api(`/api/assistant/profiles/${encodeURIComponent(cur.id)}/activate`, { method: "POST" }))) { toast(`Now using ${cur.name}`); route(); }
-      } }, "Use this setup") : null,
-      !isNew && cur.api_key_saved ? h("button", { class: "ghost", onclick: async () => {
-        if (await guard(() => api("/api/assistant/config", { method: "PUT", body: { profile_id: cur.id, clear_key: true } }))) { toast("Saved key removed"); route(); }
-      } }, "Remove saved key") : null,
-      !isNew ? h("button", { class: "danger", onclick: async () => {
-        if (!confirm(`Delete the setup “${cur.name}” and its saved key?`)) return;
-        if (await guard(() => api(`/api/assistant/profiles/${encodeURIComponent(cur.id)}`, { method: "DELETE" }))) {
-          toast("Setup deleted");
-          if (location.hash === "#/assistant/settings") route(); else location.hash = "#/assistant/settings";   // same hash fires no hashchange
-        }
-      } }, "Delete setup") : null,
+      saveBtn, testBtn, useBtn, removeKeyBtn, deleteBtn,
       result));
+  sync();
   return card;
 }
 

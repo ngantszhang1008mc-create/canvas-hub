@@ -34,6 +34,7 @@ from .providers import ANTHROPIC_DEFAULT_MODEL, RESERVED_PARAMS, ProviderError, 
 from .context import Policy, validate_settings
 from .context_service import ContextService
 from .source_context import source_manifest, restore_source_context
+from .gateway_settings import GATEWAY_FIELDS, GatewaySettings, apply_gateway
 
 log = logging.getLogger("canvas_hub.assistant")
 CONFIG_FILE = "assistant.json"
@@ -58,10 +59,12 @@ PRESETS = [
      "model": "", "key_hint": ""},
     {"id": "codex", "label": "Codex (your Codex CLI login)", "provider": "codex",
      "base_url": "", "model": "", "key_hint": ""},
+    {"id": "allowance_gateway", "label": "Allowance gateway", "provider": "allowance_gateway",
+     "base_url": "", "model": "", "key_hint": ""},
 ]
 MAX_PROFILES = 20
 # Reasoning effort is chosen per message in the chat, not saved with a setup.
-PROFILE_FIELDS = {"id", "name", "preset", "provider", "base_url", "model", "api_key", "extra_params", "context"}
+PROFILE_FIELDS = {"id", "name", "preset", "provider", "base_url", "model", "api_key", "extra_params", "context"} | GATEWAY_FIELDS
 
 
 def reasoning_levels(cfg: dict) -> list[str]:
@@ -133,7 +136,7 @@ def _mask(key: str) -> str | None:
     return ("•" * 6) + key[-4:] if len(key) > 8 else "•" * len(key)
 
 
-class AssistantService(ContextService):
+class AssistantService(ContextService, GatewaySettings):
     def __init__(self, hub, api, worker=None):
         self.hub = hub
         self.api = api
@@ -215,6 +218,8 @@ class AssistantService(ContextService):
         cfg = json.loads(json.dumps(DEFAULT_CONFIG))
         cfg.update(prof or {"id": None, "name": ""})
         cfg["permissions"] = store["permissions"]
+        if cfg.get('provider') == 'allowance_gateway':
+            cfg['_gateway_journal'] = str(self.hub.paths.runtime / 'gateway-attempts')
         return cfg
 
     def _save_store(self, store: dict) -> None:
@@ -232,6 +237,7 @@ class AssistantService(ContextService):
             "preset": prof["preset"], "provider": prof["provider"], "base_url": prof["base_url"], "model": prof["model"],
             "reasoning_levels": reasoning_levels(prof), "extra_params": prof["extra_params"],
             "context": prof.get("context") or {},
+            **self._gateway_public(prof),
             "api_key_saved": bool(prof["api_key"]), "api_key_hint": _mask(prof["api_key"]), "api_key_from_env": env_key,
         }
 
@@ -257,6 +263,8 @@ class AssistantService(ContextService):
             return bool(cfg.get("model") and cfg.get("base_url"))
         if cfg.get("provider") == "codex":
             return True    # the connection test checks the CLI and its own login
+        if cfg.get("provider") == "allowance_gateway":
+            return bool(cfg.get('base_url') and cfg.get('model') and cfg.get('gateway_token') and cfg.get('gateway_consent') is True)
         return False
 
     def update_config(self, data: dict) -> dict:
@@ -268,7 +276,8 @@ class AssistantService(ContextService):
         active setup, created if there is none). Permissions are shared."""
         store = self._load_store()
         allowed = {"profile_id", "name", "activate", "preset", "provider", "base_url", "model", "api_key",
-                   "extra_params", "permissions", "clear_key", "context"}
+                   "extra_params", "permissions", "clear_key", "context", "gateway_mode", "gateway_consent",
+                   "gateway_tools", "clear_gateway_session"}
         bad = set(data) - allowed
         if bad:
             raise InvalidInput(f"unknown settings {sorted(bad)}")
@@ -305,6 +314,7 @@ class AssistantService(ContextService):
         return {**self.public_config(), "saved_profile": pid}
 
     def _apply(self, cfg: dict, data: dict) -> None:
+        previous = dict(cfg)
         if "context" in data:
             cfg["context"] = validate_settings(data["context"])
         if "name" in data:
@@ -328,7 +338,7 @@ class AssistantService(ContextService):
                 v = str(data[k] or "").strip()
                 if len(v) > 300:
                     raise InvalidInput(f"{k} too long")
-                if k == "base_url" and v and not v.startswith(("https://", "http://localhost", "http://127.0.0.1")):
+                if k == "base_url" and v and cfg.get('provider') != 'allowance_gateway' and not v.startswith(("https://", "http://localhost", "http://127.0.0.1")):
                     raise InvalidInput("base URL must use https:// (plain http only for a local model server)")
                 cfg[k] = v
         if "extra_params" in data:
@@ -352,6 +362,7 @@ class AssistantService(ContextService):
             if data.get("api_key") or data.get("base_url") or data.get("extra_params"):
                 raise InvalidInput("Codex uses its own CLI login and configuration; do not enter an API key, base URL, or extra request settings here.")
             cfg.update(api_key="", base_url="", extra_params={})
+        apply_gateway(cfg, data, previous)
 
     def activate_profile(self, profile_id: str) -> dict:
         with self._cfg_lock:
@@ -384,6 +395,8 @@ class AssistantService(ContextService):
 
     def test(self, profile_id: str | None = None) -> dict:
         cfg = self._load(profile_id)
+        if cfg.get('provider') == 'allowance_gateway':
+            return self.gateway_check(profile_id)
         if not self.configured(cfg):
             raise InvalidInput("Choose a provider (and model) first", code="assistant_not_configured")
         provider = None
@@ -603,8 +616,10 @@ class AssistantService(ContextService):
     def _disclosure_fingerprint(account_id, cfg, *, course_id=None, item_id=None):
         model = cfg.get("model") or (ANTHROPIC_DEFAULT_MODEL if cfg["provider"] == "anthropic" else "Provider default")
         scope = {"course_id": course_id, "item_id": item_id}
-        return hashlib.sha256(json.dumps([account_id, cfg.get("id"), cfg["provider"], cfg.get("base_url"), model, scope],
-                                         sort_keys=True).encode()).hexdigest()
+        fields = [account_id, cfg.get("id"), cfg["provider"], cfg.get("base_url"), model, scope]
+        if cfg.get('provider') == 'allowance_gateway':
+            fields += [cfg.get('gateway_mode'), cfg.get('gateway_session_id'), cfg.get('gateway_tools')]
+        return hashlib.sha256(json.dumps(fields, sort_keys=True).encode()).hexdigest()
 
     def send(self, account_id: int, text: str, conversation_id: int | None = None, profile_id: str | None = None,
              reasoning: str | None = None, model: str | None = None, *, request_context: dict | None = None) -> dict:
@@ -734,17 +749,25 @@ class AssistantService(ContextService):
         provider = None
         final_state, final_error = "idle", None
         try:
+            if cfg.get('provider') == 'allowance_gateway':
+                from .gateway import prepare_config
+                cfg = prepare_config(cfg)
             cfg = {**cfg, "_response_tokens": Policy.for_config(cfg).response_tokens}
             perms = self.permissions(cfg)
             if self.hub.writes.get_settings(account_id)["enabled"]:
                 perms.add("prepare")       # prepare only; sending needs the user's click in the app
             tools = [{"name": t.name, "description": t.description, "schema": t.schema()} for t in tools_for(perms)]
+            if cfg.get('provider') == 'allowance_gateway':
+                from .gateway import selected_tools
+                tools = selected_tools(cfg, tools)
             if not allow_tools:
                 tools = []
             conv = self._conv(account_id, cid)
             ctx = ToolContext(api=self.api, account_id=account_id, worker=self.worker, conversation_id=cid,
                               scope_course_id=conv["scope_course_id"], scope_item_id=conv["scope_item_id"])
             system = self._system(acct, perms)
+            if cfg.get('provider') == 'allowance_gateway':
+                system += '\nThis gateway setup enables only the supplied tools. Explain unavailable capabilities; never claim an unavailable tool was executed.'
             if not allow_tools:
                 system += ("\nThis is an explicit retry after an interrupted response. Continue the answer from the "
                            "existing conversation. Do not claim tools ran or repeat prior actions. If additional "
