@@ -277,3 +277,8 @@ Assistant runs default to four concurrent conversations; set
 above the limit receive a busy response before a message is saved. Source
 analysis admits at most eight active or waiting analyses and four batches;
 at most two analyses call providers simultaneously.
+
+When storage is temporarily unavailable, completed-turn recovery information
+is kept in bounded memory and retried on access or normal shutdown. If storage
+remains unavailable until the process exits, unsaved partial text cannot
+survive the exit; on restart interrupted conversations are marked as errors.

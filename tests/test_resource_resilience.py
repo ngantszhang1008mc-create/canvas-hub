@@ -265,6 +265,77 @@ def test_final_state_recovers_after_transient_write_failure(hub, account, monkey
     assert cid not in svc._pending_states
 
 
+def test_pending_state_survives_outer_transaction_rollback(hub, account):
+    svc = AssistantService(hub, HubAPI(hub))
+    with hub.db.tx() as conn:
+        cid = conn.execute("INSERT INTO assistant_conversations(account_id,title,created_at,updated_at,run_state) VALUES (?, 'x', 'x', 'x', 'running')", (account['id'],)).lastrowid
+    svc._pending_states[cid] = ('error', 'Interrupted')
+    with pytest.raises(RuntimeError):
+        with hub.db.tx():
+            svc._flush_pending_states(cid)
+            assert cid in svc._pending_states
+            raise RuntimeError('rollback')
+    assert cid in svc._pending_states
+    assert hub.db.one('SELECT run_state FROM assistant_conversations WHERE id=?', (cid,))['run_state'] == 'running'
+    assert svc.get_conversation(account['id'], cid)['conversation']['run_state'] == 'error'
+    assert cid not in svc._pending_states
+
+
+def test_unsaved_partials_bound_admission_and_recover(hub, account, monkeypatch):
+    monkeypatch.setenv('CANVAS_HUB_ASSISTANT_CONCURRENCY', '1')
+    svc = AssistantService(hub, HubAPI(hub))
+    svc.update_config({'preset': 'codex'})
+    with hub.db.tx() as conn:
+        cid = conn.execute("INSERT INTO assistant_conversations(account_id,title,created_at,updated_at,run_state) VALUES (?, 'x', 'x', 'x', 'error')", (account['id'],)).lastrowid
+    svc._live[cid] = 'Unsaved partial'
+    svc._pending_partials.add(cid)
+    with pytest.raises(InvalidInput) as exc:
+        svc.send(account['id'], 'Another question')
+    assert exc.value.code == 'assistant_busy'
+    conv = svc.get_conversation(account['id'], cid)
+    assert conv['messages'][-1]['text'] == 'Unsaved partial'
+    assert cid not in svc._pending_partials
+    svc.get_conversation(account['id'], cid)
+    assert sum(m['role'] == 'assistant' for m in svc.get_conversation(account['id'], cid)['messages']) == 1
+
+
+def test_shutdown_flushes_finished_recovery_data(hub, account):
+    svc = AssistantService(hub, HubAPI(hub))
+    with hub.db.tx() as conn:
+        cid = conn.execute("INSERT INTO assistant_conversations(account_id,title,created_at,updated_at,run_state) VALUES (?, 'x', 'x', 'x', 'running')", (account['id'],)).lastrowid
+    svc._pending_states[cid] = ('error', 'Interrupted')
+    svc._live[cid] = 'Partial'
+    svc._pending_partials.add(cid)
+    svc.flush_recovery()
+    assert not svc._pending_states and not svc._pending_partials
+    result = svc.get_conversation(account['id'], cid)
+    assert result['conversation']['run_state'] == 'error'
+    assert result['messages'][-1]['text'] == 'Partial'
+
+
+def test_partial_recovery_rejects_outer_transaction_without_losing_text(hub, account):
+    svc = AssistantService(hub, HubAPI(hub))
+    with hub.db.tx() as conn:
+        cid = conn.execute("INSERT INTO assistant_conversations(account_id,title,created_at,updated_at,run_state) VALUES (?, 'x', 'x', 'x', 'error')", (account['id'],)).lastrowid
+    svc._live[cid] = 'Partial'
+    svc._pending_partials.add(cid)
+    with pytest.raises(RuntimeError, match='top-level'):
+        with hub.db.tx():
+            svc._persist_partial(cid)
+    assert svc._live[cid] == 'Partial' and cid in svc._pending_partials
+    assert svc.get_conversation(account['id'], cid)['messages'][-1]['text'] == 'Partial'
+
+
+def test_deleting_conversation_releases_its_pending_partial(hub, account):
+    svc = AssistantService(hub, HubAPI(hub))
+    with hub.db.tx() as conn:
+        cid = conn.execute("INSERT INTO assistant_conversations(account_id,title,created_at,updated_at,run_state) VALUES (?, 'x', 'x', 'x', 'error')", (account['id'],)).lastrowid
+    svc._live[cid] = 'Partial'
+    svc._pending_partials.add(cid)
+    svc.delete_conversation(account['id'], cid)
+    assert cid not in svc._pending_partials and cid not in svc._live
+
+
 def test_partial_answer_is_saved_when_resources_return(hub, account, monkeypatch):
     class Provider:
         def complete(self, system, transcript, tools, on_text):

@@ -132,6 +132,7 @@ class AssistantService:
         self._cfg_lock = threading.RLock()     # serialises read-modify-write of the settings file
         self._threads: dict[int, threading.Thread] = {}
         self._pending_states: dict[int, tuple[str, str | None]] = {}
+        self._pending_partials: set[int] = set()
         try:
             self._max_runs = int(os.environ.get("CANVAS_HUB_ASSISTANT_CONCURRENCY", "4"))
             if not 1 <= self._max_runs <= 16:
@@ -420,7 +421,29 @@ class AssistantService:
                 if cid is not None and key != cid:
                     continue
                 self._set_state(key, state, error)
-                self._pending_states.pop(key, None)
+                # _set_state can join an outer transaction. Do not discard the
+                # recovery record until that transaction actually commits.
+                self.hub.db.after_commit(lambda key=key, value=(state, error): self._clear_pending_state(key, value))
+
+    def _clear_pending_state(self, cid, value):
+        with self._lock:
+            if self._pending_states.get(cid) == value:
+                self._pending_states.pop(cid, None)
+
+    def _at_capacity(self):
+        # Called with _lock: unresolved final states and partials consume a
+        # slot until they are persisted, bounding recovery memory as well.
+        for cid in list(self._pending_partials):
+            if not self.hub.db.one("SELECT 1 FROM assistant_conversations WHERE id=?", (cid,)):
+                self._discard_partial(cid)
+        return len(set(self._threads) | set(self._pending_states) | self._pending_partials) >= self._max_runs
+
+    def flush_recovery(self):
+        """Best-effort persistence of already-finished turns at shutdown."""
+        with self._lock:
+            self._flush_pending_states()
+            for cid in list(self._pending_partials):
+                self._persist_partial(cid)
 
     def _transcript(self, cid: int) -> list[dict]:
         out = []
@@ -460,11 +483,17 @@ class AssistantService:
         return out
 
     def _persist_partial(self, cid):
+        # Removing the in-memory copy before an enclosing transaction commits
+        # could lose it on rollback; all callers must use a top-level write.
         with self._live_lock:
             partial = self._live.get(cid)
             if partial:
+                if self.hub.db.conn.in_transaction:
+                    raise RuntimeError("partial recovery requires a top-level transaction")
                 self._append(cid, "assistant", {"text": partial, "stop": "end", "tool_calls": [], "raw": {"provider": "canvas_hub"}})
                 self._live.pop(cid, None)
+        with self._lock:
+            self._pending_partials.discard(cid)
 
     @staticmethod
     def _visible_display(display, archived_ids):
@@ -484,7 +513,14 @@ class AssistantService:
             if conv["run_state"] in ("running", "cancelling"):
                 raise InvalidInput("stop the assistant before deleting this conversation", code="assistant_busy")
             c.execute("DELETE FROM assistant_conversations WHERE id=?", (cid,))
+            self.hub.db.after_commit(lambda: self._discard_partial(cid))
         return {"deleted": cid}
+
+    def _discard_partial(self, cid):
+        with self._live_lock:
+            self._live.pop(cid, None)
+        with self._lock:
+            self._pending_partials.discard(cid)
 
     def stop(self, account_id: int, cid: int) -> dict:
         with self._lock:
@@ -576,7 +612,14 @@ class AssistantService:
         # The time stamp is stored with the message (history stays append-only).
         sent = f"[Now: {now_local.strftime('%A %d %B %Y %H:%M %Z')}]\n\n{text}"
         with self._lock:
-            if len(self._threads) >= self._max_runs:
+            self._flush_pending_states()
+            if conversation_id is not None:
+                if isinstance(conversation_id, bool) or not isinstance(conversation_id, int):
+                    raise InvalidInput("conversation_id must be an integer")
+                conv = self._conv(account_id, conversation_id)
+                if conv['run_state'] == 'error':
+                    self._persist_partial(conversation_id)
+            if self._at_capacity():
                 raise InvalidInput("The assistant is busy with other conversations. Wait for one to finish, then try again.", code="assistant_busy")
             with self.hub.db.tx() as c:
                 if conversation_id is not None:
@@ -621,12 +664,13 @@ class AssistantService:
             cfg, _, _ = self._message_config(profile_id, reasoning, model)
         acct = self.hub.identity.get_account(account_id)
         with self._lock:
-            if len(self._threads) >= self._max_runs:
-                raise InvalidInput("The assistant is busy; wait and try again.", code="assistant_busy")
+            self._flush_pending_states()
             conv = self._conv(account_id, cid)
             if conv['run_state'] != 'error':
                 raise InvalidInput("Only a stopped turn can be retried.", code="assistant_busy")
             self._persist_partial(cid)
+            if self._at_capacity():
+                raise InvalidInput("The assistant is busy; wait and try again.", code="assistant_busy")
             with self.hub.db.tx() as c:
                 conv = self._conv(account_id, cid)
                 if conv['run_state'] != 'error':
@@ -755,6 +799,7 @@ class AssistantService:
             log.exception("assistant run failed")
             final_state, final_error = "error", "The assistant could not finish. Resources or access may be unavailable; try again after checking the app."
         finally:
+            partial_pending = False
             try:
                 if provider and callable(getattr(provider, "close", None)):
                     provider.close()
@@ -768,8 +813,11 @@ class AssistantService:
                         self._append(cid, "assistant", {"text": partial, "stop": "end", "tool_calls": [], "raw": {"provider": "canvas_hub"}})
                     except Exception:
                         self._live[cid] = partial
+                        partial_pending = True
             self._cancel.discard(cid)
             with self._lock:
+                if partial_pending:
+                    self._pending_partials.add(cid)
                 try:
                     self._record_final_state(cid, final_state, final_error)
                 finally:
