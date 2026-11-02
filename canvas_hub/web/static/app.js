@@ -572,15 +572,29 @@ VIEWS.deadlines = async (main, _p, params) => {
   if (["7", "14", "30", "120", "365", "past", "all"].includes(params.get("range"))) filters.range = params.get("range");
   if (params.has("cal")) filters.include_calendar = params.get("cal") !== "0";
   const range = filters.range;
-  const start = range === "all" ? new Date("1900-01-01T00:00:00Z") : new Date(Date.now() - (range === "past" ? 30 : 1) * 86400000);
-  const end = range === "all" ? new Date("9999-01-01T00:00:00Z") : new Date(Date.now() + (range === "past" ? 0 : Number(range)) * 86400000 + 1);
+  const now = Date.now(), earliest = "1900-01-01T00:00:00Z";
+  const start = range === "all" ? new Date(earliest) : new Date(now - (range === "past" ? 30 : 1) * 86400000);
+  const end = range === "all" ? new Date("9999-01-01T00:00:00Z") : new Date(now + (range === "past" ? 0 : Number(range)) * 86400000 + 1);
   const request = { start: start.toISOString(), end: end.toISOString(), include_calendar: filters.include_calendar,
     course_id: filters.course_id, item_type: filters.item_type, status: filters.status, archive: filters.archive, limit: 500 };
-  const data = await api(A("/deadlines") + qs(request));
-  while (data.next_cursor) {
-    const next = await api(A("/deadlines") + qs({ ...request, cursor: data.next_cursor }));
-    data.deadlines.push(...next.deadlines); data.next_cursor = next.next_cursor;
-  }
+  const readPages = async (query) => {
+    const result = await api(A("/deadlines") + qs(query));
+    while (result.next_cursor) {
+      const next = await api(A("/deadlines") + qs({ ...query, cursor: result.next_cursor }));
+      result.deadlines.push(...next.deadlines); result.next_cursor = next.next_cursor;
+    }
+    return result;
+  };
+  // Upcoming views keep unfinished work visible after it becomes overdue. The
+  // saved range still bounds upcoming/completed work; all other filters apply
+  // unchanged. Past calendar events do not represent unfinished assignments.
+  const carryOver = !["past", "all"].includes(range) && filters.status !== "completed" && filters.item_type !== "calendar_event";
+  const [data, earlier] = await Promise.all([
+    readPages(request),
+    carryOver ? readPages({ ...request, start: earliest, end: request.start, status: "unfinished", include_calendar: false }) : null,
+  ]);
+  const overdue = earlier?.deadlines || [];
+  data.deadlines.unshift(...overdue);
   const saveFilters = async (patch) => {
     if (await guard(() => api(A("/deadline-views"), { method: "POST", body: { id: tab.id, filters: patch } }))) {
       if (location.hash !== "#/deadlines") location.hash = "#/deadlines"; else route();
@@ -650,6 +664,7 @@ VIEWS.deadlines = async (main, _p, params) => {
         h("button", { class: "sm ghost", onclick: async () => { if (await guard(() => api(A(`/date-candidates/${c.id}/dismiss`), { method: "POST" }))) route(); } }, "Not a date")))))) : null,
     conf.length ? h("div", { class: "small", style: "margin-top:8px" }, h("strong", null, "Confirmed: "), conf.map((c, i) => [i ? " · " : "", `${c.label} (${fmtDate(c.starts_at, { weekday: true })})`])) : null) : null;
   mount(main, pageHead("Deadlines", `Times in ${data.time_zone}. Submission states are as Canvas reported them when last read.`), chips,
+    overdue.length ? h("p", { class: "small muted deadline-carryover" }, `${overdue.length} unfinished overdue ${overdue.length === 1 ? "assignment or quiz is" : "assignments or quizzes are"} included from before this date range.`) : null,
     h("div", { style: "margin-top:18px" }, body), fromText, unresolved,
     h("p", { class: "muted small", style: "margin-top:16px" }, "The ✓ toggle is a private reminder stored locally. It never submits anything or changes Canvas."));
 };

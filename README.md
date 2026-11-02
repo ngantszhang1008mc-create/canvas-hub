@@ -171,6 +171,8 @@ Archiving is local and survives refreshes and backups; it never changes Canvas o
 
 Each deadline tab saves its date range, course, type, completion and archive filters. Open **Edit deadline tabs**
 to rename, copy or delete a tab. These views are saved per Canvas account and shared with the assistant.
+Upcoming views also retain older unfinished assignments and quizzes until they are completed or archived.
+The course, type and archive filters still apply; **Completed**, **Past 30 days** and **All dates** keep their selected date behavior.
 
 The in-app assistant can manage these tabs, filters and archives too. **Assistant → Settings → The assistant may →
 Manage deadline tabs, filters and archives** is on by default; switch it off to disable assistant changes.

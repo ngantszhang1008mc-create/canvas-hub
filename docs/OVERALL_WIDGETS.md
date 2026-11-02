@@ -4,7 +4,7 @@ Overall is a personal workbench. Deadlines/tasks (with the optional Schedule), C
 
 Use the `‹` toolbar to add/manage widgets. It opens circular actions to the left, with labels on hover or keyboard focus; click, tap or press Enter to run an action. Escape or an outside click closes the row. Pin a card, keep it in the library (persistent hide), set a condition, widen it, or move it earlier/later with accessible buttons. Course/chat tool toolbars offer **Place on Overall**. The existing Trackers pin is separate and explicitly labeled. Cards retain their live DOM while placement/order changes, so editing isn't replaced by a refreshed snapshot. On narrow cards the score rows reflow and sliders remain visible.
 
-Saved trackers initially show their full content. Drag the bottom resize handle to choose a height; the score summary stays in the card while the controls scroll. The handle also supports Up/Down and Page Up/Page Down; Home or **Fit content** restores the natural height. Height preferences are remembered independently for each tracker in this browser.
+Saved trackers use **Auto height**: short content fits naturally, while long trackers stay within a practical window height and scroll internally from the first render. Score summaries stay beside the controls where space permits; checklist progress stays above its scrolling rows. Drag the bottom resize handle to choose a height, or use Up/Down and Page Up/Page Down. Home or **Auto height** restores the automatic size. Explicit height preferences are remembered independently for each tracker in this browser; existing saved scores and checks are unchanged.
 
 ## Persistence and defaults
 

@@ -568,37 +568,52 @@ footer{margin-top:24px;font-size:12px;color:#8b8170}</style></head><body><h1>${h
     const status = h("span", { class: "tiny muted save-state", "aria-live": "polite" });
     // Height is a local presentation preference, separate from the saved scores/checks.
     const heightKey = `trackerHeight.${A(`/components/${view.id}`)}`;
-    let height = Number(store.get(heightKey)) || null, sizeObserver = null;
+    let height = Number(store.get(heightKey)) || null, sizeCleanup = null, syncTrackerSize = () => {};
     function resizable(frame) {
       const body = frame.children[1];
+      const bar = frame.querySelector(":scope > .cmp-bar");
       frame.classList.add("cmp-resizable");
       body.classList.add("cmp-resizable-content");
+      const side = body.querySelector(":scope > .sl-side");
+      const header = body.querySelector(":scope > .cl-top");
+      const scroller = body.querySelector(":scope > .sl-main, :scope > .cl-main");
+      // This wrapper keeps its intrinsic height even when its viewport shrinks,
+      // so resizing and auto height never measure their own capped result.
+      const content = h("div", { class: "cmp-scroll-content" }, [...scroller.childNodes]);
+      scroller.replaceChildren(content);
       let minimum = 180, maximum = 10000;
       const handle = h("div", { class: "cmp-resize-handle", role: "separator", tabindex: "0", "aria-orientation": "horizontal",
         "aria-label": `Resize ${v.title} tracker`, "aria-valuemin": minimum, "aria-valuemax": maximum,
-        title: "Drag to resize. Use Up or Down to adjust; Home to fit content." }, h("span", { "aria-hidden": "true" }));
-      const reset = h("button", { class: "sm ghost cmp-fit-content", "aria-label": `Fit ${v.title} to content`, onclick: () => setHeight(null) }, "Fit content");
+        title: "Drag to resize. Use Up or Down to adjust; Home for auto height." }, h("span", { "aria-hidden": "true" }));
+      const reset = h("button", { class: "sm ghost cmp-fit-content", "aria-label": `Fit ${v.title} to content`,
+        title: "Auto height fits short content and keeps long trackers within the window.", onclick: () => setHeight(null) }, "Auto height");
+      const controls = h("div", { class: "cmp-resize-controls" }, handle, reset);
       let wasConnected = false;
       const syncSize = () => {
-        if (!body.isConnected) { if (wasConnected) observer.disconnect(); return; }
+        if (!body.isConnected) { if (wasConnected) cleanup(); return; }
         wasConnected = true;
-        const side = body.querySelector(":scope > .sl-side");
-        const columns = getComputedStyle(body).gridTemplateColumns.split(" ");
-        minimum = side ? Math.max(180, Math.ceil(side.getBoundingClientRect().height) + (columns.length === 1 ? 180 + 16 : 0)) : 180;
+        const layout = getComputedStyle(body);
+        const stacked = layout.gridTemplateColumns.split(" ").length === 1;
+        const mainHeight = Math.ceil(content.getBoundingClientRect().height);
+        const sideHeight = side ? side.scrollHeight + side.offsetHeight - side.clientHeight : 0;
+        const headerHeight = header ? header.offsetHeight + (parseFloat(getComputedStyle(header).marginBottom) || 0) : 0;
+        const natural = side ? (stacked ? sideHeight + mainHeight + (parseFloat(layout.rowGap) || 0) : Math.max(sideHeight, mainHeight)) : headerHeight + mainHeight;
+        const available = Math.max(240, innerHeight - bar.offsetHeight - controls.offsetHeight - 140);
+        minimum = Math.min(180, natural);
         body.style.setProperty("--tracker-min-height", `${minimum}px`);
+        body.style.setProperty("--tracker-main-min", `${Math.min(100, mainHeight)}px`);
+        body.style.setProperty("--tracker-height", `${height ?? Math.min(natural, available)}px`);
         const actual = Math.round(body.getBoundingClientRect().height);
-        maximum = Math.max(maximum, minimum, actual);
+        maximum = Math.max(maximum, natural, actual);
         handle.setAttribute("aria-valuemin", String(minimum));
         handle.setAttribute("aria-valuemax", String(maximum));
         handle.setAttribute("aria-valuenow", String(actual));
-        handle.setAttribute("aria-valuetext", height ? `${actual} pixels` : "Fits full content");
+        handle.setAttribute("aria-valuetext", height ? `${actual} pixels` : `Auto height, ${actual} pixels`);
         reset.disabled = height === null;
       };
       function setHeight(value) {
         height = value === null ? null : Math.min(maximum, Math.max(minimum, Math.round(value)));
         frame.classList.toggle("cmp-height-set", height !== null);
-        if (height === null) body.style.removeProperty("--tracker-height");
-        else body.style.setProperty("--tracker-height", `${height}px`);
         store.set(heightKey, height ?? "");
         syncSize();
       }
@@ -620,12 +635,17 @@ footer{margin-top:24px;font-size:12px;color:#8b8170}</style></head><body><h1>${h
       handle.addEventListener("pointerup", () => { drag = null; });
       handle.addEventListener("pointercancel", () => { drag = null; });
       handle.addEventListener("dblclick", () => setHeight(null));
-      frame.append(h("div", { class: "cmp-resize-controls" }, handle, reset));
+      frame.append(controls);
       const observer = new ResizeObserver(syncSize);
-      sizeObserver = observer;
+      const cleanup = () => { observer.disconnect(); window.removeEventListener("resize", syncSize); };
+      sizeCleanup = cleanup;
+      window.addEventListener("resize", syncSize);
       observer.observe(body);
-      const side = body.querySelector(":scope > .sl-side");
+      observer.observe(bar);
+      observer.observe(content);
       if (side) observer.observe(side);
+      if (header) observer.observe(header);
+      syncTrackerSize = syncSize;
       requestAnimationFrame(syncSize);
       return frame;
     }
@@ -637,10 +657,11 @@ footer{margin-top:24px;font-size:12px;color:#8b8170}</style></head><body><h1>${h
       const key = n => n.getAttribute('aria-label') || (n.tagName + ':' + (n.closest('label')?.textContent || n.textContent));
       const identity = at >= 0 ? key(focused) : null;
       const selection = at >= 0 && typeof focused.selectionStart === 'number' ? [focused.selectionStart,focused.selectionEnd] : null;
-      const scrollSelector = '.cmp-resizable-content,.sl-main';
+      const scrollSelector = '.cmp-resizable-content,.sl-main,.sl-side,.cl-main';
       const positions = [...el.querySelectorAll(scrollSelector)].map(n => [n.scrollTop, n.scrollLeft]);
-      sizeObserver?.disconnect();
+      sizeCleanup?.();
       mount(el, resizable(render(v, api_)));
+      syncTrackerSize();
       [...el.querySelectorAll(scrollSelector)].forEach((n, i) => { if (positions[i]) [n.scrollTop, n.scrollLeft] = positions[i]; });
       if (identity !== null) {
         const next = [...el.querySelectorAll(selector)].find(n=>key(n)===identity);
@@ -827,9 +848,9 @@ footer{margin-top:24px;font-size:12px;color:#8b8170}</style></head><body><h1>${h
         ics: all.filter((r) => r.due && !done[r.id]).map((r) => ({ title: r.label, start: r.due.length === 10 ? `${r.due}T23:59:00` : r.due })),
         markdown: `**${spec.title}** — ${dc}/${all.length} done${pts ? `, ${fmtN(dpts)}/${fmtN(pts)} pts` : ""}\n\n` + spec.sections.map((s) => `${s.title ? `### ${s.title}\n` : ""}${s.rows.map((r) => `- [${done[r.id] ? "x" : " "}] ${r.label}${r.points != null ? ` (${fmtN(r.points)} pts)` : ""}${r.due ? ` — due ${r.due}` : ""}`).join("\n")}`).join("\n\n") });
       afterRender();
-      return frame("checklist", spec.title, h("div", null,
+      return frame("checklist", spec.title, h("div", { class: "cl-layout" },
         h("div", { class: "cl-top" }, h("span", { class: "small" }, `${dc}/${all.length} done${pts ? ` · ${fmtN(dpts)}/${fmtN(pts)} pts` : ""}${spec.sync_todos ? " · linked to your to-dos" : ""}`), progress(dc, all.length, spec.title)),
-        sections), data, { extra: savedTools(v, ctl), full: ctl.full, onFull: ctl.onFull });
+        h("div", { class: "cl-main" }, sections)), data, { extra: savedTools(v, ctl), full: ctl.full, onFull: ctl.onFull });
     });
   }
 
