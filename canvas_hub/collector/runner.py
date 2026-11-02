@@ -13,6 +13,7 @@ import json
 import logging
 import threading
 import time
+import uuid
 from datetime import datetime, timezone
 
 from ..services.jobs import WORKER_ID
@@ -23,6 +24,7 @@ from .traversal import CollectionRun
 log = logging.getLogger("canvas_hub.runner")
 LOCK_KEY = "runner_lock"
 LOCK_STALE_SECONDS = 90
+LOCK_RENEW_SECONDS = 15
 
 
 class JobRunner:
@@ -31,7 +33,10 @@ class JobRunner:
         self.worker = worker
         self.poll = poll_seconds
         self._stop = threading.Event()
+        self._lease_stop = threading.Event()
+        self._lease_id = uuid.uuid4().hex
         self._thread = threading.Thread(target=self._loop, name="canvas-hub-runner", daemon=True)
+        self._lease_thread = threading.Thread(target=self._lease_loop, name="canvas-hub-runner-lease", daemon=True)
         self.has_lock = False
         self._last_auto = 0.0
         self.current_job: int | None = None
@@ -46,16 +51,47 @@ class JobRunner:
                 cur = json.loads(row["value"])
                 hb = parse_iso(cur.get("heartbeat"))
                 fresh = hb and (datetime.now(timezone.utc) - hb).total_seconds() < LOCK_STALE_SECONDS
-                if cur.get("worker") != WORKER_ID and fresh:
+                if cur.get("lease") != self._lease_id and fresh:
                     return False
             c.execute("INSERT INTO app_settings(key, value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                      (LOCK_KEY, json.dumps({"worker": WORKER_ID, "heartbeat": now})))
+                      (LOCK_KEY, json.dumps({"worker": WORKER_ID, "lease": self._lease_id, "heartbeat": now})))
         return True
+
+    def _renew_lock(self) -> bool:
+        """Renew only this lease; never reacquire a missing or stolen lock."""
+        with self.hub.db.tx() as c:
+            row = c.execute("SELECT value FROM app_settings WHERE key=?", (LOCK_KEY,)).fetchone()
+            if not row:
+                return False
+            lease = json.loads(row["value"])
+            if lease.get("worker") != WORKER_ID or lease.get("lease") != self._lease_id:
+                return False
+            lease["heartbeat"] = now_iso()
+            c.execute("UPDATE app_settings SET value=? WHERE key=?", (json.dumps(lease), LOCK_KEY))
+        return True
+
+    def _keep_lease(self) -> bool:
+        try:
+            if self._renew_lock():
+                return True
+        except Exception:
+            log.exception("runner lease renewal failed")
+        self.has_lock = False
+        self._stop.set()
+        log.error("runner lease lost; stopping collection and preserving pending work")
+        return False
+
+    def _lease_loop(self) -> None:
+        # Collection, downloads and extraction may outlast the stale interval.
+        # Keep renewing while shutdown drains workers, not only while polling.
+        while not self._lease_stop.wait(LOCK_RENEW_SECONDS):
+            if not self._keep_lease():
+                return
 
     def _release(self) -> None:
         with self.hub.db.tx() as c:
             row = c.execute("SELECT value FROM app_settings WHERE key=?", (LOCK_KEY,)).fetchone()
-            if row and json.loads(row["value"]).get("worker") == WORKER_ID:
+            if row and json.loads(row["value"]).get("lease") == self._lease_id:
                 c.execute("DELETE FROM app_settings WHERE key=?", (LOCK_KEY,))
 
     # ---- lifecycle ---------------------------------------------------------
@@ -67,19 +103,25 @@ class JobRunner:
         interrupted = self.hub.jobs.recover_after_restart()
         if interrupted:
             log.info("marked interrupted jobs: %s", interrupted)
+        self._lease_thread.start()
         self._thread.start()
 
     def stop(self) -> None:
         self._stop.set()
         if self._thread.is_alive():
-            self._thread.join(timeout=10)
+            self._thread.join()
+        self._lease_stop.set()
+        if self._lease_thread.is_alive():
+            self._lease_thread.join()
         if self.has_lock:
             self._release()
+        self.has_lock = False
 
     def _loop(self) -> None:
         while not self._stop.is_set():
             try:
-                self._try_lock()
+                if not self._keep_lease():
+                    return
                 job = self.hub.jobs.next_queued()
                 if job:
                     self._run_one(job)
@@ -133,6 +175,8 @@ class JobRunner:
     def _run_one(self, job: dict) -> None:
         inst = job["instance_id"]
         state = self.worker.call(lambda: self.worker.check_session(inst, launch=True), timeout=120)
+        if self._stop.is_set():
+            return
         if state.get("status") != "signed_in":
             self.hub.jobs.set_state(job["id"], "needs_login",
                                     message="Sign in to Canvas to run this job; it starts automatically after sign-in.")
@@ -150,6 +194,7 @@ class JobRunner:
             self.worker.busy_with = f"job {job['id']}"
             try:
                 run = CollectionRun(self.hub, None, job["id"])
+                run.shutdown = self._stop
                 run.client = self.worker.client_for(inst, should_stop=run.should_stop)
                 return run.run()
             finally:
@@ -164,7 +209,7 @@ class JobRunner:
                                     message="The job stopped unexpectedly; verified observations were kept. Resume to retry.")
         finally:
             self.current_job = None
-            if state.get("status") == "signed_in":
+            if state.get("status") == "signed_in" and not self._stop.is_set():
                 # Refresh cached session state after a job (it may have expired).
                 try:
                     self.worker.call(self.worker.check_session, inst, timeout=60)

@@ -167,7 +167,7 @@ def test_study_task_does_not_complete_deadline(hub, account, fixture_pkg):
                                    local_due=(due - timedelta(days=2)).isoformat())
     hub.annotations.update(aid, study["id"], task_state="done")
     assert proposal()["done"] is False                         # a finished study block is only a step
-    marker = hub.annotations.create(aid, kind="task", title="Project proposal", item_id=item_id, task_state="done")
+    marker = hub.annotations.create(aid, kind="task", title="Project proposal", item_id=item_id, task_role="completion", task_state="done")
     assert proposal()["done"] is True                          # the undated "Mark done locally" marker
     hub.annotations.delete(aid, marker["id"])
 

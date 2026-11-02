@@ -20,6 +20,7 @@ from .. import projections, scoring
 from ..db import Database
 from ..util import Conflict, InvalidInput, NotFound, now_iso, parse_iso
 from .annotations import AnnotationService
+from .component_sync import ComponentSourceSync, SOURCE_META, source_meta
 
 KINDS = ("score_model", "checklist", "grade_projector", "hours_tracker")
 MAX_ROWS = 300
@@ -87,7 +88,7 @@ def checklist_totals(spec: dict, state: dict) -> dict:
             "open_count": cnt - dcnt, "next_due": nxt[0] if nxt else None}
 
 
-class ComponentService:
+class ComponentService(ComponentSourceSync):
     def __init__(self, db: Database, annotations: AnnotationService):
         self.db = db
         self.annotations = annotations
@@ -134,6 +135,13 @@ class ComponentService:
             state = self._pull_todos(account_id, spec, state)
         out = {"id": row["id"], "kind": row["kind"], "title": row["title"], "spec": spec, "state": state,
                "version": row["version"], "pinned": bool(row["pinned"]), "conversation_id": row["conversation_id"],
+               "course_id": row["course_id"], "item_id": row["item_id"],
+               "purpose_key": row["purpose_key"],
+               "source_config": json.loads(row["source_config_json"]),
+               "source_values": json.loads(row["source_values_json"]),
+               "source_status": json.loads(row["source_status_json"]),
+               "source_overrides": json.loads(row["source_overrides_json"]),
+               "pending_spec": json.loads(row["pending_spec_json"]) if row["pending_spec_json"] else None,
                "created_at": row["created_at"], "updated_at": row["updated_at"],
                "can_undo": bool(self.db.one("SELECT 1 FROM component_versions WHERE component_id=?", (row["id"],)))}
         if row["kind"] == "score_model":
@@ -149,19 +157,78 @@ class ComponentService:
     def get(self, account_id: int, cid: int) -> dict:
         return self._view(account_id, self._row(account_id, cid))
 
-    def list(self, account_id: int, *, pinned: bool | None = None, limit: int = 100) -> list[dict]:
+    def list(self, account_id: int, *, pinned: bool | None = None, limit: int = 100,
+             course_id: str | None = None, item_id: int | None = None) -> list[dict]:
         where, params = "account_id=?", [account_id]
         if pinned is not None:
             where += " AND pinned=?"
             params.append(1 if pinned else 0)
+        if course_id is not None or item_id is not None:
+            course_id, _ = self.validate_links(account_id, course_id, item_id)
+        if item_id is not None:
+            where += " AND item_id=?"
+            params.append(item_id)
+        elif course_id is not None:
+            where += " AND course_id=?"
+            params.append(course_id)
         rows = self.db.query(f"SELECT * FROM components WHERE {where} ORDER BY updated_at DESC LIMIT ?",
                              (*params, max(1, min(int(limit), 500))))
         return [self._view(account_id, dict(r)) for r in rows]
 
     # ---- write -------------------------------------------------------------------------
+    def validate_links(self, account_id, course_id=None, item_id=None):
+        if item_id is not None:
+            if isinstance(item_id, bool) or not isinstance(item_id, int):
+                raise InvalidInput("item_id must be an integer")
+            item = self.db.one("SELECT course_canvas_id FROM items WHERE id=? AND account_id=?", (item_id, account_id))
+            if not item:
+                raise NotFound("item not found", code="item_not_found")
+            actual = item["course_canvas_id"]
+            if course_id is not None and str(course_id) != actual:
+                raise InvalidInput("the item does not belong to this course")
+            course_id = actual
+        if course_id is not None:
+            course_id = str(course_id)
+            if not self.db.one("SELECT 1 FROM items WHERE account_id=? AND item_type='course' AND source_key=?",
+                               (account_id, course_id)):
+                raise NotFound("course not found", code="course_not_found")
+        return course_id, item_id
+
     def create(self, account_id: int, kind: str, spec: dict, *, conversation_id: int | None = None,
-               created_by: str = "assistant", state: dict | None = None) -> dict:
+               created_by: str = "assistant", state: dict | None = None,
+               course_id: str | None = None, item_id: int | None = None,
+               sources: dict | None = None, purpose_key: str | None = None) -> dict:
+        with self._lock, self.db.tx():
+            return self._create(account_id, kind, spec, conversation_id=conversation_id, created_by=created_by,
+                                state=state, course_id=course_id, item_id=item_id, sources=sources, purpose_key=purpose_key)
+
+    def _create(self, account_id, kind, spec, *, conversation_id, created_by, state,
+                course_id, item_id, sources, purpose_key):
+        course_id, item_id = self.validate_links(account_id, course_id, item_id)
+        if purpose_key is not None:
+            if not isinstance(purpose_key, str) or not _ID.fullmatch(purpose_key):
+                raise InvalidInput("purpose_key must be a stable identifier of at most 64 characters")
+            existing = self.db.one("""SELECT id FROM components WHERE account_id=? AND kind=?
+                                     AND course_id IS ? AND item_id IS ? AND purpose_key=?""",
+                                   (account_id, kind, course_id, item_id, purpose_key))
+            if existing:
+                return self.get(account_id, existing["id"])
+            if purpose_key == "primary":
+                existing = self.db.one("""SELECT id FROM components WHERE account_id=? AND kind=?
+                                         AND course_id IS ? AND item_id IS ? AND purpose_key IS NULL
+                                         ORDER BY id LIMIT 1""", (account_id, kind, course_id, item_id))
+                if existing:
+                    self.db.conn.execute("UPDATE components SET purpose_key=? WHERE id=? AND account_id=?",
+                                         (purpose_key, existing["id"], account_id))
+                    return self.get(account_id, existing["id"])
+        if conversation_id is not None and not self.db.one(
+                "SELECT 1 FROM assistant_conversations WHERE id=? AND account_id=?", (conversation_id, account_id)):
+            raise NotFound("conversation not found")
         clean = self.normalize(kind, spec)
+        self._validate_spec_items(account_id, clean)
+        config = self._validate_sources(account_id, kind, clean, sources, course_id) if sources is not None else {}
+        if config and not (config["bindings"] or config["collection"] or config["review_sources"]):
+            config = {}
         if kind == "checklist":
             initial = {"done": {r["id"]: True for s in clean["sections"] for r in s["rows"] if r.get("done")}}
         else:
@@ -173,9 +240,12 @@ class ComponentService:
         with self.db.tx() as c:
             cid = c.execute(
                 """INSERT INTO components(account_id, conversation_id, kind, title, spec_json, state_json, created_by,
-                   created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)""",
-                (account_id, conversation_id, kind, clean["title"], json.dumps(clean), json.dumps(st), created_by, now, now),
+                   created_at, updated_at, course_id, item_id, purpose_key, source_config_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (account_id, conversation_id, kind, clean["title"], json.dumps(clean), json.dumps(st), created_by,
+                 now, now, course_id, item_id, purpose_key, json.dumps(config)),
             ).lastrowid
+        if config:
+            return self._sync_component(account_id, self._row(account_id, cid))
         return self.get(account_id, cid)
 
     def _effective_state_json(self, account_id: int, row: dict) -> str:
@@ -186,8 +256,12 @@ class ComponentService:
             return json.dumps(self._pull_todos(account_id, spec, state))
         return row["state_json"]
 
-    def _save(self, account_id: int, row: dict, spec: dict, state: dict, by: str, history_state: str | None = None) -> dict:
+    def _save(self, account_id: int, row: dict, spec: dict, state: dict, by: str, history_state: str | None = None,
+              *, source_changes: dict | None = None) -> dict:
         now = now_iso()
+        source_changes = source_changes or {}
+        if set(source_changes) - set(SOURCE_META):
+            raise InvalidInput("unsupported source metadata")
         with self.db.tx() as c:
             # Conditional on the version that was read: a concurrent writer makes this a conflict, never an overwrite.
             n = c.execute("""UPDATE components SET spec_json=?, state_json=?, title=?, version=version+1, updated_at=?
@@ -195,9 +269,12 @@ class ComponentService:
                           (json.dumps(spec), json.dumps(state), spec["title"], now, row["id"], row["version"])).rowcount
             if n != 1:
                 raise Conflict("this component changed elsewhere; reload it", code="version_conflict")
+            for field, value in source_changes.items():
+                c.execute(f"UPDATE components SET {field}=? WHERE id=?", (value, row["id"]))
             c.execute("""INSERT OR REPLACE INTO component_versions(component_id, version, spec_json, state_json,
-                         changed_by, created_at) VALUES (?,?,?,?,?,?)""",
-                      (row["id"], row["version"], row["spec_json"], history_state or row["state_json"], by, now))
+                         changed_by, created_at, source_meta_json) VALUES (?,?,?,?,?,?,?)""",
+                      (row["id"], row["version"], row["spec_json"], history_state or row["state_json"], by, now,
+                       json.dumps(source_meta(row))))
             c.execute("""DELETE FROM component_versions WHERE component_id=? AND version NOT IN
                          (SELECT version FROM component_versions WHERE component_id=? ORDER BY version DESC LIMIT ?)""",
                       (row["id"], row["id"], KEEP_VERSIONS))
@@ -236,7 +313,10 @@ class ComponentService:
     def update_spec(self, account_id: int, cid: int, spec: dict, *, by: str = "assistant") -> dict:
         with self._lock:
             row = self._row(account_id, cid)
+            if json.loads(row["source_config_json"]):
+                return self.propose_spec(account_id, cid, spec)
             clean = self.normalize(row["kind"], spec)
+            self._validate_spec_items(account_id, clean)
             before = self._effective_state_json(account_id, row)
             st = self._clean_state(row["kind"], clean, json.loads(before))   # ticks as they are now, e.g. when sync turns off
             if row["kind"] == "checklist" and clean.get("sync_todos"):
@@ -264,6 +344,10 @@ class ComponentService:
                               (prev["spec_json"], state_json, spec["title"], now_iso(), row["id"], row["version"])).rowcount
                 if n != 1:
                     raise Conflict("this component changed elsewhere; reload it", code="version_conflict")
+                if prev["source_meta_json"]:
+                    metadata = json.loads(prev["source_meta_json"])
+                    for field in SOURCE_META:
+                        c.execute(f"UPDATE components SET {field}=? WHERE id=?", (metadata[field], row["id"]))
                 c.execute("DELETE FROM component_versions WHERE component_id=? AND version=?", (row["id"], prev["version"]))
             return self.get(account_id, row["id"])
 
@@ -316,9 +400,10 @@ class ComponentService:
                 due = self._todo_due(r)
                 try:
                     a = self.annotations.create(account_id, kind="task", title=r["label"], item_id=r.get("item_id"),
-                                                local_due=due, task_state=want)
+                                                local_due=due, task_state=want, task_role="substep")
                 except NotFound:        # the linked item is gone; keep the to-do without it
-                    a = self.annotations.create(account_id, kind="task", title=r["label"], local_due=due, task_state=want)
+                    a = self.annotations.create(account_id, kind="task", title=r["label"], local_due=due, task_state=want,
+                                                task_role="substep")
                 links[r["id"]] = a["id"]
         return {**st, "links": links}
 
@@ -342,7 +427,8 @@ class ComponentService:
         """Compact read-back: what is ticked/skipped and the totals."""
         v = self.get(account_id, cid)
         out = {"component_id": v["id"], "kind": v["kind"], "title": v["title"], "version": v["version"],
-               "pinned": v["pinned"], "updated_at": v["updated_at"]}
+               "pinned": v["pinned"], "updated_at": v["updated_at"],
+               "course_id": v["course_id"], "item_id": v["item_id"]}
         if v["kind"] == "score_model":
             comp = v["computed"]
             out["totals"] = comp["totals"]

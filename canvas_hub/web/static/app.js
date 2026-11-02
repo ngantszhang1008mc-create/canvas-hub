@@ -1,4 +1,10 @@
+import { makeExternalSources } from "./external-sources.js";
+import { makeWorkspace } from "./workspace.js";
+import { makeContextAgent } from "./context-agent.js";
 import { makeComponents } from "./components.js";
+import { icon, decorateNavigation } from "./icons.js";
+import { currentTheme, themeSwitcher } from "./appearance.js";
+decorateNavigation();
 // Canvas Hub UI. Vanilla JS, no build step.
 // Safety: everything is rendered with textContent except item HTML fields,
 // which the server has already sanitized (and the CSP blocks scripts).
@@ -194,6 +200,7 @@ function fieldValue(name, f, item) {
 
 // ---------- shell ----------
 function setActiveNav(view) {
+  document.querySelectorAll(`.nav [data-view="${view}"]`).forEach(el=>{for(let p=el.parentElement;p;p=p.parentElement)if(p.tagName==="DETAILS")p.open=true;});
   document.querySelectorAll("#nav a").forEach((a) => a.classList.toggle("active", a.dataset.view === view));
 }
 
@@ -217,13 +224,14 @@ function renderTopbar() {
       kids.push(h("span", { class: "muted small" }, `as ${sess.display_name}`));
   }
   kids.push(h("div", { class: "grow" }));
+  kids.push(themeSwitcher());
   if (inst && st !== "signed_in") {
     kids.push(h("span", { class: "muted small" }, "Showing stored data. New collection needs Canvas access."));
     if (st === "unknown") kids.push(h("button", { class: "ghost", onclick: () => refreshSession(true, true) }, "Check sign-in"));
     kids.push(h("button", { class: "primary", onclick: () => openLogin(inst.id) }, st === "login_open" ? "Show sign-in window" : "Sign in"));
   }
   if (inst && st === "signed_in" && S.accountId)
-    kids.push(h("button", { onclick: () => startJob("quick") }, "Quick check"));
+    kids.push(h("button", { onclick: () => startJob("quick") }, icon("search"), "Quick check"));
   if (S.accountId) kids.push(bell());
   mount($("#topbar"), kids);
 }
@@ -303,9 +311,24 @@ function renderFoot() {
 }
 
 function selectAccount(id) {
+  const changed = S.accountId !== id;
   S.accountId = id;
   store.set("account", String(id));
   for (const i of S.identities) for (const a of i.accounts) if (a.id === id) S.account = a;
+  if(changed){ C.closeDrawer(); renderWorkspaceNavigation(); }
+}
+
+async function renderWorkspaceNavigation() {
+  const aid = S.accountId;
+  if(!aid)return;
+  const [courses,work] = await Promise.all([api(`/api/accounts/${aid}/courses`),api(`/api/accounts/${aid}/workspace`)]).catch(()=>[null,null]);
+  if(S.accountId!==aid || !courses)return;
+  document.querySelector("#workspace-course-links")?.remove();
+  const group=h("details",{id:"workspace-course-links",class:"nav-group"},h("summary",null,"Your courses"),
+    courses.courses.map(c=>h("a",{href:`#/course/${c.course_id}`,class:"tiny"},c.course_code || c.title)));
+  document.querySelector('.nav a[data-view="courses"]')?.parentElement.append(group);
+  document.querySelector("#workspace-active-link")?.remove();
+  if(work?.active)document.querySelector('.nav a[data-view="overview"]')?.after(h("a",{id:"workspace-active-link",href:`#/item/${work.active.item_id}`,class:"tiny"},"Continue · "+work.active.item.title));
 }
 
 async function loadIdentities() {
@@ -402,16 +425,20 @@ window.addEventListener("hashchange", route);
 // Assistant focus mode: the window holds just the chat list, the chat, its tabs and the composer (remembered in this browser).
 // The page's toggle buttons are kept here, so Esc pressed while the page is still drawing updates them too.
 let focusButtons = [];
+function renderFocusButtons(on, buttons = focusButtons) {
+  for (const b of buttons) { mount(b, icon("maximize"), on ? "Exit focus" : currentTheme() === "light" ? "Focus" : "⤢ Focus"); b.setAttribute("aria-label", on ? "Exit focus" : "⤢ Focus"); b.setAttribute("aria-pressed", on ? "true" : "false"); }
+}
 function setChatFocus(on, buttons = focusButtons) {
   focusButtons = buttons;
   store.set("chatFocus", on ? "1" : "0");
   document.body.classList.toggle("chat-focus", on);
-  for (const b of buttons) { b.textContent = on ? "Exit focus" : "⤢ Focus"; b.setAttribute("aria-pressed", on ? "true" : "false"); }
+  renderFocusButtons(on, buttons);
   window.dispatchEvent(new Event("resize"));          // the chat refits to the space it now has
 }
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && document.body.classList.contains("chat-focus") && !document.querySelector(".cmp.fullscreen")) setChatFocus(false);
 });
+window.addEventListener("ch-theme-change", () => renderFocusButtons(document.body.classList.contains("chat-focus")));
 
 function pageHead(title, sub, ...actions) {
   return h("div", { class: "page-head" }, h("div", null, h("h1", null, title), sub ? h("p", null, sub) : null),
@@ -626,14 +653,12 @@ VIEWS.deadlines = async (main, _p, params) => {
 };
 
 function localTaskToggle(d) {
-  const t = (d.local_tasks || []).find((x) => !x.local_due);   // dated to-dos (e.g. study blocks) are separate
-  const done = t && t.task_state === "done";
+  const done = !!d.done_locally;
   return h("button", { class: "sm " + (done ? "" : "ghost"), title: "Private local marker; not a Canvas submission",
     onclick: async (e) => {
       e.preventDefault();
-      if (t) await guard(() => api(A(`/annotations/${t.id}`), { method: "PATCH", body: { task_state: done ? "open" : "done" } }));
-      else await guard(() => api(A("/annotations"), { method: "POST", body: { kind: "task", item_id: d.item_id, title: d.title, task_state: "done" } }));
-      route();
+      if (await guard(() => api(A(`/deadlines/${d.item_id}/local-completion`),
+        { method: "PATCH", body: { completed: !done } }))) route();
     } }, done ? "✓ Done (local)" : "Mark done locally");
 }
 
@@ -666,6 +691,23 @@ VIEWS.courses = async (main) => {
     sec("Current", by.current), sec("Future", by.future), sec("Past", by.past), sec("Other", by.unknown));
 };
 
+// A local draft only: provider calls still require Send in the existing assistant.
+function studyAction(links) {
+  const path = links.item_id ? `#/item/${links.item_id}` : `#/course/${links.course_id}`;
+  return W.launcher([
+    {id:"breakdown",label:links.item_id ? "Break down assignment" : "Interpret grading",icon:"sparkles",
+      description:"Use stored sources with this workspace's Agent.",run:()=>{C.closeDrawer();location.hash=path+"?agent="+(links.item_id?"breakdown":"grading");}},
+    {id:"ask",label:"Ask Agent",icon:"message",description:"Open the conversation for this work.",run:()=>{C.closeDrawer();location.hash=path+"?agent=1";}}
+  ]);
+}
+async function linkedStudy(links) {
+  const data = await api(A("/components") + qs(links));
+  return h("section", { class: "linked-study stack", "aria-label": "Linked study tools" },
+    h("h2", null, "Your study tools"),
+    data.components.length ? data.components.map((v) => h("div",null,W.sourceStatus(v),C.componentView({ component: v.kind, view: v }))) :
+      h("p", { class: "muted small" }, "No linked study tools yet. Create one with the assistant; your progress will stay here."));
+}
+
 VIEWS.course = async (main, parts, params) => {
   const cid = parts[0];
   const tab = params.get("tab") || "overview";
@@ -689,12 +731,13 @@ VIEWS.course = async (main, parts, params) => {
         syl ? h("p", null, h("a", { href: `#/item/${syl.id}` }, "Read the syllabus")) : null,
         pagesHome.items.length ? h("p", { class: "small" }, `${pagesHome.items.length} page(s) collected`) : null),
       h("div", { class: "card" }, h("h2", null, "Coverage for this course"), coverageTable(cov.records)),
-      await gradingCard(cid));
+      h("details", {class:"card grade-planning", style:"grid-column:1/-1"}, h("summary",null,"Grade planning"), await gradingCard(cid)));
   } else {
     const list = await api(A("/items") + qs({ course_id: cid, type: tab, limit: 200 }));
     body = h("div", { class: "card" }, itemTable(list.items));
   }
-  mount(main, head, tabs, body);
+  await W.courseView(main, c, [head, tabs, body]);
+  await E.attach(main, {course_id: String(cid)});
 };
 
 // Local grading rules: what Canvas leaves out (real group weights, pass mark). Never sent to Canvas.
@@ -746,6 +789,10 @@ async function gradingCard(cid) {
       } }, "Save rules"), rules.updated_at ? h("span", { class: "tiny muted" }, `saved ${ago(rules.updated_at)}`) : null));
   };
   try { draw(await api(A(`/courses/${cid}/grading`))); } catch (e) { mount(card, h("p", { class: "muted small" }, "Grading rules unavailable: " + e.message)); }
+  const proposal = await api(A(`/courses/${cid}/grading-proposal`));
+  if (proposal.after) card.prepend(h("details", {class:"grading-proposal",open:true},h("summary",null,"Agent proposed grading rules — review before applying"),
+    C.diffPair(JSON.stringify(proposal.before,null,2),JSON.stringify(proposal.after,null,2)),
+    h("button",{class:"primary",onclick:async()=>{if(await guard(()=>api(A(`/courses/${cid}/grading-proposal/approve`),{method:"POST",body:{base_hash:proposal.base_hash}})))route();}},"Approve grading rules")));
   return card;
 }
 
@@ -769,7 +816,7 @@ VIEWS.item = async (main, parts) => {
   const id = parts[0];
   const [it, hist] = await Promise.all([api(A(`/items/${id}`)), api(A(`/items/${id}/history`))]);
   const head = pageHead(it.title || "(untitled)", null,
-    it.source_url ? h("a", { class: "btn", href: it.source_url, target: "_blank", rel: "noopener noreferrer" }, "Open in Canvas") : null,
+    it.source_url ? h("a", { class: "btn", href: it.source_url, target: "_blank", rel: "noopener noreferrer" }, it.source_key?.startsWith("external:") || ["external_link","external_tool"].includes(it.item_type) ? "Open source" : "Open in Canvas") : null,
     ["assignment", "quiz", "calendar_event"].includes(it.item_type) ? archiveDeadlineButton({ item_id: it.id, archived: it.deadline_archived }) : null);
   const meta = h("div", { class: "row", style: "margin:-8px 0 14px" }, pill("muted plain", TYPE_LABEL[it.item_type]),
     it.course_canvas_id ? h("a", { href: `#/course/${it.course_canvas_id}`, class: "small" }, it.course_title || "Course " + it.course_canvas_id) : null,
@@ -796,15 +843,12 @@ VIEWS.item = async (main, parts) => {
     const content = (it.fields.find((f) => f.field === "content") || {}).value;
     const by = (it.fields.find((f) => f.field === "provided_by") || {}).value;
     const readAt = (it.fields.find((f) => f.field === "read_at") || {}).value;
-    if (content) cards.unshift(h("div", { class: "card" }, h("div", { class: "card-head" }, h("h2", null, "Content read by a connected agent"),
+    const adapterRead = by === "public declarative adapter";
+    if (content) cards.unshift(h("div", { class: "card" }, h("div", { class: "card-head" }, h("h2", null, adapterRead ? "Content read by your local adapter" : "Content read by a connected agent"),
       h("span", { class: "sub" }, `${by || "agent"} · ${readAt ? fmtDate(readAt) : ""}`)),
-      h("div", { class: "banner warn", style: "margin-bottom:10px" }, h("div", { class: "b-body small" }, "Provided by a connected agent, not reported by Canvas. Check the original site for anything important.")),
+      h("div", { class: "banner warn", style: "margin-bottom:10px" }, h("div", { class: "b-body small" }, adapterRead ? "Read from the approved public source. Check its evidence and read time below." : "Provided by a connected agent, not reported by Canvas. Check the original site for anything important.")),
       h("pre", { class: "text" }, content)));
-    const url = (it.fields.find((f) => f.field === "url") || {}).value || it.source_url;
-    if (url) cards.unshift(h("div", { class: "card" }, h("div", { class: "spread" },
-      h("div", { class: "small" }, "Canvas Hub doesn't open external sites itself. A connected agent with its own access can read this page for you."),
-      h("button", { onclick: async () => { const r = await guard(() => api(A("/requests"), { method: "POST", body: { url, title: it.title || undefined, course_id: it.course_canvas_id || undefined } }));
-        if (r) { toast("Request left for connected agents"); location.hash = "#/requests"; } } }, content ? "Ask an agent to re-read" : "Ask a connected agent to read this"))));
+
   }
   if (it.submission_item_id) cards.push(h("div", { class: "card" }, h("a", { href: `#/item/${it.submission_item_id}` }, "View your submission and feedback →")));
   if (it.resources.length) cards.push(h("div", { class: "card" }, h("h2", null, "Document"), it.resources.map((r) => resourceBlock(r))));
@@ -818,10 +862,16 @@ VIEWS.item = async (main, parts) => {
       l.collected ? null : pill("muted", "not read")))) : null,
     it.links_in.length ? h("div", { style: "margin-top:8px" }, h("div", { class: "small muted" }, "Referenced from"), h("ul", { class: "list" }, it.links_in.map((l) => h("li", null,
       h("a", { href: `#/item/${l.item_id}` }, l.title || TYPE_LABEL[l.item_type]), " ", h("span", { class: "muted small" }, relLabel(l.relation)))))) : null));
+
   cards.push(notesCard(it));
   cards.push(historyCard(hist));
-  mount(main, head, meta, banners, h("div", { class: "stack" }, cards));
+  const content = [head, meta, banners, h("div", { class: "stack" }, cards)];
+  if (["assignment", "quiz", "calendar_event"].includes(it.item_type)) await W.assignmentView(main, it, content);
+  else mount(main, content);
+  await E.attach(main, {item_id: String(it.id)});
 };
+
+const E = makeExternalSources({h, mount, api, A, launcher: actions => W.launcher(actions)});
 
 const relLabel = (r) => ({ body_link: "links to", module_item_content: "opens", module_contains: "contains", attachment: "attachment",
   folder_contains: "contains", submission_for: "submission for", home_page: "home page", calendar_for: "calendar entry for" }[r] || r);
@@ -1060,9 +1110,9 @@ VIEWS.collect = async (main) => {
   const hasThorough = jobs.jobs.some((j) => ["baseline", "thorough"].includes(j.mode) && ["completed", "completed_with_gaps"].includes(j.state));
 
   const modes = h("div", { class: "grid cols-3" },
-    modeCard("Baseline", "Thorough first collection of everything in scope, including document downloads.", "baseline", !hasThorough),
-    modeCard("Thorough refresh", "Re-reads lists, bodies and documents. Needed to confirm unchanged content and to check items that disappeared.", "thorough", hasThorough),
-    modeCard("Quick check", "Re-reads lists, dates, submission states and grades. Bodies are re-read only if Canvas shows a newer update time.", "quick", false));
+    modeCard("Baseline", "First collection of everything in scope. Core data becomes usable before background downloads and document processing finish.", "baseline", !hasThorough),
+    modeCard("Thorough refresh", "Full verification: re-reads lists, bodies and documents, including unchanged content and disappeared items. Background work must finish before the job is complete.", "thorough", false),
+    modeCard("Incremental sync", "Everyday update of lists, dates, submission states and grades. Fetches new or changed content; unchanged bodies retain their earlier verification time.", "quick", hasThorough));
   const signBanner = !signedIn ? h("div", { class: "banner warn" }, h("div", { class: "b-body" }, h("div", { class: "b-title" }, "Not signed in"),
     h("div", { class: "small" }, "Jobs can be queued now; they start after you sign in and resume automatically if a session expires.")),
     inst ? h("button", { class: "primary", onclick: () => openLogin(inst.id) }, "Sign in") : null) : null;
@@ -1103,27 +1153,57 @@ function modeCard(title, text, mode, primary) {
     h("button", { class: primary ? "primary" : "", onclick: () => startJob(mode) }, `Start ${title.toLowerCase()}`));
 }
 
+function jobPhases(j) {
+  if (j.kind !== "collect") return null;
+  const phases = j.phases || {};
+  const active = ["running", "queued", "cancel_requested"].includes(j.state);
+  const coreStatus = j.stats?.core_status;
+  return h("div", { class: "job-phases" },
+    coreStatus ? h("div", { class: "job-core-notice small" },
+      h("strong", null, coreStatus === "updated" ? "Core data updated" : "Core collection finished with gaps"),
+      " · You can use your workspace now. Background work has its own status below. ",
+      h("a", { href: "#/overall" }, "Open workspace")) : null,
+    [["core", "Core metadata"], ["downloads", "Attachment downloads"], ["processing", "Document processing"],
+      ["verification", "Supplemental verification"]].map(([key, label]) => {
+      const counts = phases[key] || {};
+      const total = counts.total || 0;
+      const done = counts.done || 0;
+      const status = [
+        `${done} done`,
+        counts.running ? `${counts.running} running` : null,
+        counts.pending ? `${counts.pending} pending` : null,
+        counts.failed ? `${counts.failed} failed` : null,
+        counts.blocked ? `${counts.blocked} blocked` : null,
+        counts.skipped ? `${counts.skipped} skipped` : null,
+      ].filter(Boolean).join(" · ");
+      return h("div", { class: "job-phase", "data-phase": key },
+        h("div", { class: "spread small" }, h("strong", null, label),
+          h("span", { class: counts.failed || counts.blocked ? "warn-text" : "muted" },
+            total ? status : active ? "No tasks queued yet" : "No tasks queued")),
+        total ? h("div", { class: "progress", role: "meter", "aria-label": `${label}: successful tasks`,
+          "aria-valuenow": done, "aria-valuemin": 0, "aria-valuemax": total,
+          "aria-valuetext": `${done} of ${total} discovered tasks successful` },
+          h("span", { style: `width:${Math.min(100, done / total * 100)}%` })) : null);
+    }),
+    active ? h("div", { class: "tiny muted" }, "Counts reflect tasks discovered so far; more may be added. A finished phase does not mean all content is collected.") : null);
+}
+
 function jobLi(j) {
-  const t = j.tasks || {};
-  const total = Object.values(t).reduce((a, b) => a + b, 0);
-  const done = (t.done || 0) + (t.failed || 0) + (t.blocked || 0) + (t.skipped || 0);
-  const pct = total ? Math.round((done / total) * 100) : 0;
   const act = (a) => async () => { await guard(() => api(A(`/jobs/${j.id}/${a}`), { method: "POST" })); route(); };
-  return h("li", null, h("div", { class: "spread" },
-    h("div", { class: "row" }, h("span", { class: "strong" }, `Job ${j.id}`), h("span", { class: "muted" }, { baseline: "Baseline", thorough: "Thorough refresh", quick: "Quick check", import: "Import" }[j.mode] || j.mode),
+  return h("li", { class: "collection-job", "data-job-id": j.id }, h("div", { class: "spread" },
+    h("div", { class: "row" }, h("span", { class: "strong" }, `Job ${j.id}`), h("span", { class: "muted" }, { baseline: "Baseline", thorough: "Thorough refresh", quick: "Incremental sync", import: "Import" }[j.mode] || j.mode),
       pill(JOB_CLASS[j.state] || "muted", JOB_LABEL[j.state] || j.state)),
     h("div", { class: "row" },
       ["running", "queued"].includes(j.state) ? h("button", { class: "sm", onclick: act("pause") }, "Pause") : null,
-      j.resumable ? h("button", { class: "sm primary", onclick: act("resume") }, "Resume") : null,
+      j.resumable ? h("button", { class: "sm primary", onclick: act("resume") }, j.state === "completed_with_gaps" ? "Retry failed tasks" : "Resume") : null,
       j.cancellable ? h("button", { class: "sm danger", onclick: act("cancel") }, "Cancel") : null)),
     h("div", { class: "small", style: "margin-top:4px" }, j.message || ""),
-    total && j.kind === "collect" ? h("div", { style: "margin-top:6px" }, h("div", { class: "progress" }, h("span", { style: `width:${pct}%` })),
-      h("div", { class: "li-meta" }, h("span", null, `${t.done || 0} done`), t.pending ? h("span", null, `${t.pending} pending`) : null,
-        t.failed ? h("span", null, `${t.failed} failed`) : null, t.blocked ? h("span", null, `${t.blocked} blocked`) : null,
-        j.stats && j.stats.current_task && j.state === "running" ? h("span", { class: "mono" }, j.stats.current_task) : null,
-        j.stats && j.stats.view_completion_skipped ? h("span", null, `${j.stats.view_completion_skipped} view-to-complete item(s) not opened`) : null)) : null,
-    h("div", { class: "li-meta" }, h("span", null, "created " + fmtDate(j.created_at)), j.finished_at ? h("span", null, "finished " + ago(j.finished_at)) : null,
-      j.stats && j.stats.events ? h("span", null, `${j.stats.events} change events`) : null, j.error ? h("span", { class: "muted" }, j.error) : null));
+    jobPhases(j),
+    h("div", { class: "li-meta" },
+      j.stats?.current_task && j.state === "running" ? h("span", { class: "mono job-current-task" }, j.stats.current_task) : null,
+      j.stats?.view_completion_skipped ? h("span", null, `${j.stats.view_completion_skipped} view-to-complete item(s) not opened`) : null,
+      h("span", null, "created " + fmtDate(j.created_at)), j.finished_at ? h("span", null, "finished " + ago(j.finished_at)) : null,
+      j.stats?.events ? h("span", null, `${j.stats.events} change events`) : null, j.error ? h("span", { class: "muted" }, j.error) : null));
 }
 
 function scopeEditor(scope, courses) {
@@ -1150,6 +1230,9 @@ function scopeEditor(scope, courses) {
         h("label", { class: "field" }, h("span", null, "Discussion replies"), h("select", { onchange: (e) => { s.discussion_replies = e.target.value; } },
           [["staff_only", "Staff replies only"], ["counts_only", "Counts only"]].map(([v, l]) => h("option", { value: v, selected: v === s.discussion_replies ? true : null }, l))))),
       h("label", { class: "check" }, h("input", { type: "checkbox", checked: s.download_files ? true : null, onchange: (e) => { s.download_files = e.target.checked; } }), "Download files and extract their text"),
+      h("label", { class: "check", style: "display:flex;margin-top:10px" }, h("input", { type: "checkbox", checked: s.experimental_network_concurrency ? true : null,
+        onchange: (e) => { s.experimental_network_concurrency = e.target.checked; } }), "Concurrent Canvas requests (Experimental)"),
+      h("p", { class: "tiny muted" }, "Off by default. Allows up to two Canvas API requests at once, with shared rate limiting. Attachment downloads and document processing already run in bounded background queues."),
       h("label", { class: "check" }, viewC, "Allow opening view-to-complete module items", h("span", { class: "muted small" }, " (off by default)")),
       h("div", { class: "row" }, h("button", { class: "primary", onclick: async () => { const r = await guard(() => api(A("/scope"), { method: "PUT", body: s })); if (r) { toast("Scope saved"); await loadIdentities(); } } }, "Save scope"))));
 }
@@ -1325,13 +1408,14 @@ VIEWS.assistant = async (main, parts, params) => {
   if (onSettings || !cfg.configured) main.classList.remove("fill");       // only the chat itself fills the window
   main.classList.add("wide");          // both tabs span the window, so the heading, tabs and Focus never move
   const head = pageHead("Assistant", "Ask about your courses. Answers come from your Canvas Hub data; with permission it can check Canvas for updates and keep your notes.");
+  head.querySelector("h1").prepend(icon("sparkles"));
   // Focus mode: the window holds just the chat list, the chat, these tabs and the composer (remembered in this browser).
   const focusBtn = h("button", { class: "sm ghost focus-toggle", title: "Show only the chat (Esc to leave)",
     onclick: () => setChatFocus(!document.body.classList.contains("chat-focus")) });
   const tabs = h("div", { class: "tabs" },
-    h("button", { class: onSettings ? "" : "active", onclick: () => { location.hash = "#/assistant"; } }, "Chat"),
+    h("button", { class: onSettings ? "" : "active", onclick: () => { location.hash = "#/assistant"; } }, icon("message"), "Chat"),
     h("button", { class: onSettings ? "active" : "", onclick: () => { location.hash = "#/assistant/settings"; } },
-      "Settings", cfg.profiles.length ? h("span", { class: "tab-count" }, String(cfg.profiles.length)) : null),
+      icon("settings"), "Settings", cfg.profiles.length ? h("span", { class: "tab-count" }, String(cfg.profiles.length)) : null),
     h("span", { class: "grow" }), focusBtn);
   setChatFocus(store.get("chatFocus") === "1", [focusBtn]);
   if (onSettings) return assistantSettingsView(main, head, tabs, cfg, params);
@@ -1353,7 +1437,7 @@ VIEWS.assistant = async (main, parts, params) => {
   const status = h("div", { class: "chat-status" });
   const scroller = h("div", { class: "chat-scroll" });
   const input = h("textarea", { rows: 2, placeholder: "Ask about deadlines, announcements, materials, grades…  (Enter to send, Shift+Enter for a new line)" });
-  const sendBtn = h("button", { class: "primary" }, "Send");
+  const sendBtn = h("button", { class: "primary" }, icon("send"), "Send");
   const stopBtn = h("button", { class: "danger", hidden: true }, "Stop");
   let current = convId; let lastSeq = 0; let all = []; let stick = true; let wasBusy = false;
   showConvs(convs);
@@ -1436,6 +1520,7 @@ VIEWS.assistant = async (main, parts, params) => {
       reasoning: reasoningSel.hidden ? "" : reasoningSel.value, model: modelSel.hidden ? "" : modelSel.value } }));
     if (!r) { sendBtn.disabled = false; return; }
     input.value = "";
+    scroller.querySelector(".study-context")?.remove();
     const emptyEl = document.getElementById("chat-empty");
     if (emptyEl) emptyEl.remove();
     if (current !== r.conversation_id) { current = r.conversation_id; history.replaceState(null, "", `#/assistant/${current}`); reloadConvs(); }
@@ -1450,7 +1535,7 @@ VIEWS.assistant = async (main, parts, params) => {
   input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } });
 
   const suggestions = h("div", { class: "chips suggest" }, ["What's due in the next 7 days?", "Plan my study time this week",
-    "Anything new since yesterday?", "Check Canvas for new announcements", "Show my scores"].map((s) => h("button", { class: "chip", onclick: () => send(s) }, s)));
+    "Anything new since yesterday?", "Check Canvas for new announcements", "Show my scores"].map((s, i) => h("button", { class: "chip " + ["prompt-green", "prompt-blue", "prompt-pink", "prompt-orange", "prompt-purple"][i], onclick: () => send(s) }, icon(["calendar", "planner", "message", "megaphone", "chart"][i]), s)));
   // Setup and reasoning are chosen right here for each message. The reasoning
   // level is remembered per setup in this browser only; it is not a saved setting.
   const usable = cfg.profiles.filter((x) => x.configured);
@@ -1498,12 +1583,15 @@ VIEWS.assistant = async (main, parts, params) => {
   reasoningSel.addEventListener("change", () => store.set(`reasoning.${setupSel.value}`, reasoningSel.value));
   const perms = cfg.permissions;
   const footer = h("div", { class: "chat-foot tiny muted" },
+    icon("bulb"),
     h("span", null, `Can ${["read your data", perms.notes ? "edit your notes" : null, perms.collect ? "check Canvas" : null, perms.deadlines ? "manage deadlines" : null, perms.settings ? "change scope" : null].filter(Boolean).join(", ")}. Questions and the data it reads go to the chosen provider.`));
   scroller.append(log, status);
-  if (!current) scroller.append(h("div", { class: "chat-empty", id: "chat-empty" }, h("div", { class: "e-title" }, "What would you like to know?"), suggestions));
+  if (!current) scroller.append(h("div", { class: "chat-empty", id: "chat-empty" }, icon("sparkles", "empty-sparkles"), h("div", { class: "e-title" }, "What would you like to know?"), suggestions));
   const chat = h("div", { class: "chat" }, scroller,
     h("div", { class: "composer" }, input,
-      h("div", { class: "composer-bar" }, setupSel, modelSel, reasoningSel, h("span", { class: "grow" }), stopBtn, sendBtn)), footer);
+      h("div", { class: "composer-bar" }, h("span", { class: "select-icon-wrap" }, icon("cube"), setupSel),
+        h("span", { class: "select-icon-wrap" }, icon("brain"), modelSel),
+        h("span", { class: "select-icon-wrap" }, icon("sliders"), reasoningSel), h("span", { class: "grow" }), stopBtn, sendBtn)), footer);
   const layout = h("div", { class: "assistant-layout" }, sideList, chat);
   main.classList.add("fill");
   mount(main, head, tabs, layout);
@@ -1837,9 +1925,28 @@ VIEWS.requests = async (main) => {
 
 // ---------- assistant components (components.js) ----------
 const C = makeComponents({ h, mount, api, A, toast, guard, fmtDate, until, ago, pill, submissionPill, TYPE_LABEL, renderTimetable,
-  fieldValue, store, route: () => route() });
+  fieldValue, store, studyAction, linkedStudy, manageWidget: cid=>W.manageWidget(cid), route: () => route() });
 const componentView = (d, ctx, key) => C.componentView(d, ctx, key);
 VIEWS.trackers = (main) => C.trackersView(main, pageHead, empty);
+
+const contextualAgent = makeContextAgent({h,mount,api,accountId:()=>S.accountId,renderMessages,guard,toast,onUpdated:()=>{window.dispatchEvent(new Event("workspace-updated"));renderWorkspaceNavigation();}});
+const W = makeWorkspace({ h,mount,api,A,fmtDate,ago,componentView,
+  setActive:async data=>{const r=await api(A("/workspace"),{method:"PUT",body:data});renderWorkspaceNavigation();return r;},
+  openAgent:(scope,panel)=>contextualAgent.open(scope,panel),
+  startAction:(scope,action,panel)=>contextualAgent.start(scope,action,panel),
+  approveSpec:async c=>{
+    const diff = C.diffPair(JSON.stringify(c.spec,null,2),JSON.stringify(c.pending_spec.spec,null,2));
+    const dialog=h("dialog",{class:"proposal-dialog"},h("h2",null,"Review study-tool changes"),diff,
+      h("div",{class:"row"},h("button",{class:"primary",onclick:async()=>{const result=await guard(()=>api(A(`/components/${c.id}/approve`),{method:"POST",body:{expected_version:c.version}}));if(result){dialog.close();dialog.remove();route();}}},"Approve changes"),
+        h("button",{onclick:()=>{dialog.close();dialog.remove();}},"Cancel")));
+    document.body.append(dialog);dialog.showModal();
+  },
+  followSource:async(c,target)=>{if(await guard(()=>api(A(`/components/${c.id}/source-override`),{method:"POST",body:{target,follow_source:true}})))route();},
+  reparse:c=>{if(c.item_id)location.hash=`#/item/${c.item_id}?agent=breakdown`;else if(c.course_id)location.hash=`#/course/${c.course_id}?agent=grading`;}
+});
+VIEWS.overview = main=>W.overallView(main);
+VIEWS.overall = VIEWS.overview;
+W.installNavigation();
 
 // ---------- boot ----------
 async function boot() {

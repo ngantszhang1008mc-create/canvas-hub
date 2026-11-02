@@ -84,6 +84,39 @@ To pass server options through the Windows launcher, such as a different port:
 .\scripts\start-canvas-hub.cmd --port 8740
 ```
 
+### Linux installation
+
+Linux is supported from a terminal. Install Git and [uv](https://docs.astral.sh/uv/getting-started/installation/)
+first; Python 3.11+ is required, and the commands below let uv select/download Python 3.13.
+Use a graphical desktop session for the Canvas sign-in window (SSO/MFA needs that window).
+The macOS `.command` launcher and Windows `.cmd` launcher are not Linux launchers.
+
+```bash
+git clone https://github.com/ngantszhang1008mc-create/canvas-hub.git
+cd canvas-hub
+uv sync --locked --python 3.13
+uv run playwright install --with-deps chromium
+uv run canvas-hub serve
+```
+
+On a [Playwright-supported Linux distribution](https://playwright.dev/python/docs/intro#system-requirements),
+`--with-deps` installs Chromium and its system libraries; the system-package step may ask for sudo.
+Run Canvas Hub itself as your normal user. For an existing installation, preserve local changes
+and back up its data before updating; do not clone over the existing directory.
+
+The server opens your browser at `http://127.0.0.1:8730/?token=…`; if it does not,
+open the full private URL printed in the terminal. Keep that terminal running; Ctrl-C stops the app.
+If `uv` is not found, reopen the terminal after installation. Missing Chromium/libraries:
+repeat the Playwright install command above. Port already in use: use
+`uv run canvas-hub serve --port 8740`. A headless SSH session cannot show the interactive
+sign-in window; use a graphical session. `--no-open` only suppresses opening the app UI.
+
+Optional Codex analysis requires an installed Codex CLI (0.163.0 or newer), available
+as `codex` on PATH (or configured with `CANVAS_HUB_CODEX`), and its own `codex login`.
+Choose the Codex setup in Assistant settings; no second API key is needed. The regular
+Canvas collection features do not require Codex or an AI provider. Linux tests use synthetic
+Canvas pages and mock Codex; they do not verify your institution's login or a paid account.
+
 ### Try it without a Canvas account
 
 ```bash
@@ -91,6 +124,17 @@ uv run canvas-hub fake-canvas --port 8765    # synthetic data only
 ```
 
 In another terminal, run `uv run canvas-hub --home /tmp/canvas-hub-demo serve` on macOS, or `uv run canvas-hub --home "$env:TEMP\canvas-hub-demo" serve` in Windows PowerShell. Paste `http://127.0.0.1:8765/`, and sign in with the test credentials the fake server prints.
+
+## Appearance
+
+Use **Light / Dark** in the top bar on any page. **Dark** keeps the original dark appearance;
+**Light** applies the white-and-blue style across the app. Dark is the default. The choice is
+remembered in this browser and shared between its tabs. Switching does not clear a chat draft
+or stop an assistant response.
+
+## Your Overall workbench
+
+Overall holds directly interactive widgets: deadlines/tasks and optional Schedule, saved checklists, course score calculators and other useful tools. Use **> → Manage widgets** to pin, hide, reorder or set an explicit date/event/active-work condition. Ticks and sliders edit the same saved component you see in course/chat views, with undo. The Agent can propose placements for your review; opening Overall never runs a paid Agent request. See [widget behavior and synthetic preview](docs/OVERALL_WIDGETS.md).
 
 ## Organize deadlines
 
@@ -104,6 +148,12 @@ to rename, copy or delete a tab. These views are saved per Canvas account and sh
 
 The in-app assistant can manage these tabs, filters and archives too. **Assistant → Settings → The assistant may →
 Manage deadline tabs, filters and archives** is on by default; switch it off to disable assistant changes.
+
+## Academic workspace
+
+Overall brings together upcoming work across courses and a saved Continue action. Assignment and course workspaces keep checklists beside requirements and source material, with an optional contextual Agent pane and a compact `>` action launcher. Checklist progress, local whole-assignment completion and Canvas submission state stay separate. Grade planning and optional hours tools remain secondary.
+
+Declared Canvas field bindings refresh trackers deterministically after collection, retaining user state and explicit overrides. Interpreted text or attachment changes flag rules for review; Agent reparsing is explicit. Definition/grading replacements are proposed for approval. Contextual actions disclose the provider/model and source scope before first use, and each assignment has its own persistent conversation. See [the implementation note](docs/WORKSPACE_REDESIGN.md) for the source schema, migration behavior and optional follow-up work.
 
 ## Assistant and other agents
 
@@ -141,7 +191,7 @@ Manage deadline tabs, filters and archives** is on by default; switch it off to 
 - **Reminders:** the ⏰ button on a deadline or to-do reminds you inside the app (and optionally with a desktop notification) while it is open.
 - **More views:** a term timeline of modules and exams, and a workload heatmap. Anything with dates can be exported as `.ics`; any component can be saved as an HTML snapshot or printed to PDF.
 - **Grading rules and formulas:** Canvas usually reports 0 for every group weight. Each course page has a **Grading rules** card for the syllabus weights and the pass mark, and the assistant can also save rules Canvas lacks (minimum hours, all-or-nothing lines, a formula such as `if(hours >= 10, 20 * min(1, hours / 20), 0)`). Score models and projections use them; they stay on this computer.
-- **All courses at a glance:** the Overview shows every course on one scale: grade so far, work done, what is lost, and what is due next.
+- **All courses at a glance:** the optional course dashboard shows every course on one scale: grade so far, work done, what is lost, and what is due next.
 - **Custom blocks (advanced, off by default):** when no built-in view fits, the assistant can write its own HTML. It runs only when you press **Run**, in an isolated frame with no network access.
 - **Text from scans and photos (optional):** with [Tesseract](https://tesseract-ocr.github.io/) and [Poppler](https://poppler.freedesktop.org/) installed, Canvas Hub can read photographed forms and scanned PDFs. Install `tesseract poppler` with Homebrew on macOS, or the Windows builds and add their program folders to `PATH` on Windows. Each document shows a confidence score, and low-confidence text is flagged.
 - **Planner page:** add your class times, see your week with deadlines and to-dos, get suggested study blocks, and export to Apple Calendar (`.ics`). It's a local plan only.

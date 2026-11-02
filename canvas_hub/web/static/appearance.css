@@ -1,0 +1,53 @@
+/* Original Dark palette, also available when the OS is in light mode.
+   styles.css is unchanged; these are its existing dark values. */
+:root[data-theme="dark"] {
+    --bg: #15130f;
+    --paper: #1c1915;
+    --surface: #1c1915;
+    --surface-2: #26221c;
+    --rule: #332e26;
+    --border: #332e26;
+    --border-strong: #4a4337;
+    --ink: #efe9dc;
+    --text: #efe9dc;
+    --text-2: #c2b9a7;
+    --text-3: #8f8676;
+    --accent: #a9b6f2;
+    --accent-2: #c7d0fa;
+    --accent-soft: #252a42;
+    --mark: #ef8a6f;
+    --ok: #9fcf8c;
+    --ok-soft: #1f2b1c;
+    --warn: #e6b65c;
+    --warn-soft: #33281a;
+    --bad: #f0907f;
+    --bad-soft: #3a1f1a;
+    --info: #a9b6f2;
+    --info-soft: #252a42;
+    --muted-soft: #2a261f;
+    --focus: #a9b6f2;
+    --shadow: none;
+    --s0: #9fcf8c; --s1: #a9b6f2; --s2: #f0907f; --s3: #6b6255; --s4: #e6b65c; --s5: #c9a6e8;
+    color-scheme: dark;
+}
+/* Decorative additions stay out of the original appearance and layout. */
+.ui-icon { display: none; }
+.select-icon-wrap { display: contents; }
+.theme-switcher {
+  display: inline-flex; align-items: center; gap: 2px; padding: 2px;
+  border: 1px solid var(--rule); border-radius: 999px; background: var(--surface-2); flex: none;
+}
+.theme-switcher button {
+  display: inline-flex; align-items: center; gap: 5px; border: 0; border-radius: 999px;
+  padding: 3px 8px; min-height: 24px; margin: 0; background: transparent;
+  color: var(--text-2); box-shadow: none; font: 550 11.5px/1.4 var(--sans);
+}
+.theme-switcher button[aria-pressed="true"] {
+  background: var(--paper); color: var(--accent); box-shadow: 0 1px 5px rgb(0 0 0 / 7%);
+}
+.theme-switcher button:hover { background: var(--paper); }
+.theme-switcher .ui-icon { display: block; width: 15px; height: 15px; flex: none; }
+@media (max-width: 640px) {
+  .theme-switcher .theme-name { display: none; }
+  .theme-switcher button { padding-inline: 5px; }
+}

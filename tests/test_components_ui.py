@@ -189,7 +189,7 @@ def test_a_page_that_loads_late_does_not_replace_the_next_one(hub, account):
         b = p.chromium.launch()
         pg = b.new_page()
         pg.goto(f"{base}/?token={tok}")
-        expect(pg.locator("h1")).to_have_text("Overview")    # the app has loaded the account
+        expect(pg.locator("h1")).to_have_text("Overall")    # the app has loaded the account
         with pg.expect_request(lambda r: "/deadlines?" in r.url):
             pg.goto(f"{base}/#/deadlines")
         pg.goto(f"{base}/#/notes")

@@ -29,7 +29,7 @@ class AnnotationService:
         return dict(row)
 
     def create(self, account_id: int, *, kind: str, body: str = "", title: str | None = None, item_id=None,
-               course_id: str | None = None, local_due: str | None = None, task_state: str | None = None) -> dict:
+               course_id: str | None = None, local_due: str | None = None, task_state: str | None = None, task_role: str = "task") -> dict:
         if kind not in _KINDS:
             raise InvalidInput("kind must be 'note' or 'task'")
         if local_due and not parse_iso(local_due):
@@ -37,6 +37,12 @@ class AnnotationService:
         if len(body or "") > 100_000 or len(title or "") > 500:
             raise InvalidInput("annotation too long")
         item = self._check_item(account_id, item_id)
+        if task_role not in ("task", "substep", "completion"):
+            raise InvalidInput("task_role must be task, substep or completion")
+        if kind != "task" and task_role != "task":
+            raise InvalidInput("task_role applies only to tasks")
+        if task_role == "completion" and (not item or item["item_type"] not in ("assignment", "quiz", "calendar_event") or local_due):
+            raise InvalidInput("completion markers require a deadline item and no local due date")
         state = (task_state or "open") if kind == "task" else None
         if state and state not in _TASK_STATES:
             raise InvalidInput("task_state must be open, in_progress, blocked or done")
@@ -44,10 +50,10 @@ class AnnotationService:
         with self.db.tx() as c:
             aid = c.execute(
                 """INSERT INTO annotations(account_id, item_id, item_type, item_source_key, course_canvas_id, kind, title,
-                   body, task_state, local_due, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   body, task_state, local_due, created_at, updated_at, task_role) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (account_id, item["id"] if item else None, item["item_type"] if item else None,
                  item["source_key"] if item else None, (item["course_canvas_id"] if item else None) or course_id,
-                 kind, title, body or "", state, local_due, now, now),
+                 kind, title, body or "", state, local_due, now, now, task_role),
             ).lastrowid
         return self.get(account_id, aid)
 
@@ -68,6 +74,8 @@ class AnnotationService:
                 raise InvalidInput("task_state applies to tasks and must be open, in_progress, blocked or done")
         if changes.get("local_due") and not parse_iso(changes["local_due"]):
             raise InvalidInput("local_due must be an ISO-8601 timestamp with an offset")
+        if cur["task_role"] == "completion" and changes.get("local_due"):
+            raise InvalidInput("completion markers cannot have a local due date")
         if not changes:
             return cur
         sets = ", ".join(f"{k}=?" for k in changes)

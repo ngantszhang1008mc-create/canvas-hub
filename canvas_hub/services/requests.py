@@ -59,14 +59,14 @@ class RequestService:
         return r
 
     def create(self, account_id: int, *, url: str, title: str | None = None, note: str | None = None,
-               course_id: str | None = None, requested_by: str = "user") -> dict:
+               course_id: str | None = None, requested_by: str = "user", external_source_id: int | None = None) -> dict:
         u = _check_url(url)
         if requested_by not in ("user", "assistant"):
             raise InvalidInput("requested_by must be user or assistant")
         if len(note or "") > 2000 or len(title or "") > 300:
             raise InvalidInput("title or note too long")
-        dup = self.db.one("SELECT id FROM view_requests WHERE account_id=? AND url=? AND status IN ('open','claimed')",
-                          (account_id, u))
+        dup = self.db.one("SELECT id FROM view_requests WHERE account_id=? AND url=? AND external_source_id IS ? AND status IN ('open','claimed')",
+                          (account_id, u, external_source_id))
         if dup:
             return self.view(account_id, dup["id"])
         if self.db.one("SELECT COUNT(*) n FROM view_requests WHERE account_id=? AND status IN ('open','claimed')",
@@ -75,9 +75,9 @@ class RequestService:
         now = now_iso()
         with self.db.tx() as c:
             rid = c.execute(
-                """INSERT INTO view_requests(account_id, url, title, note, course_canvas_id, requested_by, created_at, updated_at)
-                   VALUES (?,?,?,?,?,?,?,?)""",
-                (account_id, u, (title or "").strip() or None, (note or "").strip() or None, course_id, requested_by, now, now)).lastrowid
+                """INSERT INTO view_requests(account_id, url, title, note, course_canvas_id, requested_by, created_at, updated_at, external_source_id)
+                   VALUES (?,?,?,?,?,?,?,?,?)""",
+                (account_id, u, (title or "").strip() or None, (note or "").strip() or None, course_id, requested_by, now, now, external_source_id)).lastrowid
         return self.view(account_id, rid)
 
     def list(self, account_id: int, status: str | None = None) -> list[dict]:
@@ -93,11 +93,12 @@ class RequestService:
         return [self.view(account_id, r["id"]) for r in self.db.query(sql + " ORDER BY id DESC LIMIT 200", params)]
 
     def cancel(self, account_id: int, request_id: int) -> dict:
-        r = self._get(account_id, request_id)
-        if r["status"] in ("done", "declined", "cancelled"):
-            return r
-        self._set(r["id"], status="cancelled")
-        return self.view(account_id, request_id)
+        with self.db.tx():
+            r = self._get(account_id, request_id)
+            if r["status"] in ("done", "declined", "cancelled"):
+                return r
+            self._set(r["id"], status="cancelled")
+            return self.view(account_id, request_id)
 
     def _set(self, rid: int, **fields) -> None:
         fields["updated_at"] = now_iso()
@@ -107,27 +108,35 @@ class RequestService:
 
     # ---- agent side -------------------------------------------------------------------
     def claim(self, account_id: int, request_id: int, agent_name: str) -> dict:
-        agent = _check_agent(agent_name)
-        r = self._get(account_id, request_id)
-        stale = False
-        if r["status"] == "claimed" and r["claimed_by"] != agent:
-            claimed = parse_iso(r["claimed_at"])
-            stale = claimed is not None and datetime.now(timezone.utc) - claimed > CLAIM_TIMEOUT
-            if not stale:
-                raise InvalidInput(f"already claimed by {r['claimed_by']}", code="request_claimed")
-        if r["status"] not in ("open", "claimed"):
-            raise InvalidInput(f"request is {r['status']}", code="request_closed")
-        self._set(r["id"], status="claimed", claimed_by=agent, claimed_at=now_iso())
-        return self.view(account_id, request_id)
+        with self.db.tx():
+            agent = _check_agent(agent_name)
+            if agent == 'Canvas Hub built-in Assistant':
+                raise InvalidInput('Reserved built-in agent identity')
+            r = self._get(account_id, request_id)
+            if r['claimed_by'] == 'Canvas Hub built-in Assistant':
+                raise InvalidInput('Cancel built-in analysis before using MCP', code='request_claimed')
+            stale = False
+            if r["status"] == "claimed" and r["claimed_by"] != agent:
+                claimed = parse_iso(r["claimed_at"])
+                stale = claimed is not None and datetime.now(timezone.utc) - claimed > CLAIM_TIMEOUT
+                if not stale:
+                    raise InvalidInput(f"already claimed by {r['claimed_by']}", code="request_claimed")
+            if r["status"] not in ("open", "claimed"):
+                raise InvalidInput(f"request is {r['status']}", code="request_closed")
+            self._set(r["id"], status="claimed", claimed_by=agent, claimed_at=now_iso())
+            return self.view(account_id, request_id)
 
     def decline(self, account_id: int, request_id: int, agent_name: str, reason: str) -> dict:
-        agent = _check_agent(agent_name)
-        r = self._get(account_id, request_id)
-        if r["status"] not in ("open", "claimed"):
-            raise InvalidInput(f"request is {r['status']}", code="request_closed")
-        self._set(r["id"], status="declined", claimed_by=agent, result_note=(reason or "")[:2000] or "declined",
-                  completed_at=now_iso())
-        return self.view(account_id, request_id)
+        with self.db.tx():
+            agent = _check_agent(agent_name)
+            r = self._get(account_id, request_id)
+            if agent == 'Canvas Hub built-in Assistant' or r['claimed_by'] == 'Canvas Hub built-in Assistant':
+                raise InvalidInput('Use user cancellation for built-in analysis', code='request_claimed')
+            if r["status"] not in ("open", "claimed"):
+                raise InvalidInput(f"request is {r['status']}", code="request_closed")
+            self._set(r["id"], status="declined", claimed_by=agent, result_note=(reason or "")[:2000] or "declined",
+                      completed_at=now_iso())
+            return self.view(account_id, request_id)
 
     def submit(self, account_id: int, request_id: int, agent_name: str, *, content: str, title: str | None = None,
                source_url: str | None = None, read_at: str | None = None) -> dict:
@@ -139,6 +148,8 @@ class RequestService:
             raise InvalidInput(f"request is {r['status']}", code="request_closed")
         if r["status"] == "claimed" and r["claimed_by"] != agent:
             raise InvalidInput(f"claimed by {r['claimed_by']}", code="request_claimed")
+        if r.get("external_source_id"):
+            raise InvalidInput("Use submit_source_analysis for classified source requests")
         text = content or ""
         if not text.strip():
             raise InvalidInput("content is empty")

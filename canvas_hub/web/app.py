@@ -43,6 +43,9 @@ def mcp_command() -> list[str]:
 
 def create_app(api: HubAPI, *, token: str, port: int) -> FastAPI:
     app = FastAPI(title="Canvas Hub", docs_url=None, redoc_url=None, openapi_url=None)
+    from ..services.source_analysis import SourceAnalysis
+    source_analysis = SourceAnalysis(api)
+    app.state.source_analysis = source_analysis
     hosts = allowed_hosts(port)
     own_origins = {f"http://{h}" for h in hosts}
 
@@ -231,6 +234,12 @@ def create_app(api: HubAPI, *, token: str, port: int) -> FastAPI:
             raise InvalidInput("give archived: true or false")
         return api.archive_deadline(aid, iid, data["archived"])
 
+    @app.patch("/api/accounts/{aid}/deadlines/{iid}/local-completion")
+    def set_deadline_local_completion(aid: int, iid: int, data: dict):
+        if set(data) != {"completed"}:
+            raise InvalidInput("give completed: true or false")
+        return api.set_deadline_local_completion(aid, iid, data["completed"])
+
     @app.get("/api/accounts/{aid}/deadline-views")
     def deadline_views(aid: int):
         return api.deadline_views(aid)
@@ -375,6 +384,69 @@ def create_app(api: HubAPI, *, token: str, port: int) -> FastAPI:
     async def delete_data(aid: int, request: Request):
         b = await body(request)
         return api.delete_account_data(aid, b.get("confirm", ""))
+
+    # External adapter approval is user-only: no Agent tool enables or expands scope.
+    def external(aid):
+        api.hub.identity.get_account(aid)
+        return api.hub.external_sources
+
+    @app.get("/api/accounts/{aid}/external-sources")
+    def external_list(aid: int, course_id: str | None = None, item_id: int | None = None):
+        service = external(aid)
+        service.backfill(aid)
+        return {"sources": service.list(aid, course_id, item_id)}
+
+    @app.get("/api/accounts/{aid}/external-analysis/disclosure")
+    def batch_disclosure(aid: int, course_id: str | None = None, item_id: int | None = None):
+        return source_analysis.batch_disclosure(aid, course_id, item_id)
+
+    @app.get("/api/accounts/{aid}/external-analysis/current")
+    def batch_current(aid: int, course_id: str | None = None, item_id: int | None = None):
+        return source_analysis.batch_current(aid, course_id, item_id)
+
+    @app.get("/api/accounts/{aid}/external-analysis/{batch_token}")
+    def batch_view(aid: int, batch_token: str):
+        return source_analysis.batch_view(aid, batch_token)
+
+    @app.post("/api/accounts/{aid}/external-analysis/{batch_token}/start")
+    async def batch_start(aid: int, batch_token: str, request: Request):
+        b = await body(request)
+        return source_analysis.batch_start(aid, batch_token, consent=b.get('consent') is True)
+
+    @app.post("/api/accounts/{aid}/external-analysis/{batch_token}/cancel")
+    def batch_cancel(aid: int, batch_token: str):
+        return source_analysis.batch_cancel(aid, batch_token)
+
+    @app.get("/api/accounts/{aid}/external-sources/{sid}")
+    def external_get(aid: int, sid: int):
+        return external(aid).get(aid, sid)
+
+    @app.get("/api/accounts/{aid}/external-sources/{sid}/disclosure")
+    def external_disclosure(aid: int, sid: int):
+        return source_analysis.disclosure(aid, sid)
+
+    @app.post("/api/accounts/{aid}/external-sources/{sid}/analyze")
+    async def external_analyze(aid: int, sid: int, request: Request):
+        b = await body(request)
+        if b.get("executor") == "mcp":
+            return external(aid).analyze(aid, sid, reanalyze=b.get("reanalyze") is True)
+        if b.get("executor", "builtin") != "builtin":
+            raise InvalidInput("Unknown analysis executor")
+        return source_analysis.start(aid, sid, b.get("token"), consent=b.get("consent") is True,
+                                     reanalyze=b.get("reanalyze") is True)
+
+    @app.post("/api/accounts/{aid}/external-sources/{sid}/decision")
+    async def external_decision(aid: int, sid: int, request: Request):
+        b = await body(request)
+        if b.get("approve") is True and (not isinstance(b.get("revision"), int) or not isinstance(b.get("spec_hash"), str)):
+            raise InvalidInput("Approval needs the exact displayed revision and hash")
+        if b.get("revision") is None and b.get("approve") is not True:
+            return external(aid).decline(aid, sid)
+        return await run_in_threadpool(lambda: external(aid).decide(aid, sid, b.get("revision"), b.get("spec_hash"), approve=b.get("approve") is True))
+
+    @app.post("/api/accounts/{aid}/external-sources/{sid}/refresh")
+    def external_refresh(aid: int, sid: int):
+        return external(aid).refresh(aid, sid)
 
     # ---- planner & external-site requests --------------------------------------------
     @app.get("/api/accounts/{aid}/planner/week")
@@ -559,9 +631,58 @@ def create_app(api: HubAPI, *, token: str, port: int) -> FastAPI:
     def agents_seen():
         return api.connected_agents()
 
+    from .widgets import install_widget_routes
+    install_widget_routes(app, api, body)
+
+    @app.get("/api/accounts/{aid}/workspace")
+    def workspace_get(aid: int):
+        return api.workspace(aid)
+
+    @app.put("/api/accounts/{aid}/workspace")
+    async def workspace_set(aid: int, request: Request):
+        return api.set_workspace(aid, await body(request))
+
+    @app.post("/api/accounts/{aid}/workspace/conversation")
+    async def workspace_conversation(aid: int, request: Request):
+        b = await body(request)
+        api.get_account(aid)
+        return api.hub.workspace.conversation(aid, item_id=b.get("item_id"), course_id=b.get("course_id"))
+
+    @app.post("/api/accounts/{aid}/workspace/action/prepare")
+    async def workspace_prepare(aid: int, request: Request):
+        return api.hub.workspace.prepare(api, _assistant(), aid, await body(request))
+
+    @app.post("/api/accounts/{aid}/workspace/action/start")
+    async def workspace_start(aid: int, request: Request):
+        return api.hub.workspace.start(api, _assistant(), aid, await body(request))
+
+    @app.get("/api/accounts/{aid}/courses/{cid}/grading-proposal")
+    def grading_proposal_get(aid: int, cid: str):
+        return api.grading_proposal(aid, cid)
+
+    @app.post("/api/accounts/{aid}/courses/{cid}/grading-proposal/approve")
+    async def grading_proposal_approve(aid: int, cid: str, request: Request):
+        return api.accept_grading_proposal(aid, cid, (await body(request)).get("base_hash"))
+
+    @app.put("/api/accounts/{aid}/components/{cid}/sources")
+    async def component_sources(aid: int, cid: int, request: Request):
+        return api.configure_component_sources(aid, cid, await body(request))
+
+    @app.post("/api/accounts/{aid}/components/{cid}/source-override")
+    async def component_override(aid: int, cid: int, request: Request):
+        return api.override_component_source(aid, cid, await body(request))
+
+    @app.post("/api/accounts/{aid}/components/{cid}/approve")
+    async def component_approve(aid: int, cid: int, request: Request):
+        return api.approve_component_spec(aid, cid, await body(request))
+
+    @app.get("/api/accounts/{aid}/study-context")
+    def study_context(aid: int, course_id: str | None = None, item_id: int | None = None):
+        return api.study_context(aid, course_id=course_id, item_id=item_id)
+
     @app.get("/api/accounts/{aid}/components")
-    def components_list(aid: int, pinned: str | None = None):
-        return api.list_components(aid, pinned)
+    def components_list(aid: int, pinned: str | None = None, course_id: str | None = None, item_id: int | None = None):
+        return api.list_components(aid, pinned, course_id, item_id)
 
     @app.get("/api/accounts/{aid}/components/{cid}")
     def component_get(aid: int, cid: int):

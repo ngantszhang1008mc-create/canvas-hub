@@ -116,14 +116,34 @@ class Database:
             return
         c.execute("BEGIN IMMEDIATE")
         self._local.depth = 1
+        self._local.after_commit = []
+        callbacks = []
         try:
             yield c
             c.execute("COMMIT")
+            callbacks = self._local.after_commit
         except BaseException:
             c.execute("ROLLBACK")
             raise
         finally:
             self._local.depth = 0
+            self._local.after_commit = []
+        # Release the SQLite write lock before callbacks acquire service locks.
+        # A callback can start another transaction without replacing this queue.
+        for callback in callbacks:
+            callback()
+
+    def after_commit(self, callback) -> None:
+        """Run once after the outer transaction commits; discard on rollback.
+
+        Import hooks may be nested inside atomic adapter publication. Scheduling
+        them here preserves that publication while avoiding DB/service lock
+        inversion. Outside a transaction, preserve synchronous hook behavior.
+        """
+        if getattr(self._local, "depth", 0):
+            self._local.after_commit.append(callback)
+        else:
+            callback()
 
     def query(self, sql: str, params=()) -> list[sqlite3.Row]:
         return self.conn.execute(sql, params).fetchall()

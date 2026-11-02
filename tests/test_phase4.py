@@ -81,7 +81,10 @@ def test_local_grading_rules_apply_to_drafts(hub, account, fixture_pkg):
     text, err, _ = run_tool_display(ctx, "set_grading_rules", {"course_id": "4242", **rules}, {"read"})
     assert err                                                         # changing local data needs the notes permission
     text, err, _ = run_tool_display(ctx, "set_grading_rules", {"course_id": "4242", **rules}, {"read", "notes"})
-    assert not err and json.loads(text)["saved"]["groups"]["Assignments"]["weight"] == 40
+    proposal = json.loads(text)
+    assert not err and proposal["pending_approval"]
+    assert not hub.grading.get(aid, "4242")["groups"]
+    ctx.api.accept_grading_proposal(aid, "4242", proposal["proposal"]["base_hash"])
     lines = json.loads(run_tool_display(ctx, "course_score_lines", {"course_id": "4242"}, {"read"})[0])
     b = lines["buckets"][0]
     assert b["unit"] == "hours" and b["min_value"] == 5 and b["formula"].startswith("if(") and b["note"] == "syllabus p.2"

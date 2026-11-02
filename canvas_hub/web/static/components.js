@@ -162,9 +162,10 @@ footer{margin-top:24px;font-size:12px;color:#8b8170}</style></head><body><h1>${h
   const afterRender = () => requestAnimationFrame(tickCountdowns);
 
   // ---------- detail drawer ----------
-  let drawer = null;
+  let drawer = null, drawerRequest = 0;
   async function openDrawer(itemId) {
     if (!itemId) return;
+    const request = ++drawerRequest;
     if (!drawer) {
       drawer = h("aside", { class: "drawer", role: "dialog", "aria-modal": "false", "aria-label": "Item details", tabindex: "-1" });
       document.body.append(drawer);
@@ -172,8 +173,16 @@ footer{margin-top:24px;font-size:12px;color:#8b8170}</style></head><body><h1>${h
     }
     mount(drawer, h("div", { class: "muted small", style: "padding:20px" }, "Loading…"));
     drawer.classList.add("open");
-    let it;
-    try { it = await api(A(`/items/${itemId}`)); } catch (e) { mount(drawer, h("div", { style: "padding:20px" }, String(e.message || e))); return; }
+    let it, linked;
+    try {
+      it = await api(A(`/items/${itemId}`));
+      if (request !== drawerRequest) return;
+      linked = await env.linkedStudy({ item_id: it.id });
+    } catch (e) {
+      if (request === drawerRequest) mount(drawer, h("div", { style: "padding:20px" }, String(e.message || e)));
+      return;
+    }
+    if (request !== drawerRequest) return;
     const fields = it.fields.filter((f) => f.field !== "title");
     const body = fields.filter((f) => f.kind === "html" && f.value);
     const other = fields.filter((f) => !(f.kind === "html" && f.value));
@@ -188,12 +197,14 @@ footer{margin-top:24px;font-size:12px;color:#8b8170}</style></head><body><h1>${h
         h("button", { class: "sm ghost", onclick: (e) => copyText(md, e.target) }, "Copy fields"),
         h("span", { class: "muted" }, `first seen ${fmtDate(it.first_observed_at)} · last read ${ago(it.last_observed_at)}`)),
       h("div", { class: "drawer-body" },
+        ["assignment", "quiz", "calendar_event"].includes(it.item_type) ? env.studyAction({ item_id: it.id }) : null,
+        linked,
         body.map((f) => h("div", { class: "drawer-sec" }, h("div", { class: "drawer-k" }, f.field, h("span", { class: "tiny muted" }, ` · read ${ago(f.last_observed_at)}`)), fieldValue(f.field, f, it))),
         other.length ? h("dl", { class: "drawer-fields" }, other.map((f) => [h("dt", null, f.field), h("dd", null, fieldValue(f.field, f, it),
           h("div", { class: "tiny muted" }, `read ${ago(f.last_observed_at)}`))])) : null));
     drawer.focus();
   }
-  function closeDrawer() { if (drawer) drawer.classList.remove("open"); }
+  function closeDrawer() { drawerRequest += 1; if (drawer) drawer.classList.remove("open"); }
   const itemLink = (id, label) => id ? h("a", { href: `#/item/${id}`, class: "cmp-link", onclick: (e) => { if (e.metaKey || e.ctrlKey) return; e.preventDefault(); openDrawer(id); } }, label) : label;
 
   // ---------- deadlines / items / timetable / choices (export added) ----------
@@ -556,7 +567,20 @@ footer{margin-top:24px;font-size:12px;color:#8b8170}</style></head><body><h1>${h
     let userEdits = 0;                     // changes the user made (undo replies are not counted here)
     const el = h("div", { class: "saved-cmp" });
     const status = h("span", { class: "tiny muted save-state", "aria-live": "polite" });
-    const redraw = () => { mount(el, render(v, api_)); };
+    const redraw = () => {
+      const focused = document.activeElement;
+      const selector = 'input,select,textarea,button,summary,a[href]';
+      const controls = [...el.querySelectorAll(selector)];
+      const at = controls.indexOf(focused);
+      const key = n => n.getAttribute('aria-label') || (n.tagName + ':' + (n.closest('label')?.textContent || n.textContent));
+      const identity = at >= 0 ? key(focused) : null;
+      const selection = at >= 0 && typeof focused.selectionStart === 'number' ? [focused.selectionStart,focused.selectionEnd] : null;
+      mount(el, render(v, api_));
+      if (identity !== null) {
+        const next = [...el.querySelectorAll(selector)].find(n=>key(n)===identity);
+        if (next && !next.disabled) { next.focus({preventScroll:true}); if(selection)next.setSelectionRange(...selection); }
+      }
+    };
     const queue = (fn) => (saving = saving.then(fn, fn));
     // Edits made while a save was in flight are re-applied on top of the server's answer (which may hold
     // changes from elsewhere, e.g. a linked to-do finished meanwhile): per key, and per entry for maps.
@@ -625,7 +649,7 @@ footer{margin-top:24px;font-size:12px;color:#8b8170}</style></head><body><h1>${h
     // The chat holds the definition from when it was created, and a cached copy may be shown again after
     // edits elsewhere (Trackers, the assistant): load the latest, unless local changes are still unsaved.
     const reload = () => api(A(`/components/${v.id}`)).then((fresh) => {
-      if (edits === acked && !pending && fresh.version !== v.version) { v = fresh; seen = fresh.state; redraw(); }
+      if (edits === acked && !pending && fresh.version > v.version) { v = fresh; seen = fresh.state; redraw(); }
     }).catch(() => {});
     el.refresh = reload;
     redraw();
@@ -633,8 +657,9 @@ footer{margin-top:24px;font-size:12px;color:#8b8170}</style></head><body><h1>${h
     return el;
   }
   const savedTools = (v, ctl) => [ctl.status,
+    env.manageWidget ? h("button", {class:"sm ghost cmp-home-placement", title:"Place on Overall", "aria-label":`Place ${v.title} on Overall`, onclick:()=>guard(()=>env.manageWidget(v.id))}, "⌂") : null,
     h("button", { class: "sm ghost", title: "Undo the last change", disabled: v.can_undo ? null : true, onclick: () => ctl.undo() }, "↶ Undo"),
-    h("button", { class: "sm ghost", "aria-pressed": v.pinned ? "true" : "false", onclick: () => ctl.pin() }, v.pinned ? "★ Pinned" : "☆ Pin")];
+    h("button", { class: "sm ghost cmp-tracker-pin", title:"Pin to the Trackers page", "aria-pressed": v.pinned ? "true" : "false", onclick: () => ctl.pin() }, v.pinned ? "★ Trackers" : "☆ Trackers")];
 
   function scoreModelView(view) {
     return savedComponent(view, (v, ctl) => {
