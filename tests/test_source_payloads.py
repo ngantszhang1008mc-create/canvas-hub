@@ -15,6 +15,9 @@ from .test_workspace import workspace, prepare, start
 from .test_source_analysis import builtin, finish, start as start_analysis, RESULT
 from .test_external_sources import source, URL, SPEC, HTML
 from .test_connected_analysis import Connections
+from .test_allowance_gateway import gateway, setup as gateway_setup
+from canvas_hub.boundary import HubAPI
+from canvas_hub.services.source_analysis import SourceAnalysis
 
 
 def attachment(w, body):
@@ -206,3 +209,89 @@ def test_connected_classification_samples_only_reviewed_text_and_keeps_full_snap
     assert all(offer['content'][r['start_char']:r['end_char']] == r['text'] for r in payload['excerpts'])
     stored = json.loads(svc.db.one('SELECT evidence_json FROM external_reads WHERE source_id=?', (sid,))['evidence_json'])[0]
     assert stored['content'] == offer['content'] and stored['access_mode'] == 'connected_local_reviewed'
+
+
+def test_shared_attachment_is_sent_once_with_both_origins(workspace):
+    w = workspace
+    body = 'ONE_SHARED_POLICY: mandatory lab attendance.'
+    rid = attachment(w, body)
+    with w['hub'].db.tx() as c:
+        other = c.execute("INSERT INTO items(account_id,item_type,source_key,course_canvas_id,title,first_observed_at,last_observed_at) VALUES (?,'file','shared-policy',?,'Shared policy',?,?)",
+                          (w['aid'], w['course'], now_iso(), now_iso())).lastrowid
+        c.execute('INSERT INTO item_resources(item_id,resource_id,filename,revision,observed_at) VALUES (?,?,?,1,?)',
+                  (other, rid, 'rules.txt', now_iso()))
+        c.execute("INSERT INTO item_links(account_id,from_item_id,to_item_id,relation,first_observed_at,last_observed_at) VALUES (?,?,?,'attachment',?,?)",
+                  (w['aid'], w['iid'], other, now_iso(), now_iso()))
+        w['hub'].search.index_resource(c, w['aid'], other, rid, 'Shared policy', body)
+    context = prepare(w)['context']['request_context']
+    assert json.dumps(context).count('ONE_SHARED_POLICY') == 1
+    source = next(s for s in context['sources'] if s['resource_id'] == rid)
+    assert source['also_linked_from'] == [other]
+    assert {i['item_id'] for i in context['items']} == {w['iid'], other}
+
+
+def test_manifest_overflow_is_explicit_and_all_sources_remain_readable(workspace):
+    w = workspace
+    for i in range(23):
+        attachment(w, f'Synthetic document {i}. Each has a different complete rule.')
+    context = prepare(w)['context']['request_context']
+    assert len(context['sources']) == 20
+    assert 'more sources to catalog' in ' '.join(context['warnings'])
+    index = ContextSources(w['hub'].db)
+    all_sources, offset = [], 0
+    while offset is not None:
+        page = index.catalog(w['aid'], item_id=w['iid'], offset=offset)
+        all_sources += page['sources']
+        offset = page['next_offset']
+    assert len(all_sources) == 24
+    assert all(index.read(w['aid'], s['source_id'], version=s['version'])['coverage']['complete_read'] for s in all_sources)
+
+
+def test_gateway_receives_request_sources_once_and_keeps_normalized_usage(source, account, hub, gateway):
+    sources, sid, reads = source
+    api = HubAPI(hub)
+    assistant, _ = gateway_setup(api, gateway)
+    iid = hub.db.one("SELECT id FROM items WHERE item_type='assignment' AND canvas_id='7001'")['id']
+    body = 'GATEWAY_SOURCE_RULE: Include the complete appendix.'
+    attachment({'hub': hub, 'aid': account['id'], 'iid': iid}, body)
+    payload = {'action': 'breakdown', 'item_id': iid}
+    prepared = hub.workspace.prepare(api, assistant, account['id'], payload)
+    result = hub.workspace.start(api, assistant, account['id'], {
+        **payload, 'disclosure_fingerprint': prepared['disclosure']['fingerprint'], 'acknowledge': True})
+    assistant.wait(result['conversation_id'], 5)
+    status = assistant.get_conversation(account['id'], result['conversation_id'])
+    assert status['conversation']['run_state'] == 'idle', status
+    assert len(gateway.requests) == 1
+    assert json.dumps(gateway.requests[0]['body']).count('GATEWAY_SOURCE_RULE') == 1
+    assert 'GATEWAY_SOURCE_RULE' not in json.dumps(assistant._transcript(result['conversation_id']))
+    assert status['context']['total_usage']['input_tokens'] == 100
+    assert status['context']['total_usage']['cache_read_input_tokens'] == 10
+    # Classification still uses the same enrolled gateway, one private attempt,
+    # and the existing source/provider consent before sending any evidence.
+    service = SourceAnalysis(api)
+    gateway.action = lambda request: gateway.events(request, json.dumps(RESULT))
+    offer = service.disclosure(account['id'], sid)
+    assert offer['provider'] == 'allowance_gateway' and len(gateway.requests) == 1
+    service.start(account['id'], sid, offer['token'], consent=True)
+    finish(service)
+    assert len(gateway.requests) == 2 and reads == [URL]
+    assert sources.get(account['id'], sid)['request']['status'] == 'done'
+    model_payload = json.loads(gateway.requests[1]['body']['messages'][1]['content'])
+    assert model_payload['coverage']['complete_read']
+    assert len(list((hub.paths.runtime / 'gateway-attempts').glob('*.json'))) == 2
+
+
+def test_legacy_syllabus_field_is_fully_readable_beyond_the_old_prefix(workspace):
+    w = workspace
+    body = '<p>Introductory material.</p>' * 1200 + '<p>LEGACY_TAIL_RULE: The oral exam is mandatory.</p>'
+    # Simulate an older indexed item with a syllabus_body field stored as JSON,
+    # which was omitted by the old searchable-field definition.
+    with w['hub'].db.tx() as c:
+        c.execute("INSERT INTO item_fields(item_id,field,value_json,compare_hash,first_observed_at,last_observed_at,last_changed_at) VALUES (?,'syllabus_body',?,'fixture',?,?,?)",
+                  (w['iid'], json.dumps(body), now_iso(), now_iso(), now_iso()))
+    prepared = prepare(w)['context']['request_context']
+    src = next(s for s in prepared['sources'] if s['source_id'] == f"item:{w['iid']}")
+    assert not src['inline'] and src['total_chars'] > 6000
+    index = ContextSources(w['hub'].db)
+    ending = index.read(w['aid'], src['source_id'], version=src['version'], offset=src['total_chars']-100, limit=100)
+    assert 'LEGACY_TAIL_RULE' in ending['text'] and ending['next_offset'] is None

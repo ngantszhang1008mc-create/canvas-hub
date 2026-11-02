@@ -80,6 +80,7 @@ FIELD_SPECS: dict[str, dict[str, FieldSpec]] = {
         "title": FieldSpec("text", searchable=True),
         "body": _HTML,
         "description": _HTML,
+        "syllabus_body": _HTML,
         "source_updated_at": _DATE,
         "created_at": _DATE,
         "posted_at": _DATE,

@@ -54,13 +54,21 @@ def prepare_study_context(api, account_id, *, course_id=None, item_id=None):
         if it["id"] in seen_items:
             return
         seen_items.add(it["id"])
+        # This legacy requirement-field alias was previously absent from FTS.
+        # Repair selected older rows from their complete local fields so the
+        # bounded reader can reach the ending rules too, without a new import.
+        if any(f["field"] == "syllabus_body" for f in it["fields"]):
+            with api.hub.db.tx() as c:
+                api.hub.search.index_item(c, account_id, it["id"], it["item_type"], it["title"],
+                                          {f["field"]: f["value"] for f in it["fields"]})
         # Item metadata preserves provenance and dated facts outside the search
         # text (for example due_at). Other structured fields remain on get_item.
         fields = [{"field": f["field"], "last_read": f["last_observed_at"],
                    **({"value": f["value"]} if f["field"] == "due_at" else {})}
                   for f in it["fields"]]
         for field in it["fields"]:
-            if (field["field"] in ("body", "description", "syllabus_body") or field["kind"] == "html") and not spec_for(it["item_type"], field["field"]).searchable:
+            requirement = field["field"] in ("body", "description", "syllabus_body") or field["kind"] == "html"
+            if requirement and not spec_for(it["item_type"], field["field"]).searchable:
                 warnings.append(f"Item {it['id']} field {field['field']} is outside the text index; get_item must be read before interpreting its requirements.")
         items.append({"item_id": it["id"], "title": it["title"], "source_url": it["source_url"],
                       "last_read": it["last_observed_at"], "freshness": it["freshness"], "fields": fields})
