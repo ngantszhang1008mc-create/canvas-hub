@@ -87,7 +87,7 @@ class Policy:
         return cls(settings.get("capacity", capacity), response,
                    settings.get("history_tokens"), settings.get("tool_tokens"), settings.get("document_tokens"),
                    settings.get("summary_tokens", 2000), settings.get("keep_turns", 2),
-                   settings.get("auto_compact", True), settings.get("auto_threshold_percent", 80) / 100,
+                   settings.get("auto_compact", False), settings.get("auto_threshold_percent", 80) / 100,
                    "configured" if "capacity" in settings else "application fallback; verify endpoint capacity")
 
     def measure(self, cfg, system, transcript, tools):
@@ -111,7 +111,7 @@ class Policy:
                 # mixed groups by allocating by their serialized content size.
                 results = m.get("results") or []
                 total = sum(estimate(r.get("content", "")) for r in results) or 1
-                doc = sum(estimate(r.get("content", "")) for r in results if r.get("name") in DOCUMENT_TOOLS)
+                doc = sum(estimate(r.get("content", "")) for r in results if (r.get("executed_tool") or r.get("name")) in DOCUMENT_TOOLS)
                 docs = math.ceil(cost * doc / total)
                 documents += docs
                 tool_total += cost - docs

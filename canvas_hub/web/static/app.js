@@ -4,6 +4,7 @@ import { makeContextAgent } from "./context-agent.js";
 import { makeComponents } from "./components.js";
 import { icon, decorateNavigation } from "./icons.js";
 import { currentTheme, themeSwitcher } from "./appearance.js";
+import { makeAssistantToolPicker } from "./assistant-tools.js";
 decorateNavigation();
 // Canvas Hub UI. Vanilla JS, no build step.
 // Safety: everything is rendered with textContent except item HTML fields,
@@ -390,6 +391,7 @@ async function route() {
   const params = new URLSearchParams(query || "");
   clearInterval(S.jobPoll);
   clearInterval(assistantPoll);
+  assistantToolPicker?.destroy(); assistantToolPicker = null;
   document.body.classList.remove("chat-focus");      // only the assistant pages use focus mode; they turn it back on
   let view = parts[0] || "overview";
   if (!S.accountId && !["setup", "settings"].includes(view)) view = "setup";
@@ -1386,6 +1388,7 @@ function renderMessages(list, msgs, ctx = {}) {
   const out = [];
   for (const m of msgs) {
     if (m.role === "user") out.push(h("div", { class: "msg user" }, h("div", { class: "bubble" }, m.text),
+      m.tool_selection?.length ? h("div", {class:"msg-meta tiny muted"}, `Requested tools: ${m.tool_selection.map(s=>s.replace('group:', '/').replace('tool:', '')).join(', ')}`) : null,
       m.setup ? h("div", { class: "msg-meta tiny muted" }, `${m.setup}${m.model ? ` · ${m.model}` : ""}${m.reasoning ? ` · reasoning ${m.reasoning}` : ""}`) : null));
     else if (m.role === "assistant") {
       const parts = [];
@@ -1401,6 +1404,7 @@ function renderMessages(list, msgs, ctx = {}) {
 }
 
 let assistantPoll = null;
+let assistantToolPicker = null;
 VIEWS.assistant = async (main, parts, params) => {
   clearInterval(assistantPoll);
   let cfg, settingsUnavailable = false;
@@ -1448,6 +1452,10 @@ VIEWS.assistant = async (main, parts, params) => {
   const input = h("textarea", { rows: 2, placeholder: "Ask about deadlines, announcements, materials, grades…  (Enter to send, Shift+Enter for a new line)" });
   const sendBtn = h("button", { class: "primary" }, icon("send"), "Send");
   const stopBtn = h("button", { class: "danger", hidden: true }, "Stop");
+  const toolCatalog = await api(A('/assistant/tools') + qs({profile_id:cfg.active_profile})).catch(()=>null);
+  if (!main.isConnected) return;
+  const toolPicker = makeAssistantToolPicker({h, input, catalog:toolCatalog});
+  assistantToolPicker = toolPicker;
   const compactBtn = h("button", { class: "ghost sm", disabled: !convId,
     title: "Summarize older turns using the selected provider. This uses model quota; original messages stay saved." }, "Compact conversation");
   const contextInfo = h("div", { class: "tiny muted", "aria-live": "polite" });
@@ -1455,6 +1463,7 @@ VIEWS.assistant = async (main, parts, params) => {
     h("p", { class: "tiny muted" }, "Compaction sends older turns to the selected provider and uses model quota. Original messages remain saved. Automatic compaction follows this setup's settings."),
     contextInfo, compactBtn);
   let current = convId; let lastSeq = 0; let all = []; let stick = true; let wasBusy = false;
+  let catalogLoading = false, catalogRevision = 0, sending = false;
   showConvs(convs);
   const listTop = main.querySelector(".conv-scroll")?.scrollTop || 0;      // the chat list being replaced, if any
 
@@ -1517,7 +1526,8 @@ VIEWS.assistant = async (main, parts, params) => {
     } else typers.delete("live");
     const st = d.conversation.run_state;
     const busy = st === "running" || st === "cancelling";
-    sendBtn.disabled = busy || settingsUnavailable; stopBtn.hidden = !busy;
+    sendBtn.disabled = busy || settingsUnavailable || catalogLoading || sending; stopBtn.hidden = !busy;
+    toolPicker.setBusy(busy || settingsUnavailable || catalogLoading || sending);
     compactBtn.disabled = busy || settingsUnavailable;
     const cx = d.context || {}, cost = cx.summary_usage || {}, total = cx.total_usage || {};
     const budget = cx.budget;
@@ -1537,14 +1547,22 @@ VIEWS.assistant = async (main, parts, params) => {
     if (!busy) clearInterval(assistantPoll);
   };
   const send = async (text) => {
-    if (settingsUnavailable) return;
-    const t = (text ?? input.value).trim();
-    if (!t) return;
-    sendBtn.disabled = true;
+    if (settingsUnavailable || catalogLoading || sending) return;
+    const requested = toolPicker.prepare((text ?? input.value).trim());
+    if (!requested) return;
+    const t = requested.text;
+    if (!t) { if (text === undefined) input.value = ''; return; }
+    sending = true; sendBtn.disabled = true; toolPicker.setBusy(true);
     const r = await guard(() => api(A("/assistant/messages"), { method: "POST", body: { text: t, conversation_id: current, profile_id: setupSel.value || cfg.active_profile,
-      reasoning: reasoningSel.hidden ? "" : reasoningSel.value, model: modelSel.hidden ? "" : modelSel.value } }));
-    if (!r) { sendBtn.disabled = false; return; }
+      reasoning: reasoningSel.hidden ? "" : reasoningSel.value, model: modelSel.hidden ? "" : modelSel.value,
+      tool_selection: requested.selection } }));
+    sending = false;
+    if (!r) {
+      sendBtn.disabled = wasBusy || settingsUnavailable || catalogLoading;
+      toolPicker.setBusy(sendBtn.disabled); return;
+    }
     input.value = "";
+    toolPicker.sent(requested);
     scroller.querySelector(".study-context")?.remove();
     const emptyEl = document.getElementById("chat-empty");
     if (emptyEl) emptyEl.remove();
@@ -1622,6 +1640,16 @@ VIEWS.assistant = async (main, parts, params) => {
     fillReasoning();
     // Also make it the default for new chats; each message names its setup anyway.
     api(`/api/assistant/profiles/${encodeURIComponent(setupSel.value)}/activate`, { method: "POST" }).catch(() => null);
+    const selectedSetup = setupSel.value;
+    const requestedCatalog = ++catalogRevision;
+    catalogLoading = true; sendBtn.disabled = true; toolPicker.setBusy(true);
+    toolPicker.updateCatalog(null);
+    api(A('/assistant/tools') + qs({profile_id:selectedSetup})).catch(()=>null).then(catalog=>{
+      if (!main.isConnected || requestedCatalog !== catalogRevision) return;
+      catalogLoading = false;
+      sendBtn.disabled = wasBusy || settingsUnavailable || sending;
+      toolPicker.updateCatalog(catalog); toolPicker.setBusy(sendBtn.disabled);
+    });
   });
   reasoningSel.addEventListener("change", () => store.set(`reasoning.${setupSel.value}`, reasoningSel.value));
   const perms = cfg.permissions;
@@ -1631,7 +1659,7 @@ VIEWS.assistant = async (main, parts, params) => {
   scroller.append(log, status, contextDetails);
   if (!current) scroller.append(h("div", { class: "chat-empty", id: "chat-empty" }, icon("sparkles", "empty-sparkles"), h("div", { class: "e-title" }, "What would you like to know?"), suggestions));
   const chat = h("div", { class: "chat" }, scroller,
-    h("div", { class: "composer" }, input,
+    h("div", { class: "composer" }, h("div", {class:'assistant-input-row'}, input, toolPicker.root), toolPicker.chips, toolPicker.message,
       h("div", { class: "composer-bar" }, h("span", { class: "select-icon-wrap" }, icon("cube"), setupSel),
         h("span", { class: "select-icon-wrap" }, icon("brain"), modelSel),
         h("span", { class: "select-icon-wrap" }, icon("sliders"), reasoningSel), h("span", { class: "grow" }), stopBtn, sendBtn)), footer);
@@ -1745,7 +1773,7 @@ function assistantSettingsCard(cfg, prof) {
   extra.value = cur.extra_params && Object.keys(cur.extra_params).length ? JSON.stringify(cur.extra_params) : "";
   const extraField = h("label", { class: "field", style: "grid-column:1/-1" },
     h("span", null, "Extra request settings (JSON, optional — sent as-is to the provider)"), extra);
-  const autoCompact = h("input", { type: "checkbox", checked: cur.context?.auto_compact !== false });
+  const autoCompact = h("input", { type: "checkbox", checked: cur.context?.auto_compact === true });
   const capacity = h("input", { type: "number", min: 4096, max: 2000000, step: 1,
     value: cur.context?.capacity || "", placeholder: "Application safety default", "aria-label": "Context token capacity" });
   const contextField = h("div", { class: "field", style: "grid-column:1/-1" },

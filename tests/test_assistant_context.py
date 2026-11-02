@@ -121,7 +121,7 @@ def test_failed_or_racing_compaction_keeps_original_and_records_attempt(hub, acc
 
 def test_auto_compaction_then_budget_stop_without_paid_retry_loop(hub, account, monkeypatch):
     svc, cid = conversation(hub, account)
-    svc.update_config({"context": {"capacity": 64000, "history_tokens": 2500}})
+    svc.update_config({"context": {"capacity": 64000, "history_tokens": 2500, "auto_compact": True}})
     calls, _ = mock_provider(monkeypatch)
     svc.send(account["id"], "Continue the goal", cid)
     svc.wait(cid, 5)

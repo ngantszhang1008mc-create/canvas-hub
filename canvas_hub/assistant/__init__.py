@@ -28,11 +28,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from ..agent_tools import ToolContext, run_tool_display, tools_for
+from ..agent_tools import ToolContext, run_tool_display
 from ..util import HubError, InvalidInput, NotFound, now_iso
 from .providers import ANTHROPIC_DEFAULT_MODEL, RESERVED_PARAMS, ProviderError, Stopped, make_provider
 from .context import Policy, validate_settings
 from .context_service import ContextService
+from .tool_catalog import ToolCatalog, ToolSession
 
 log = logging.getLogger("canvas_hub.assistant")
 CONFIG_FILE = "assistant.json"
@@ -381,6 +382,28 @@ class AssistantService(ContextService):
     def permissions(self, cfg: dict) -> set[str]:
         return {"read", "ui"} | {k for k, v in cfg["permissions"].items() if v}
 
+    @staticmethod
+    def _tool_catalog_options(cfg):
+        # Gateway names are reviewed provider policy, not per-message choices.
+        # Do not expose local discovery/dispatch names the gateway has not enabled.
+        if cfg.get("provider") == "allowance_gateway":
+            return {"allowed_names": set(cfg.get("gateway_tools") or []), "discovery": False}
+        return {}
+
+    def tool_catalog(self, account_id: int, profile_id: str | None = None) -> dict:
+        self.hub.identity.get_account(account_id)
+        cfg = self._load(profile_id)
+        perms = self.permissions(cfg)
+        if self.hub.writes.get_settings(account_id)["enabled"]:
+            perms.add("prepare")
+        return ToolCatalog(perms, **self._tool_catalog_options(cfg)).public()
+
+    def _live_tool_permissions(self, account_id, initial):
+        live = self.permissions({"permissions": self._load_store()["permissions"]})
+        if self.hub.writes.get_settings(account_id)["enabled"]:
+            live.add("prepare")
+        return initial & live
+
     def test(self, profile_id: str | None = None) -> dict:
         cfg = self._load(profile_id)
         if not self.configured(cfg):
@@ -481,7 +504,8 @@ class AssistantService(ContextService):
                 continue
             v = {"seq": m["seq"], "role": m["role"]}
             if m["role"] == "user":
-                v.update(text=m["text"], setup=m.get("setup"), reasoning=m.get("reasoning"), model=m.get("model"))
+                v.update(text=m["text"], setup=m.get("setup"), reasoning=m.get("reasoning"), model=m.get("model"),
+                         tool_selection=m.get("tool_selection") or [])
             elif m["role"] == "assistant":
                 v.update(text=m.get("text"), model=m.get("model"), stop=m.get("stop"),
                          tool_calls=[{"id": c["id"], "name": c["name"], "input": c.get("input"), "input_error": c.get("input_error")}
@@ -606,7 +630,7 @@ class AssistantService(ContextService):
                                          sort_keys=True).encode()).hexdigest()
 
     def send(self, account_id: int, text: str, conversation_id: int | None = None, profile_id: str | None = None,
-             reasoning: str | None = None, model: str | None = None) -> dict:
+             reasoning: str | None = None, model: str | None = None, tool_selection: list[str] | None = None) -> dict:
         # Pin the selected setup while claiming the conversation. A second send
         # cannot append a user message until the current run has finished.
         with self._cfg_lock:
@@ -619,13 +643,18 @@ class AssistantService(ContextService):
         if len(text) > 20000:
             raise InvalidInput("message too long")
         acct = self.hub.identity.get_account(account_id)
+        selectable = self.permissions(cfg)
+        if self.hub.writes.get_settings(account_id)["enabled"]:
+            selectable.add("prepare")
+        prompt, selected = ToolCatalog(selectable, **self._tool_catalog_options(cfg)).parse_message(text, tool_selection)
+        cfg["_tool_selection"] = selected
         tzname = acct.get("time_zone") or "UTC"
         try:
             now_local = datetime.now(timezone.utc).astimezone(ZoneInfo(tzname))
         except Exception:  # noqa: BLE001
             now_local = datetime.now(timezone.utc)
         # The time stamp is stored with the message (history stays append-only).
-        sent = f"[Now: {now_local.strftime('%A %d %B %Y %H:%M %Z')}]\n\n{text}"
+        sent = f"[Now: {now_local.strftime('%A %d %B %Y %H:%M %Z')}]\n\n{prompt}"
         with self._lock:
             self._flush_pending_states()
             if conversation_id is not None:
@@ -656,7 +685,7 @@ class AssistantService(ContextService):
                                     (account_id, text[:80], now_iso(), now_iso())).lastrowid
                 self._repair(cid)
                 self._append(cid, "user", {"text": text, "sent_text": sent, "setup": cfg.get("name"), "reasoning": reasoning,
-                                           "model": model or None})
+                                           "model": model or None, "tool_selection": selected})
                 self._set_state(cid, "running")
             self._cancel.discard(cid)
             th = threading.Thread(target=self._run, args=(cid, account_id, cfg, acct), name=f"assistant-{cid}", daemon=True)
@@ -729,13 +758,19 @@ class AssistantService(ContextService):
             perms = self.permissions(cfg)
             if self.hub.writes.get_settings(account_id)["enabled"]:
                 perms.add("prepare")       # prepare only; sending needs the user's click in the app
-            tools = [{"name": t.name, "description": t.description, "schema": t.schema()} for t in tools_for(perms)]
-            if not allow_tools:
-                tools = []
+            tool_session = (ToolSession(perms, cfg.get("_tool_selection"), **self._tool_catalog_options(cfg))
+                            if allow_tools and not compact_only else None)
+            tools = tool_session.advertised() if tool_session else []
             conv = self._conv(account_id, cid)
             ctx = ToolContext(api=self.api, account_id=account_id, worker=self.worker, conversation_id=cid,
                               scope_course_id=conv["scope_course_id"], scope_item_id=conv["scope_item_id"])
             system = self._system(acct, perms)
+            if tool_session and tool_session.discovery_enabled:
+                system += ("\nOnly a small set of tools is advertised initially. Use discover_tools to find/load other permitted "
+                           "tools or groups; do not conclude a capability is missing from the current schema list. Selection "
+                           "only makes tools available and never requests their execution. Follow the user's actual question. "
+                           "Discovery select replaces discovered choices; manual choices remain for this message. "
+                           "On Codex, use call_discovered_tool for newly discovered tools; do not restart the native turn.")
             if not allow_tools:
                 system += ("\nThis is an explicit retry after an interrupted response. Continue the answer from the "
                            "existing conversation. Do not claim tools ran or repeat prior actions. If additional "
@@ -763,6 +798,9 @@ class AssistantService(ContextService):
                     with self._live_lock:
                         self._live[cid] = text
                 try:
+                    if tool_session:
+                        tool_session.refresh(self._live_tool_permissions(account_id, perms))
+                        tools = tool_session.advertised()
                     transcript = self._transcript(cid)
                     if not allow_tools:
                         # Provider-only continuation instruction, never stored as a duplicate user message.
@@ -789,6 +827,7 @@ class AssistantService(ContextService):
                     break
                 results = []
                 for c in turn.tool_calls:
+                    executed_tool = None
                     if not allow_tools:
                         content, is_err, display = json.dumps({"error": "retry_tool_disabled", "message": "Tools are disabled during retry; this call was not executed."}), True, None
                     elif cid in self._cancel:
@@ -797,11 +836,25 @@ class AssistantService(ContextService):
                         content, is_err, display = json.dumps({"INVALID_INPUT": c.input_error or "missing input"}), True, None
                     else:
                         # Revocation takes effect even during an existing run.
-                        live_perms = perms.copy()
-                        if not self._load_store()["permissions"]["deadlines"]:
-                            live_perms.discard("deadlines")
-                        content, is_err, display = run_tool_display(ctx, c.name, c.input, live_perms)
+                        live_perms = self._live_tool_permissions(account_id, perms)
+                        tool_session.refresh(live_perms)
+                        try:
+                            if c.name == "discover_tools":
+                                content, is_err, display = tool_session.discover(c.input, include_schemas=cfg["provider"] == "codex"), False, None
+                            else:
+                                name, args = tool_session.dispatch(c.input) if c.name == "call_discovered_tool" else (c.name, c.input)
+                                if not tool_session.discovery_enabled and name not in tool_session.catalog.tools:
+                                    raise InvalidInput("This tool is outside the reviewed gateway setup.", code="tool_not_allowed")
+                                if c.name == "call_discovered_tool":
+                                    executed_tool = name
+                                # The shared registry validates current calls and permissions,
+                                # independently of which schemas occur in historical messages.
+                                content, is_err, display = run_tool_display(ctx, name, args, live_perms)
+                        except HubError as e:
+                            content, is_err, display = json.dumps(e.to_dict(), ensure_ascii=False), True, None
                     entry = {"id": c.id, "name": c.name, "content": content, "is_error": is_err}
+                    if executed_tool:
+                        entry["executed_tool"] = executed_tool
                     if display is not None:
                         # The component goes to the UI; the model gets the compact summary.
                         entry["display"] = display
