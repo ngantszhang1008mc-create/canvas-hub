@@ -58,11 +58,7 @@ class AppServer:
         try:
             self.reader.start()
         except BaseException:
-            self.process.kill()
-            self.process.wait(timeout=2)
-            self.process.stdin.close()
-            self.process.stdout.close()
-            self.workspace.cleanup()
+            self.close()
             raise
 
     def _put(self, message):
@@ -176,7 +172,8 @@ class AppServer:
                     stream.close()
                 except OSError:
                     pass
-            self.reader.join(timeout=1)
+            if self.reader.ident is not None:
+                self.reader.join(timeout=1)
             self.workspace.cleanup()
 
 

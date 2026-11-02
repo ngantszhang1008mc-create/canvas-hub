@@ -33,6 +33,9 @@ class SourceAnalysis:
         self.threads = {}
         self.batch_threads = {}
         self._slots = threading.BoundedSemaphore(2)
+        # Bound active and waiting workers without blocking request handlers.
+        self._admission = threading.BoundedSemaphore(8)
+        self._batch_admission = threading.BoundedSemaphore(4)
         # A crashed call may already have incurred usage. Never replay it.
         with self.db.tx() as c:
             c.execute("UPDATE view_requests SET status='declined', result_note='Analysis interrupted; explicit reanalysis required' WHERE id IN (SELECT request_id FROM source_analysis_attempts WHERE state='running') AND status='claimed'")
@@ -82,39 +85,50 @@ class SourceAnalysis:
                 'model': cfg.get('model') or (ANTHROPIC_DEFAULT_MODEL if cfg['provider'] == 'anthropic' else 'Provider default')}
 
     def start(self, aid, sid, token, *, consent=False, reanalyze=False):
-        if consent is not True or not isinstance(token, str):
-            raise InvalidInput('Review and approve the source/provider disclosure first.', code='disclosure_required')
-        with self.sources._lock, self.db.tx() as c:
-            s = self.sources._source(aid, sid)
-            offer = c.execute('SELECT * FROM source_analysis_attempts WHERE token=? AND account_id=? AND source_id=?', (token, aid, sid)).fetchone()
-            if not offer:
-                raise InvalidInput('Review the source disclosure again.', code='disclosure_required')
-            if offer['state'] != 'offered':
-                return self.sources.get(aid, sid)
-            cfg = self._config()
-            if self._fingerprint(aid, s, cfg) != offer['fingerprint'] or (datetime.now(timezone.utc)-parse_iso(offer['created_at'])).total_seconds() > 1800:
-                raise Conflict('Assistant setup or source changed, or disclosure expired. Review it again.')
-            if s['access_needed']:
-                raise InvalidInput('This source requires authorized access; use a connected Agent.')
-            if c.execute("SELECT 1 FROM source_analysis_attempts WHERE source_id=? AND state='running'", (sid,)).fetchone():
-                return self.sources.get(aid, sid)
-            previous = self.hub.requests.view(aid, s['analysis_request_id']) if s['analysis_request_id'] else None
-            if previous and (previous['status'] in ('open', 'claimed') or not reanalyze):
-                return self.sources.get(aid, sid)
-            if (s['classification_json'] or s['decision'] != 'undecided') and not reanalyze:
-                return self.sources.get(aid, sid)
-            source = self.sources.analyze(aid, sid, reanalyze=reanalyze)
-            rid = source['analysis_request_id']
-            self.hub.requests._set(rid, status='claimed', claimed_by=AGENT, claimed_at=now_iso())
-            c.execute("UPDATE source_analysis_attempts SET request_id=?,state='running' WHERE token=?", (rid, token))
-        thread = threading.Thread(target=self._run, args=(aid, sid, rid, token, cfg), daemon=True, name=f'source-analysis-{rid}')
-        self.threads[token] = thread
+        if not self._admission.acquire(blocking=False):
+            raise Conflict("Source analysis is busy. Wait for an analysis to finish, then retry.", code="source_analysis_busy")
+        handed_off = False
         try:
-            thread.start()
-        except Exception:
-            self._finish(aid, sid, rid, token, 'Analysis could not start; explicit reanalysis required.')
-            raise
-        return self.sources.get(aid, sid)
+            if consent is not True or not isinstance(token, str):
+                raise InvalidInput('Review and approve the source/provider disclosure first.', code='disclosure_required')
+            with self.sources._lock, self.db.tx() as c:
+                s = self.sources._source(aid, sid)
+                offer = c.execute('SELECT * FROM source_analysis_attempts WHERE token=? AND account_id=? AND source_id=?', (token, aid, sid)).fetchone()
+                if not offer:
+                    raise InvalidInput('Review the source disclosure again.', code='disclosure_required')
+                if offer['state'] != 'offered':
+                    return self.sources.get(aid, sid)
+                cfg = self._config()
+                if self._fingerprint(aid, s, cfg) != offer['fingerprint'] or (datetime.now(timezone.utc)-parse_iso(offer['created_at'])).total_seconds() > 1800:
+                    raise Conflict('Assistant setup or source changed, or disclosure expired. Review it again.')
+                if s['access_needed']:
+                    raise InvalidInput('This source requires authorized access; use a connected Agent.')
+                if c.execute("SELECT 1 FROM source_analysis_attempts WHERE source_id=? AND state='running'", (sid,)).fetchone():
+                    return self.sources.get(aid, sid)
+                previous = self.hub.requests.view(aid, s['analysis_request_id']) if s['analysis_request_id'] else None
+                if previous and (previous['status'] in ('open', 'claimed') or not reanalyze):
+                    return self.sources.get(aid, sid)
+                if (s['classification_json'] or s['decision'] != 'undecided') and not reanalyze:
+                    return self.sources.get(aid, sid)
+                source = self.sources.analyze(aid, sid, reanalyze=reanalyze)
+                rid = source['analysis_request_id']
+                self.hub.requests._set(rid, status='claimed', claimed_by=AGENT, claimed_at=now_iso())
+                c.execute("UPDATE source_analysis_attempts SET request_id=?,state='running' WHERE token=?", (rid, token))
+            thread = threading.Thread(target=self._run_reserved, args=(aid, sid, rid, token, cfg), daemon=True, name=f'source-analysis-{rid}')
+            self.threads[token] = thread
+            try:
+                handed_off = True
+                thread.start()
+            except Exception:
+                handed_off = False
+                self.threads.pop(token, None)
+                self._finish(aid, sid, rid, token, 'Analysis could not start; explicit reanalysis required.')
+                raise
+            return self.sources.get(aid, sid)
+
+        finally:
+            if not handed_off:
+                self._admission.release()
 
     def _active(self, aid, sid, rid, token):
         if not self.db.one("SELECT 1 FROM source_analysis_attempts WHERE token=? AND account_id=? AND source_id=? AND request_id=? AND state='running'", (token, aid, sid, rid)):
@@ -135,9 +149,27 @@ class SourceAnalysis:
         # and request integer IDs must never accept an old worker's result.
         return self.sources.submit_analysis(aid, rid, AGENT, result, _builtin=True, _attempt_token=token)
 
+    def _run_reserved(self, *args):
+        try:
+            self._run(*args)
+        finally:
+            self.threads.pop(args[3], None)
+            self._admission.release()
+
     def _run(self, aid, sid, rid, token, cfg):
-        with self._slots:
+        while not self._slots.acquire(timeout=0.2):
+            try:
+                self._active(aid, sid, rid, token)
+            except Stopped:
+                try:
+                    self._finish(aid, sid, rid, token)
+                finally:
+                    self.threads.pop(token, None)
+                return
+        try:
             self._execute(aid, sid, rid, token, cfg)
+        finally:
+            self._slots.release()
 
     def _execute(self, aid, sid, rid, token, cfg):
         provider = None
@@ -191,8 +223,10 @@ class SourceAnalysis:
                     provider.close()
                 except Exception:
                     pass
-            self._finish(aid, sid, rid, token, error)
-            self.threads.pop(token, None)
+            try:
+                self._finish(aid, sid, rid, token, error)
+            finally:
+                self.threads.pop(token, None)
 
     @staticmethod
     def eligible(sources):
@@ -260,33 +294,44 @@ class SourceAnalysis:
         return self.batch_view(aid,row['token']) if row else None
 
     def batch_start(self, aid, token, *, consent=False):
-        if consent is not True or not isinstance(token,str):
-            raise InvalidInput('Review and approve the batch disclosure first.', code='disclosure_required')
-        with self.sources._lock, self.db.tx() as c:
-            batch = self._batch(aid,token)
-            if batch['state']!='offered':
-                return self.batch_view(aid,token)
-            cfg = self._config()
-            if (datetime.now(timezone.utc)-parse_iso(batch['created_at'])).total_seconds()>1800:
-                raise Conflict('Batch disclosure expired. Review it again.')
-            active=c.execute("SELECT token FROM source_analysis_batches WHERE account_id=? AND scope_key=? AND state='running'", (aid,batch['scope_key'])).fetchone()
-            if active:
-                return self.batch_view(aid,active['token'])
-            # Reject a stale setup before any page is read or sent.
-            for e in json.loads(batch['entries_json']):
-                s=self.sources._source(aid,e['source_id'])
-                offer=c.execute('SELECT fingerprint FROM source_analysis_attempts WHERE token=?',(e['token'],)).fetchone()
-                if not offer or offer['fingerprint']!=self._fingerprint(aid,s,cfg):
-                    raise Conflict('Source or Assistant setup changed. Review this batch again.')
-            c.execute("UPDATE source_analysis_batches SET state='running' WHERE token=?", (token,))
-        thread=threading.Thread(target=self._batch_run,args=(aid,token),daemon=True,name='source-analysis-batch')
-        self.batch_threads[token]=thread
+        if not self._batch_admission.acquire(blocking=False):
+            raise Conflict("Source analysis batches are busy. Wait for one to finish, then retry.", code="source_analysis_busy")
+        handed_off = False
         try:
-            thread.start()
-        except Exception:
-            self.batch_cancel(aid,token)
-            raise
-        return self.batch_view(aid,token)
+            if consent is not True or not isinstance(token,str):
+                raise InvalidInput('Review and approve the batch disclosure first.', code='disclosure_required')
+            with self.sources._lock, self.db.tx() as c:
+                batch = self._batch(aid,token)
+                if batch['state']!='offered':
+                    return self.batch_view(aid,token)
+                cfg = self._config()
+                if (datetime.now(timezone.utc)-parse_iso(batch['created_at'])).total_seconds()>1800:
+                    raise Conflict('Batch disclosure expired. Review it again.')
+                active=c.execute("SELECT token FROM source_analysis_batches WHERE account_id=? AND scope_key=? AND state='running'", (aid,batch['scope_key'])).fetchone()
+                if active:
+                    return self.batch_view(aid,active['token'])
+                # Reject a stale setup before any page is read or sent.
+                for e in json.loads(batch['entries_json']):
+                    s=self.sources._source(aid,e['source_id'])
+                    offer=c.execute('SELECT fingerprint FROM source_analysis_attempts WHERE token=?',(e['token'],)).fetchone()
+                    if not offer or offer['fingerprint']!=self._fingerprint(aid,s,cfg):
+                        raise Conflict('Source or Assistant setup changed. Review this batch again.')
+                c.execute("UPDATE source_analysis_batches SET state='running' WHERE token=?", (token,))
+            thread=threading.Thread(target=self._batch_run_reserved,args=(aid,token),daemon=True,name='source-analysis-batch')
+            self.batch_threads[token]=thread
+            try:
+                handed_off = True
+                thread.start()
+            except Exception:
+                handed_off = False
+                self.batch_threads.pop(token, None)
+                self.batch_cancel(aid,token)
+                raise
+            return self.batch_view(aid,token)
+
+        finally:
+            if not handed_off:
+                self._batch_admission.release()
 
     def batch_cancel(self, aid, token):
         with self.sources._lock, self.db.tx() as c:
@@ -297,6 +342,12 @@ class SourceAnalysis:
                     if e.get('request_id') and c.execute('SELECT 1 FROM source_analysis_attempts WHERE token=? AND account_id=? AND source_id=? AND request_id=?', (e['token'],aid,e['source_id'],e['request_id'])).fetchone():
                         self.hub.requests.cancel(aid,e['request_id'])
         return self.batch_view(aid,token)
+
+    def _batch_run_reserved(self, *args):
+        try:
+            self._batch_run(*args)
+        finally:
+            self._batch_admission.release()
 
     def _batch_run(self, aid, token):
         try:

@@ -92,6 +92,7 @@ class _ThreadConnection:
 
     def __init__(self, conn):
         self.conn = conn
+        self.owner = weakref.ref(threading.current_thread())
 
     def close(self):
         if self.conn is not None:
@@ -174,9 +175,13 @@ class Database:
     def close(self) -> None:
         with self._lock:
             for holder in list(self._all):
+                owner = holder.owner()
+                # Never close a connection while another live thread may use it.
+                # That thread's local storage releases it on thread exit.
+                if owner is not None and owner is not threading.current_thread() and owner.is_alive():
+                    continue
                 try:
                     holder.close()
                 except Exception:  # noqa: BLE001
                     pass
-            self._all.clear()
-        self._local = threading.local()
+                self._all.discard(holder)

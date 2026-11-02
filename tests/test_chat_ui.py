@@ -12,6 +12,82 @@ ANSWER = ("Your proposal is due on Friday at 23:59. Start with the outline today
           "and leave Thursday evening for the final check.")
 
 
+def test_failure_retry_refresh_and_settings_error_keep_chat(hub, account, monkeypatch):
+    from playwright.sync_api import expect, sync_playwright
+    from canvas_hub.assistant.providers import ProviderError, Turn
+    from canvas_hub.util import HubError
+    calls = []
+    class Provider:
+        def complete(self, system, transcript, tools, on_text):
+            calls.append(tools)
+            if len(calls) == 1:
+                on_text('Partial answer')
+                raise ProviderError('Temporary failure', retryable=True)
+            assert not tools
+            assert transcript[-1]['role'] == 'user'
+            return Turn('Finished answer')
+        def close(self):
+            pass
+    with serve(hub, []) as (base, tok, api), sync_playwright() as p:
+        monkeypatch.setattr('canvas_hub.assistant.make_provider', lambda cfg: Provider())
+        b = p.chromium.launch()
+        pg = b.new_page()
+        errors = []
+        pg.on('pageerror', lambda e: errors.append(str(e)))
+        pg.goto(f'{base}/?token={tok}')
+        pg.goto(f'{base}/#/assistant')
+        pg.locator('.composer textarea').fill('Question')
+        pg.get_by_role('button', name='Send').click()
+        expect(pg.get_by_text('The assistant stopped')).to_be_visible(timeout=15000)
+        expect(pg.get_by_text('Partial answer')).to_be_visible()
+        pg.reload()
+        expect(pg.get_by_text('Partial answer')).to_be_visible()
+        pg.get_by_role('button', name='Retry answer').click()
+        expect(pg.get_by_text('Finished answer')).to_be_visible(timeout=15000)
+        expect(pg.locator('.msg.user')).to_have_count(1)
+        pg.reload()
+        expect(pg.get_by_text('Finished answer')).to_be_visible()
+        original = api.assistant.public_config
+        def unavailable():
+            raise HubError('unavailable', code='assistant_settings_unavailable', status=503)
+        monkeypatch.setattr(api.assistant, 'public_config', unavailable)
+        pg.reload()
+        expect(pg.get_by_text('Assistant settings are temporarily unavailable. Your conversations remain available.')).to_be_visible()
+        expect(pg.get_by_text('Finished answer')).to_be_visible()
+        expect(pg.locator('.composer textarea')).to_be_disabled()
+        monkeypatch.setattr(api.assistant, 'public_config', original)
+        pg.get_by_role('button', name='Retry', exact=True).click()
+        expect(pg.locator('.composer textarea')).to_be_enabled()
+        b.close()
+    assert not errors
+
+
+def test_cancel_retains_partial_across_refresh(hub, account, monkeypatch):
+    from playwright.sync_api import expect, sync_playwright
+    class Provider:
+        def complete(self, system, transcript, tools, on_text):
+            while True:
+                on_text('Partial before stop')
+                time.sleep(.02)
+        def close(self):
+            pass
+    with serve(hub, []) as (base, tok, _), sync_playwright() as p:
+        monkeypatch.setattr('canvas_hub.assistant.make_provider', lambda cfg: Provider())
+        b = p.chromium.launch()
+        pg = b.new_page()
+        pg.goto(f'{base}/?token={tok}')
+        pg.goto(f'{base}/#/assistant')
+        pg.locator('.composer textarea').fill('Question')
+        pg.get_by_role('button', name='Send').click()
+        expect(pg.get_by_text('Partial before stop')).to_be_visible(timeout=15000)
+        pg.get_by_role('button', name='Stop', exact=True).click()
+        expect(pg.get_by_role('button', name='Send')).to_be_enabled(timeout=15000)
+        pg.reload()
+        expect(pg.get_by_text('Partial before stop')).to_be_visible()
+        expect(pg.locator('.msg.user')).to_have_count(1)
+        b.close()
+
+
 @pytest.mark.parametrize("streaming", [True, False], ids=["streamed", "whole-reply"])
 def test_a_reply_appears_word_by_word(hub, account, streaming):
     # Streamed replies flow in as they are written; a provider that sends the whole reply at once is typed out too.

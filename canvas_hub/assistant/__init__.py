@@ -131,6 +131,13 @@ class AssistantService:
         self._lock = threading.RLock()
         self._cfg_lock = threading.RLock()     # serialises read-modify-write of the settings file
         self._threads: dict[int, threading.Thread] = {}
+        try:
+            self._max_runs = int(os.environ.get("CANVAS_HUB_ASSISTANT_CONCURRENCY", "4"))
+            if not 1 <= self._max_runs <= 16:
+                raise ValueError
+        except ValueError:
+            log.warning("Invalid CANVAS_HUB_ASSISTANT_CONCURRENCY; using 4")
+            self._max_runs = 4
         self._cancel: set[int] = set()
         # Text of the reply being streamed, per conversation. It is swapped for the saved message under
         # _live_lock, and get_conversation reads both under it, so a reader never sees both or neither.
@@ -156,6 +163,12 @@ class AssistantService:
             data = {}
         except (OSError, ValueError) as e:
             raise HubError("Assistant settings could not be read. Your settings and conversations are retained; free resources or check file access, then retry.", code="assistant_settings_unavailable", status=503) from e
+        if (not isinstance(data, dict)
+                or ('profiles' in data and not isinstance(data['profiles'], list))
+                or ('profiles' in data and isinstance(data['profiles'], list)
+                    and any(not isinstance(profile, dict) or not profile.get('id') for profile in data['profiles']))
+                or ('permissions' in data and not isinstance(data['permissions'], dict))):
+            raise HubError("Assistant settings have an invalid format. Your settings and conversations are retained; restore or repair the settings file before retrying.", code="assistant_settings_unavailable", status=503)
         perms = {**DEFAULT_CONFIG["permissions"], **(data.get("permissions") or {})}
         if "profiles" in data:
             profiles = [self._profile(x) for x in data["profiles"] if isinstance(x, dict) and x.get("id")]
@@ -534,7 +547,7 @@ class AssistantService:
         # The time stamp is stored with the message (history stays append-only).
         sent = f"[Now: {now_local.strftime('%A %d %B %Y %H:%M %Z')}]\n\n{text}"
         with self._lock:
-            if len(self._threads) >= 4:
+            if len(self._threads) >= self._max_runs:
                 raise InvalidInput("The assistant is busy with other conversations. Wait for one to finish, then try again.", code="assistant_busy")
             with self.hub.db.tx() as c:
                 if conversation_id is not None:
@@ -579,7 +592,7 @@ class AssistantService:
             cfg, _, _ = self._message_config(profile_id, reasoning, model)
         acct = self.hub.identity.get_account(account_id)
         with self._lock:
-            if len(self._threads) >= 4:
+            if len(self._threads) >= self._max_runs:
                 raise InvalidInput("The assistant is busy; wait and try again.", code="assistant_busy")
             with self.hub.db.tx() as c:
                 conv = self._conv(account_id, cid)
@@ -630,6 +643,10 @@ class AssistantService:
             ctx = ToolContext(api=self.api, account_id=account_id, worker=self.worker, conversation_id=cid,
                               scope_course_id=conv["scope_course_id"], scope_item_id=conv["scope_item_id"])
             system = self._system(acct, perms)
+            if not allow_tools:
+                system += ("\nThis is an explicit retry after an interrupted response. Continue the answer from the "
+                           "existing conversation. Do not claim tools ran or repeat prior actions. If additional "
+                           "tools are needed, explain that the user must send a new message after reviewing prior results.")
             if conv["scope_course_id"] is not None or conv["scope_item_id"] is not None:
                 system += ("\nThis conversation has immutable workspace scope: "
                            f"course_id={conv['scope_course_id']}, item_id={conv['scope_item_id']}. "
@@ -648,7 +665,11 @@ class AssistantService:
                     with self._live_lock:
                         self._live[cid] = text
                 try:
-                    turn = provider.complete(system, self._transcript(cid), tools, on_text=on_text)
+                    transcript = self._transcript(cid)
+                    if not allow_tools:
+                        # Provider-only continuation instruction, never stored as a duplicate user message.
+                        transcript.append({"role": "user", "sent_text": "Continue the interrupted answer using the existing conversation. Tools are unavailable for this retry."})
+                    turn = provider.complete(system, transcript, tools, on_text=on_text)
                 except Stopped:
                     with self._live_lock:       # keep what was already written, as the answer so far
                         partial = self._live.pop(cid, "")

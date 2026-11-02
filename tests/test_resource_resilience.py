@@ -10,7 +10,7 @@ from canvas_hub.assistant import AssistantService
 from canvas_hub.boundary import HubAPI
 from canvas_hub.db import Database
 from canvas_hub.util import HubError, InvalidInput
-from canvas_hub.assistant.providers import ProviderError, ToolCall, Turn
+from canvas_hub.assistant.providers import AnthropicProvider, OpenAICompatibleProvider, ProviderError, ToolCall, Turn
 
 
 def test_short_lived_threads_release_connections_and_run_commit_hooks(tmp_path):
@@ -30,6 +30,26 @@ def test_short_lived_threads_release_connections_and_run_commit_hooks(tmp_path):
     db.close()
 
 
+def test_commit_hooks_run_after_outer_commit_and_rollback_discards_them(tmp_path):
+    db = Database(tmp_path / 'hooks.sqlite3')
+    events = []
+    def committed():
+        assert not db.conn.in_transaction
+        with db.tx():
+            events.append('nested callback transaction')
+    with db.tx():
+        with db.tx():
+            db.after_commit(committed)
+        assert events == []
+    assert events == ['nested callback transaction']
+    with pytest.raises(RuntimeError):
+        with db.tx():
+            db.after_commit(lambda: events.append('must not run'))
+            raise RuntimeError('rollback')
+    assert events == ['nested callback transaction']
+    db.close()
+
+
 def test_settings_read_error_does_not_erase_saved_configuration(hub, monkeypatch):
     svc = AssistantService(hub, HubAPI(hub))
     svc.update_config({'preset': 'codex'})
@@ -44,6 +64,16 @@ def test_settings_read_error_does_not_erase_saved_configuration(hub, monkeypatch
         svc.update_config({'name': 'changed'})
     assert exc.value.code == 'assistant_settings_unavailable'
     assert svc._path.read_bytes() == original
+
+
+@pytest.mark.parametrize('contents', ['{broken', '[]', '{"profiles": [null]}', '{"permissions": []}'])
+def test_invalid_settings_are_not_replaced(hub, contents):
+    svc = AssistantService(hub, HubAPI(hub))
+    svc._path.write_text(contents)
+    with pytest.raises(HubError) as exc:
+        svc.update_config({'preset': 'codex'})
+    assert exc.value.code == 'assistant_settings_unavailable'
+    assert svc._path.read_text() == contents
 
 
 @pytest.mark.skipif(sys.platform == 'win32', reason='resource limits are Unix-specific')
@@ -84,6 +114,62 @@ db.close()
 '''
     result = subprocess.run([sys.executable, '-c', code, str(tmp_path / 'fd.sqlite3')], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.skipif(sys.platform == 'win32', reason='requires Unix descriptor limits')
+def test_real_emfile_cannot_replace_settings_in_isolated_child(tmp_path):
+    code = '''
+import errno, os, resource, sys
+from canvas_hub.paths import get_paths
+from canvas_hub.services import Hub
+from canvas_hub.assistant import AssistantService
+from canvas_hub.boundary import HubAPI
+from canvas_hub.util import HubError
+hub = Hub(get_paths(sys.argv[1]))
+svc = AssistantService(hub, HubAPI(hub))
+svc.update_config({'preset': 'codex'})
+before = svc._path.read_bytes()
+soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+if hard != resource.RLIM_INFINITY and hard < 64: raise SystemExit(77)
+resource.setrlimit(resource.RLIMIT_NOFILE, (64, hard))
+fds = []
+try:
+    while True:
+        try: fds.append(os.open('/dev/null', os.O_RDONLY))
+        except OSError as exc:
+            assert exc.errno == errno.EMFILE
+            break
+    try: svc.update_config({'name': 'changed'})
+    except HubError as exc: assert exc.code == 'assistant_settings_unavailable'
+    else: raise AssertionError('settings read unexpectedly succeeded')
+finally:
+    for fd in fds: os.close(fd)
+assert svc._path.read_bytes() == before
+hub.close()
+'''
+    result = subprocess.run([sys.executable, '-c', code, str(tmp_path / 'home')], capture_output=True, text=True)
+    if result.returncode == 77:
+        pytest.skip('hard descriptor limit too low')
+    assert result.returncode == 0, result.stderr
+
+
+def test_database_close_does_not_close_another_live_threads_connection(tmp_path):
+    db = Database(tmp_path / 'live.sqlite3')
+    ready, proceed = threading.Event(), threading.Event()
+    result = []
+    def work():
+        conn = db.conn
+        ready.set()
+        assert proceed.wait(5)
+        result.append(conn.execute('SELECT 42').fetchone()[0])
+    thread = threading.Thread(target=work)
+    thread.start()
+    assert ready.wait(5)
+    db.close()
+    proceed.set()
+    thread.join(5)
+    assert result == [42]
+    assert not thread.is_alive()
 
 
 def test_failed_turn_preserves_partial_and_conversation(hub, account, monkeypatch):
@@ -127,6 +213,13 @@ def test_admission_rejects_before_inserting_message(hub, account):
     assert svc.list_conversations(account['id']) == []
 
 
+def test_assistant_concurrency_configuration_is_bounded(hub, monkeypatch):
+    monkeypatch.setenv('CANVAS_HUB_ASSISTANT_CONCURRENCY', '2')
+    assert AssistantService(hub, HubAPI(hub))._max_runs == 2
+    monkeypatch.setenv('CANVAS_HUB_ASSISTANT_CONCURRENCY', '1000')
+    assert AssistantService(hub, HubAPI(hub))._max_runs == 4
+
+
 def test_retry_never_executes_unexpected_tools(hub, account, monkeypatch):
     class Provider:
         def complete(self, system, transcript, tools, on_text):
@@ -146,3 +239,15 @@ def test_retry_never_executes_unexpected_tools(hub, account, monkeypatch):
     result = svc.get_conversation(account['id'], cid)
     assert result['conversation']['run_state'] == 'error'
     assert result['messages'][-1]['results'][0]['is_error']
+
+
+def test_provider_transcripts_accept_retry_continuation():
+    transcript = [
+        {'role': 'user', 'sent_text': 'Original question'},
+        {'role': 'assistant', 'text': 'Partial answer', 'tool_calls': []},
+        {'role': 'user', 'sent_text': 'Continue without tools'},
+    ]
+    anthropic = AnthropicProvider.__new__(AnthropicProvider)._messages(transcript)
+    openai = OpenAICompatibleProvider.__new__(OpenAICompatibleProvider)._messages('system', transcript)
+    assert anthropic[-1] == {'role': 'user', 'content': 'Continue without tools'}
+    assert openai[-1] == {'role': 'user', 'content': 'Continue without tools'}

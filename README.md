@@ -271,3 +271,9 @@ helps a service launched with a 256-descriptor limit; it does not fix leaks.
 are never lowered. Unsupported platforms or permission failures continue with
 the current limit; startup logs report the effective limits when available.
 No system-wide settings are changed.
+
+Assistant runs default to four concurrent conversations; set
+`CANVAS_HUB_ASSISTANT_CONCURRENCY` to 1–16 to change this per process. Requests
+above the limit receive a busy response before a message is saved. Source
+analysis admits at most eight active or waiting analyses and four batches;
+at most two analyses call providers simultaneously.
