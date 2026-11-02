@@ -6,7 +6,7 @@ import pytest
 
 from canvas_hub.agent_tools import ToolContext, run_tool_display
 from canvas_hub.assistant import AssistantService
-from canvas_hub.assistant.context import Policy, context_error, valid_groups
+from canvas_hub.assistant.context import Policy, context_error, estimate, valid_groups
 from canvas_hub.assistant.providers import ToolCall, Turn
 from canvas_hub.assistant.tool_catalog import ToolSession
 from canvas_hub.boundary import HubAPI
@@ -15,9 +15,14 @@ from canvas_hub.util import InvalidInput, now_iso
 
 from .test_components import HMAW
 
+EXTRA_TRACKER_TOOLS = ['tool:' + name for name in (
+    'list_context_sources', 'read_context_source', 'search_context_sources',
+    'get_coverage', 'wait_for_job', 'show_artifact')]
 
-@pytest.mark.parametrize('characters', [6500, 6800])
-def test_tracker_results_share_unused_budget_without_masking_or_replaying(hub, account, monkeypatch, characters):
+
+@pytest.mark.parametrize('characters,extra_tools', [(6500, []), (6800, []), (6500, EXTRA_TRACKER_TOOLS)],
+                         ids=['original-tracker', 'tracker-followup', '31-tool-tracker-sources'])
+def test_tracker_results_share_unused_budget_without_masking_or_replaying(hub, account, monkeypatch, characters, extra_tools):
     aid = account['id']
     api = HubAPI(hub)
     svc = api.assistant = AssistantService(hub, api)
@@ -41,7 +46,13 @@ def test_tracker_results_share_unused_budget_without_masking_or_replaying(hub, a
     before = svc._transcript(cid)
     initial = hub.components.get(aid, view['id'])
     cfg = svc._load()
-    tools = ToolSession(svc.permissions(cfg), ['group:tracker']).advertised()
+    tools = ToolSession(svc.permissions(cfg), ['group:tracker', *extra_tools]).advertised()
+    if extra_tools:
+        assert len(tools) == 31 and estimate(tools) + 32 * len(tools) > 8000
+        discovered = ToolSession(svc.permissions(cfg), ['group:tracker'])
+        result = json.loads(discovered.discover({'select': extra_tools}, include_schemas=True))
+        assert not result['executed'] and discovered.advertised() == tools
+        assert {t['name'] for t in result['schemas']} == {n.removeprefix('tool:') for n in extra_tools}
     report = Policy.for_config(cfg).measure(cfg, svc._system(account, svc.permissions(cfg)), before, tools)
     assert report['used']['tools'] > report['available'] * .4  # original implicit cap failed
     assert not report['over_budget'] and not Policy.for_config(cfg).auto_compact
@@ -72,7 +83,7 @@ def test_tracker_results_share_unused_budget_without_masking_or_replaying(hub, a
     assert json.loads(svc._transcript(cid)[-1]['results'][0]['content'])['error'] == 'retry_tool_disabled'
     requests.clear()
     before = svc._transcript(cid)
-    svc.send(aid, '/tracker Recreate the old HMAW tracker after reading its content.', cid)
+    svc.send(aid, '/tracker Recreate the old HMAW tracker after reading its content.', cid, tool_selection=extra_tools)
     svc.wait(cid, 5)
     result = svc.get_conversation(aid, cid)
     assert result['conversation']['run_state'] == 'idle', result['conversation']
@@ -80,8 +91,20 @@ def test_tracker_results_share_unused_budget_without_masking_or_replaying(hub, a
     assert after['state'] == initial['state'] and after['spec'] == initial['spec']
     assert after['pending_spec'] and not after['pinned']
     assert len(requests) == 3 and all(r[1] for r in requests)
+    if extra_tools:
+        expected = {t['name']: t for t in tools}
+        assert all({t['name']: t for t in r[1]} == expected for r in requests)  # Stable serialization may sort tools.
     assert svc._transcript(cid)[:len(before)] == before and valid_groups(svc._transcript(cid))
     assert not hub.db.one("SELECT 1 FROM assistant_context_usage WHERE conversation_id=? AND purpose='summary'", (cid,))
+    if extra_tools:
+        # The identical tool set must stop before dispatch when the real request
+        # cannot fit a smaller configured context. No paid retry or write replay.
+        svc.update_config({'context': {'capacity': 16000}})
+        saved = hub.components.get(aid, view['id'])
+        svc.send(aid, '/tracker Continue after reading current inputs.', cid, tool_selection=extra_tools)
+        svc.wait(cid, 5)
+        assert 'Context budget exceeded' in svc.get_conversation(aid, cid)['conversation']['run_error']
+        assert len(requests) == 3 and hub.components.get(aid, view['id']) == saved
 
 
 def test_explicit_caps_and_total_capacity_still_stop_with_accurate_labels():
