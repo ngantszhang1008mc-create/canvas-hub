@@ -288,7 +288,7 @@ def test_browser_local_completion_controls_the_shared_mirror_group(deadlines):
         "SELECT id FROM items WHERE account_id=? AND item_type='quiz' AND canvas_id='8201'", (aid,)
     )["id"]
     assignment_task = api.hub.annotations.create(
-        aid, kind="task", item_id=iid, title="Open assignment marker", task_state="open"
+        aid, kind="task", item_id=iid, title="Open assignment marker", task_role="completion", task_state="open"
     )
     quiz_task = api.hub.annotations.create(
         aid, kind="task", item_id=quiz_id, title="Done quiz marker", task_role="completion", task_state="done"
@@ -317,6 +317,8 @@ def test_browser_local_completion_controls_the_shared_mirror_group(deadlines):
 
         # Two done markers must reopen together with one click.
         api.set_deadline_local_completion(aid, quiz_id, True)
+        assert api.hub.annotations.get(aid, assignment_task["id"])["task_state"] == "done"
+        assert api.hub.annotations.get(aid, quiz_task["id"])["task_state"] == "done"
         with page.expect_response(lambda r: r.url.endswith("/deadline-views") and r.request.method == "POST"):
             page.get_by_label("Deadline status", exact=True).select_option("completed")
         expect(card).to_be_visible()
