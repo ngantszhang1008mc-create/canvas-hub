@@ -362,6 +362,45 @@ def test_reader_failures_are_distinguished_without_model(builtin,source,account,
     assert not calls and not svc.get(aid,sid)['classification']
 
 
+@pytest.mark.parametrize('response', [
+    Read(URL,401,'text/html',b'',auth_challenge=True),
+    Read(URL,403,'text/html',b''),
+    Read(URL,302,'text/html',b'', 'https://identity.example/login'),
+    Read(URL,200,'text/html',b'<script>renderCourse()</script>'),
+])
+def test_failed_analysis_automatically_checks_auth_once_without_model(builtin, source, account, response):
+    from .test_login_detection import wait
+    service, _, calls = builtin
+    sources, sid, _ = source
+    aid = account['id']
+    probes = []
+    sources.reader = PublicReader(lambda url: response)
+    service.login_detection.detector = lambda url: probes.append(url) or {
+        'outcome':'unknown', 'evidence':['login_or_enrollment_shell'], 'course_access':'unknown', 'raw_html':'never-return'}
+    _, disclosure = start(service, aid, sid)
+    finish(service)
+    result = wait(service.login_detection, aid, sid)
+    assert result['outcome'] == 'unknown' and 'raw_html' not in result
+    assert probes == [URL] and not calls
+    service.start(aid, sid, disclosure['token'], consent=True)
+    service.check_failed_source(aid, sid)
+    assert probes == [URL]
+    # Restart recovery and saved-result reads do not start paid work either.
+    service.login_detection._states.clear()
+    service.check_failed_source(aid, sid)
+    wait(service.login_detection, aid, sid)
+    assert probes == [URL, URL] and not calls
+
+
+def test_enrollment_chooser_with_password_is_not_assumed_to_require_login(builtin, source, account):
+    service, _, calls = builtin
+    sources, sid, _ = source
+    sources.reader = PublicReader(lambda url: Read(URL, 200, 'text/html', b'<button>Join Classes</button><form><input type=password><button>Log in</button></form>'))
+    start(service, account['id'], sid); finish(service)
+    assert sources.get(account['id'], sid)['status'] == 'needs_attention'
+    assert not calls
+
+
 def test_provider_failure_redacted_single_attempt_and_retry_explicit(builtin,source,account,monkeypatch):
     service,api,calls=builtin;svc,sid,_=source;aid=account['id']
     class Provider:

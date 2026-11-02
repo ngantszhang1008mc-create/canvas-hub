@@ -58,3 +58,25 @@ def test_http_endpoint_is_explicit_and_sanitized(hub,account,source):
         assert client.post(path,json={}).json()['state']=='running'
         assert wait(app.state.login_detection,aid,sid)['outcome']=='unknown'
         assert 'secret' not in client.get(path).json()
+
+
+def test_automatic_failure_checks_deduplicate_and_do_not_queue_when_busy(hub, account, source):
+    _, sid, _ = source
+    aid = account['id']
+    calls = []
+    service = LoginDetection(hub, lambda url: calls.append(url) or {'outcome':'unknown'})
+    service.start(aid, sid, failure_id=12)
+    assert wait(service, aid, sid)['failure_id'] == 12
+    service.start(aid, sid, failure_id=12)
+    assert len(calls) == 1
+    assert service._slots.acquire(False) and service._slots.acquire(False)
+    try:
+        assert service.start(aid, sid, failure_id=13)['evidence'] == ['probe_busy']
+        service.start(aid, sid, failure_id=13)
+        assert len(calls) == 1
+    finally:
+        service._slots.release(); service._slots.release()
+    service.start(aid, sid)  # A manual retry remains available.
+    wait(service, aid, sid)
+    service.start(aid, sid, failure_id=13)
+    assert len(calls) == 2

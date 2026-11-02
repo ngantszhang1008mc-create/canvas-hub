@@ -57,8 +57,7 @@ def create_app(api: HubAPI, *, token: str, port: int) -> FastAPI:
     from ..services.source_analysis import SourceAnalysis
     source_analysis = SourceAnalysis(api)
     app.state.source_analysis = source_analysis
-    from ..services.login_detection import LoginDetection
-    login_detection = LoginDetection(api.hub)
+    login_detection = source_analysis.login_detection
     app.state.login_detection = login_detection
     app.state.site_connections = site_connections
     hosts = allowed_hosts(port)
@@ -434,6 +433,7 @@ def create_app(api: HubAPI, *, token: str, port: int) -> FastAPI:
 
     @app.get("/api/accounts/{aid}/external-sources/{sid}")
     def external_get(aid: int, sid: int):
+        source_analysis.check_failed_source(aid, sid)
         return external(aid).get(aid, sid)
 
     @app.get("/api/accounts/{aid}/external-sources/{sid}/disclosure")
@@ -461,6 +461,11 @@ def create_app(api: HubAPI, *, token: str, port: int) -> FastAPI:
     async def site_connection_start(aid: int, sid: int, request: Request):
         b = await body(request)
         return site_connections.start(aid, sid, b.get('token'), b.get('consent'))
+
+    @app.post("/api/accounts/{aid}/external-sources/{sid}/https-source")
+    async def site_https_source(aid: int, sid: int, request: Request):
+        b = await body(request)
+        return site_connections.https_source(aid, sid, b.get('consent'))
 
     @app.post("/api/accounts/{aid}/external-sources/{sid}/site-connection/{action}")
     async def site_connection_action(aid: int, sid: int, action: str, request: Request):

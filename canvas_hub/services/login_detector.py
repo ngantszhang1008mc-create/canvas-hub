@@ -86,6 +86,8 @@ def classify(status, auth_challenge, signals, error=None):
         return 'access_denied', ['http_access_denied']
     if status != 200:
         return 'unsupported_unavailable', ['http_non_success']
+    if signals.get('login_or_enrollment_shell'):
+        return 'unknown', ['login_or_enrollment_shell']
     if signals.get('substantive_content') and (signals.get('password') or signals.get('login_form') or signals.get('login_gate')):
         return 'unknown', ['mixed_public_content_and_login']
     if signals.get('password') or signals.get('login_form'):
@@ -94,8 +96,6 @@ def classify(status, auth_challenge, signals, error=None):
         return 'login_required', ['rendered_login_gate']
     if signals.get('redirect_login_page'):
         return 'login_required', ['authentication_redirect_and_page_title']
-    if signals.get('login_or_enrollment_shell'):
-        return 'unknown', ['login_or_enrollment_shell']
     if signals.get('readable'):
         return 'readable', ['rendered_readable_content']
     return 'unknown', ['insufficient_rendered_evidence']
@@ -123,12 +123,20 @@ def _inspect(url, timeout_ms=20000, capture=False):
         result.update(final_host=state['host'], http_status=status)
         if status != 200:
             result['outcome'], result['evidence'] = classify(status, state['auth'], {})
+            if status == 401 and state['auth']:
+                challenge = next((v for k, v in headers.items() if k.lower() == 'www-authenticate'), '')
+                result['auth_scheme'] = 'basic' if re.search(r'(?:^|,)\s*Basic(?:\s|$)', challenge, re.I) else 'other'
             return result
     except Exception as exc:
         result['outcome'], result['evidence'] = classify(None, False, {}, type(exc).__name__)
         return result
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, args=['--disable-webrtc'])
+        browser_options = {}
+        if os.environ.get('CANVAS_HUB_CHROMIUM'):
+            browser_options['executable_path'] = os.environ['CANVAS_HUB_CHROMIUM']
+        elif os.environ.get('CANVAS_HUB_BROWSER_CHANNEL'):
+            browser_options['channel'] = os.environ['CANVAS_HUB_BROWSER_CHANNEL']
+        browser = p.chromium.launch(headless=True, args=['--disable-webrtc'], **browser_options)
         context = browser.new_context(service_workers='block', accept_downloads=False)
         context.route_web_socket('**/*', lambda ws: ws.close())
         context.add_init_script("Object.defineProperty(window, 'RTCPeerConnection', {value: undefined}); Object.defineProperty(window, 'webkitRTCPeerConnection', {value: undefined});")

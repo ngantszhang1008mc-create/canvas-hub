@@ -6,6 +6,7 @@ This module never sends a page, cookie, or profile to an Assistant provider.
 from __future__ import annotations
 
 import hashlib
+import base64
 import http.client
 import os
 import queue
@@ -102,7 +103,7 @@ def pinned_request(url, method, headers, body):
         data = b''.join(chunks)
         # Only browser-relevant headers; never emit these values in logs or status.
         safe_headers = {}
-        for key in ('content-type', 'location', 'cache-control', 'content-security-policy', 'access-control-allow-origin', 'access-control-allow-credentials'):
+        for key in ('content-type', 'location', 'www-authenticate', 'cache-control', 'content-security-policy', 'access-control-allow-origin', 'access-control-allow-credentials'):
             value = response.getheader(key)
             if value:
                 safe_headers[key] = value
@@ -146,7 +147,11 @@ class BrowserConnection:
         self.events = queue.Queue()
         self.lock = threading.Lock()
         self.state = {'state': 'opening', 'blocked_origins': [], 'pending_post': None,
-                      'blocked_submission_origin':None, 'redirect_blocked':False, 'redirect_reason':None}
+                      'blocked_submission_origin':None, 'redirect_blocked':False, 'redirect_reason':None,
+                      'http_auth':None, 'popup_blocked':False, 'failure_reason':None, 'http_status':None}
+        self._basic_auth = {}
+        self._basic_pending = None
+        self._credential_redactions = set()
         self._post_approval = None
         self._post_pending = None
         self._request_count = 0
@@ -159,6 +164,7 @@ class BrowserConnection:
         self._redirect_next = None
         self._redirect_expected = None
         self._cancel_requested = threading.Event()
+        self._closed = threading.Event()
         self.thread = threading.Thread(target=self._run, daemon=True, name='external-site-login')
         self.thread.start()
 
@@ -174,11 +180,15 @@ class BrowserConnection:
         if action == 'cancel':
             self._cancel_requested.set()
         future = Future()
-        self.events.put((action, arg, future))
+        with self.lock:
+            if self._closed.is_set() or (action != 'cancel' and self._cancel_requested.is_set()):
+                raise Conflict('The site connection is closing or closed')
+            self.events.put((action, arg, future))
         try:
             return future.result(timeout=timeout)
         except TimeoutError:
-            raise Conflict('The site browser did not respond; try again')
+            future.cancel()  # A timed-out action still in the queue must not run.
+            raise Conflict('The site browser did not respond; check connection status before retrying')
 
     def _allowed_origin(self, host):
         if host in self.domains:
@@ -253,6 +263,8 @@ class BrowserConnection:
         request = route.request
         navigation = None
         try:
+            if getattr(self, '_cancel_requested', None) and self._cancel_requested.is_set():
+                route.abort(); return
             host = request_origin(request.url)
             if self._verify_mode and (request.method != 'GET' or request.url != self.target or request.resource_type != 'document'):
                 route.abort(); return
@@ -265,6 +277,7 @@ class BrowserConnection:
             if request.resource_type == 'document' and request.frame.parent_frame is not None:
                 route.abort(); return
             if request.resource_type == 'document' and getattr(self, '_page', None) is not None and request.frame.page != self._page:
+                self.update(popup_blocked=True)
                 route.abort(); return  # Popups cannot redirect the owned window.
             if request.resource_type != 'document' and request_origin(request.frame.url) != host:
                 route.abort(); return
@@ -309,6 +322,12 @@ class BrowserConnection:
                 # Chromium. Never copy credentials/headers from the prior hop.
                 headers = {k: v for k, v in headers.items() if k.lower() in
                            ('accept', 'accept-language', 'user-agent', 'cookie')}
+            # App-entered Basic credentials never enter Chromium, its cache or
+            # profile. They authorize only the challenged exact document GET,
+            # never an asset, POST or another URL (including redirect hops).
+            basic = getattr(self, '_basic_auth', {}).get(request.url)
+            if basic and method == 'GET' and request.resource_type == 'document' and not (navigation and len(navigation.seen) > 1):
+                headers = {**headers, 'authorization': basic}
             if method == 'POST':
                 content_type = headers.get('content-type', '').split(';', 1)[0].lower()
                 if content_type not in ('application/x-www-form-urlencoded', 'application/json'):
@@ -320,6 +339,26 @@ class BrowserConnection:
             if data and len(data) > MAX_REQUEST:
                 route.abort(); return
             status, headers, cookies, body = self.transport(request.url, method, headers, data)
+            headers = {k.lower(): v for k, v in headers.items()}
+            challenge = headers.pop('www-authenticate', '')
+            if request.resource_type == 'document':
+                self.update(http_status=status, failure_reason=None)
+                if status == 401 and challenge:
+                    basic_supported = method == 'GET' and bool(re.search(r'(?:^|,)\s*Basic(?:\s|$)', challenge, re.I))
+                    token = secrets.token_urlsafe(24)
+                    self._basic_pending = (request.url, token, 'utf-8' if re.search(r'charset\s*=\s*"?UTF-8', challenge, re.I) else 'latin-1') if basic_supported else None
+                    getattr(self, '_basic_auth', {}).pop(request.url, None)
+                    self.update(http_auth={'scheme':'basic' if basic_supported else 'unsupported', 'origin':host, 'request_id':token},
+                                failure_reason='http_authentication')
+                    # Native auth prompts cannot work through an intercepted
+                    # transport; use the guarded local entry UI instead.
+                elif status in (401, 403):
+                    self.update(http_auth=None, failure_reason='access_denied')
+                elif status >= 400:
+                    self.update(failure_reason='page_unavailable')
+                elif status == 200:
+                    self._basic_pending = None
+                    self.update(http_auth=None)
             if navigation and time.monotonic() >= navigation.deadline:
                 self._block_redirect('timeout'); route.abort(); return
             if 300 <= status < 400:
@@ -329,12 +368,15 @@ class BrowserConnection:
             _set_cookies(context, request.url, cookies)
             route.fulfill(status=status, headers=headers, body=body)
         except Exception:
+            if request.resource_type == 'document':
+                self.update(failure_reason='request_failed')
             if navigation and len(navigation.seen) > 1:
                 self._block_redirect('request_failed')
             try: route.abort()
             except Exception: pass
 
     def _run(self):
+        launched = False
         try:
             from playwright.sync_api import sync_playwright
             # Never follow a substituted account/site profile symlink into a
@@ -347,8 +389,14 @@ class BrowserConnection:
                 directory.mkdir(exist_ok=True, mode=0o700)
                 os.chmod(directory, 0o700)
             with sync_playwright() as pw:
+                browser_options = {}
+                if os.environ.get('CANVAS_HUB_CHROMIUM'):
+                    browser_options['executable_path'] = os.environ['CANVAS_HUB_CHROMIUM']
+                elif os.environ.get('CANVAS_HUB_BROWSER_CHANNEL'):
+                    browser_options['channel'] = os.environ['CANVAS_HUB_BROWSER_CHANNEL']
                 context = pw.chromium.launch_persistent_context(str(self.profile), headless=self.headless,
-                    accept_downloads=False, service_workers='block', offline=True, args=['--disable-webrtc'])
+                    accept_downloads=False, service_workers='block', offline=True, args=['--disable-webrtc'], **browser_options)
+                launched = True
                 context.route_web_socket('**/*', lambda ws: ws.close())
                 context.add_init_script("""Object.defineProperty(window,'RTCPeerConnection',{value:undefined});
                     Object.defineProperty(window,'webkitRTCPeerConnection',{value:undefined});
@@ -358,6 +406,12 @@ class BrowserConnection:
                 context.route('**/*', lambda route: self._route(route, context))
                 page = context.pages[0] if context.pages else context.new_page()
                 self._page = page
+                def popup(opened):
+                    if opened != page:
+                        self.update(popup_blocked=True)
+                        try: opened.close()
+                        except Exception: pass
+                context.on('page', popup)
                 # A restored profile cannot send traffic before interception exists.
                 context.set_offline(False)
                 self._navigate(page, self.target)
@@ -374,6 +428,8 @@ class BrowserConnection:
                         except Exception: break
                         continue
                     try:
+                        if not future.set_running_or_notify_cancel():
+                            continue
                         if action == 'cancel':
                             future.set_result({'state':'closed'}); break
                         if action == 'approve_post':
@@ -386,10 +442,13 @@ class BrowserConnection:
                             future.set_result({'state':'approved_once'})
                         elif action == 'verify':
                             future.set_result(self._verify(page))
+                        elif action == 'http_auth':
+                            future.set_result(self._enter_http_auth(page, arg))
                         elif action == 'retry_login':
                             self._review_token = None
                             self._confirmed_digest = None
-                            self.update(state='login_open', redirect_blocked=False, redirect_reason=None)
+                            self.update(state='login_open', redirect_blocked=False, redirect_reason=None,
+                                        popup_blocked=False, failure_reason=None)
                             self._navigate(page, self.target)
                             future.set_result({'state':'login_open'})
                         elif action == 'confirm_content':
@@ -416,16 +475,67 @@ class BrowserConnection:
                             raise InvalidInput('Unknown action')
                     except Exception as exc:
                         future.set_exception(exc if isinstance(exc, (Conflict, InvalidInput)) else Conflict('Site check failed; previous data retained'))
+                    finally:
+                        # Do not retain local credential-entry requests in the
+                        # event loop while waiting for the next user action.
+                        if action == 'http_auth' and isinstance(arg, dict):
+                            arg.clear()
+                        arg = None
                 context.close()
         except Exception:
-            self.update(state='error')
+            self.update(state='error', failure_reason='browser_unavailable' if not launched else 'browser_closed')
             return
+        finally:
+            with self.lock:
+                self._closed.set()
+            # Pending credential submissions must not survive a closed browser.
+            while True:
+                try:
+                    pending_action, pending_arg, pending_future = self.events.get_nowait()
+                except queue.Empty:
+                    break
+                if pending_action == 'http_auth' and isinstance(pending_arg, dict):
+                    pending_arg.clear()
+                if not pending_future.done():
+                    pending_future.set_exception(Conflict('The site connection closed'))
+            self._basic_auth.clear()
+            self._basic_pending = None
+            self._credential_redactions.clear()
+            self.update(http_auth=None)
         self.update(state='closed')
+
+    def _enter_http_auth(self, page, arg):
+        pending = self._basic_pending
+        if self._cancel_requested.is_set() or not isinstance(arg, dict) or not pending or arg.get('challenge') != self.snapshot().get('http_auth'):
+            raise Conflict('The authentication challenge changed; reopen the requested page')
+        username, password = arg.get('username'), arg.get('password')
+        if (not isinstance(username, str) or not isinstance(password, str) or not 1 <= len(username) <= 1024
+                or not 1 <= len(password) <= 4096 or ':' in username
+                or any(ord(c) < 32 or ord(c) == 127 for c in username + password)):
+            raise InvalidInput('Enter a valid username and password in the local sign-in form')
+        try:
+            encoded = base64.b64encode((username + ':' + password).encode(pending[2])).decode('ascii')
+        except UnicodeError:
+            raise InvalidInput('This site does not support these credential characters') from None
+        self._basic_auth[pending[0]] = 'Basic ' + encoded
+        self._credential_redactions.update((username, password, encoded))
+        self._basic_pending = None
+        self._review_token = self._confirmed_digest = None
+        self.update(http_auth=None, state='login_open')
+        self._navigate(page, pending[0])
+        return self.snapshot()
 
     def _verify(self, page):
         cdp = None
         self._review_token = None
         self._verified_digest = None
+        self._basic_pending = None
+        self.update(http_status=None, http_auth=None)
+        def failure_state():
+            state = self.snapshot()
+            if state.get('http_status') in (401, 403):
+                return 'reconnect_needed' if state.get('http_auth') else 'access_denied'
+            return 'access_unverified'
         try:
             # Verification is a single GET to the already approved source. No
             # page scripts, subresources, redirects or form submissions run.
@@ -435,13 +545,14 @@ class BrowserConnection:
             cdp.send('Emulation.setScriptExecutionDisabled', {'value':True})
             response = page.goto(self.target, wait_until='domcontentloaded', timeout=15000)
             if page.url != self.target:
-                self.update(state='reconnect_needed')
-                return {'state':'reconnect_needed'}
+                self.update(state=failure_state())
+                return {'state':self.snapshot()['state']}
             if not response or response.status != 200:
-                self.update(state='reconnect_needed' if response and response.status in (401, 403) else 'access_unverified')
+                self.update(state=('reconnect_needed' if self.snapshot().get('http_auth') else 'access_denied')
+                            if response and response.status in (401, 403) else 'access_unverified')
                 return {'state':self.snapshot()['state']}
             evidence = page.evaluate('''() => {
-                const area = document.querySelector('main,article');
+                const area = document.querySelector('main,article') || document.body;
                 if (!area) return {form:!!document.querySelector('input[type=password],form[action*="login" i]'), chooser:false, text:''};
                 const walker = document.createTreeWalker(area,NodeFilter.SHOW_TEXT);
                 let text='', count=0, node;
@@ -468,14 +579,18 @@ class BrowserConnection:
                 self.update(state=state)
                 return {'state':state}
             self.update(state='content_visible')
+            for secret in sorted(self._credential_redactions, key=len, reverse=True):
+                evidence['text'] = evidence['text'].replace(secret, '[credential removed]')
             self._verified_digest = hashlib.sha256(evidence['text'].encode()).hexdigest()
             self._review_token = secrets.token_urlsafe(24)
             self._review_deadline = time.monotonic() + 300
             # Text is returned only to the local UI, never to an Assistant.
             return {'state':'content_visible', 'content':evidence['text'], 'review_token':self._review_token}
         except Exception:
-            self.update(state='access_unverified')
-            return {'state':'access_unverified'}
+            # Chromium may reject an empty denial response before goto returns
+            # a Response. Keep the trusted transport's current status evidence.
+            self.update(state=failure_state())
+            return {'state':self.snapshot()['state']}
         finally:
             if cdp:
                 try:
@@ -502,6 +617,20 @@ class SiteConnections:
     def _owner(self, aid):
         account = self.hub.identity.get_account(aid)
         return hashlib.sha256((account['origin'] + '\0' + account['canvas_user_id']).encode()).hexdigest()
+
+    def https_source(self, aid, sid, consent):
+        source = self._source(aid, sid)
+        p = urlsplit(source['url'])
+        if consent is not True or p.scheme != 'http' or source['access_needed']:
+            raise InvalidInput('Review the HTTPS version of this public HTTP address first')
+        target = urlunsplit(('https', p.netloc, p.path, p.query, ''))
+        # A different scheme is a separately reviewed source. Do not rewrite
+        # existing evidence or send credentials over an insecure connection.
+        service = self.hub.external_sources
+        new_sid = service.register(aid, target, course_id=source['course_id'], title=target)
+        with self.hub.db.tx() as c:
+            c.execute('INSERT OR IGNORE INTO external_source_origins SELECT ?,item_id FROM external_source_origins WHERE source_id=?', (new_sid, sid))
+        return service.get(aid, new_sid)
 
     def offer(self, aid, sid, extra_origins):
         source = self._source(aid, sid)
@@ -570,7 +699,7 @@ class SiteConnections:
         session = self._session(aid, sid)
         if session is None or session.snapshot()['state'] in ('closed', 'error'):
             raise Conflict('Open the site connection first')
-        if action not in ('cancel', 'verify', 'approve_post', 'retry_login', 'confirm_content', 'analysis_snapshot'):
+        if action not in ('cancel', 'verify', 'http_auth', 'approve_post', 'retry_login', 'confirm_content', 'analysis_snapshot'):
             raise InvalidInput('Unknown connection action')
         result = session.call(action, arg)
         if action == 'analysis_snapshot':
