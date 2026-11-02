@@ -45,7 +45,7 @@ class SourceAnalysis:
             raise InvalidInput('Set up a provider in Assistant settings.', code='assistant_not_configured')
         with assistant._cfg_lock:
             cfg, _, _ = assistant._message_config()
-        if cfg['provider'] not in ('anthropic', 'openai_compatible'):
+        if cfg['provider'] not in ('anthropic', 'openai_compatible', 'codex'):
             raise InvalidInput('Choose an API setup in Assistant settings, or use a connected MCP Agent.', code='assistant_not_configured')
         return cfg
 
@@ -56,6 +56,8 @@ class SourceAnalysis:
 
     @staticmethod
     def _endpoint(cfg):
+        if cfg['provider'] == 'codex':
+            return 'Codex CLI (OpenAI)'
         if not cfg.get('base_url'):
             return 'Anthropic API'
         p = urlsplit(cfg['base_url'])
@@ -77,7 +79,7 @@ class SourceAnalysis:
                       (token, aid, sid, self._fingerprint(aid, s, cfg), now_iso()))
         return {'available': True, 'token': token, 'urls': [s['url']], 'provider': cfg['provider'],
                 'setup': cfg.get('name'), 'endpoint': self._endpoint(cfg),
-                'model': cfg.get('model') or ANTHROPIC_DEFAULT_MODEL}
+                'model': cfg.get('model') or (ANTHROPIC_DEFAULT_MODEL if cfg['provider'] == 'anthropic' else 'Provider default')}
 
     def start(self, aid, sid, token, *, consent=False, reanalyze=False):
         if consent is not True or not isinstance(token, str):

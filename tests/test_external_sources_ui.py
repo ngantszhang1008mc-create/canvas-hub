@@ -8,8 +8,33 @@ import pytest
 from .test_components_ui import serve
 from .test_external_sources import source, classify, SPEC
 from .test_source_analysis import RESULT
+from .test_codex import fake_codex
 
 pytestmark=pytest.mark.browser
+
+
+def test_codex_link_analysis_disclosure_and_approval(hub, account, source, fake_codex):
+    from playwright.sync_api import expect, sync_playwright
+    setup, messages = fake_codex
+    setup(reply=json.dumps(RESULT))
+    svc, sid, reads = source
+    with serve(hub, []) as (base, token, api), sync_playwright() as p:
+        api.assistant.update_config({'preset': 'codex', 'model': '', 'name': 'Codex fixture'})
+        browser = p.chromium.launch()
+        page = browser.new_page()
+        page.goto(f'{base}/?token={token}')
+        page.goto(f'{base}/#/course/4242')
+        listing = page.locator('.external-source-list')
+        listing.get_by_role('button', name='Workspace actions', exact=True).click()
+        listing.locator('.workspace-action-icon[aria-label="Analyse link"]').click()
+        panel = page.get_by_role('complementary', name='Source Agent', exact=True)
+        expect(panel).to_contain_text('Codex CLI (OpenAI)')
+        expect(panel).to_contain_text('Provider default')
+        assert not reads and not messages()
+        panel.get_by_role('button', name='Approve and analyse', exact=True).click()
+        expect(panel.get_by_role('button', name='Approve, test and enable')).to_be_visible(timeout=10000)
+        assert len(reads) == 1 and svc.get(account['id'], sid)['request']['status'] == 'done'
+        browser.close()
 
 
 @pytest.mark.parametrize('executor',['builtin','mcp'])
