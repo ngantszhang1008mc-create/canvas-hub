@@ -22,6 +22,20 @@ SPEC = {'version':1,'pages':[URL],'format':'html','records':{'selector':'article
     'points_possible':{'selector':'.points'},'body':{'selector':'p'}}},'limitations':'Public pages; no submission or grade inference.'}
 
 
+def test_public_article_with_optional_login_form_is_not_a_login_gate():
+    page = b'<article>' + b'Public course information. ' * 30 + b'</article><form><input type="password" value="secret"></form>'
+    result = PublicReader(lambda url:Read(url,200,'text/html',page)).read({'version':1,'pages':[URL],'format':'html'})
+    assert result[0]['content'].startswith('Public course information.')
+    assert 'secret' not in result[0]['content']
+
+
+def test_long_login_form_is_not_mistaken_for_course_content():
+    page = b'<main><form><input type="password">' + b'Please sign in. '*100 + b'</form></main>'
+    with pytest.raises(InvalidInput) as exc:
+        PublicReader(lambda url:Read(url,200,'text/html',page)).read({'version':1,'pages':[URL],'format':'html'})
+    assert exc.value.code == 'needs_login'
+
+
 @pytest.fixture
 def source(hub, account, fixture_pkg):
     fixture_pkg['items'][2].setdefault('links',[]).append({'relation':'body_link','to':{
@@ -106,6 +120,7 @@ def test_decline_cancel_reanalysis_and_failed_analysis(source,hub,account):
     hub.requests.claim(aid,rid,'agent')
     svc.submit_analysis(aid,rid,'agent',{'access_error':'Login required'})
     assert svc.get(aid,sid)['classification'] is None
+    assert svc.get(aid,sid)['status']=='needs_attention'  # Agent assertion is not verified login evidence.
     assert svc.analyze(aid,sid)['analysis_request_id']!=rid
     s=classify(svc,aid,sid);p=s['adapters'][0]
     svc.decide(aid,sid,p['revision'],p['spec_hash'],approve=False)

@@ -1,7 +1,7 @@
 """Anonymous detection uses synthetic pages and no real services."""
 import socket
 import pytest
-from tools import login_probe as probe
+from canvas_hub.services import login_detector as probe
 
 
 @pytest.mark.parametrize('body,expected,evidence', [

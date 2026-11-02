@@ -226,7 +226,9 @@ class ExternalSources:
                 if not isinstance(error, str):
                     raise InvalidInput('Access error must be text')
                 self.hub.requests._set(request_id, status='declined', result_note=error[:2000], completed_at=now_iso())
-                status = _reader_failure or ('needs_attention' if agent == 'Canvas Hub built-in Assistant' else 'needs_login')
+                # An Agent's free-text access error is not evidence of a login
+                # challenge; only trusted reader evidence may set needs_login.
+                status = _reader_failure or 'needs_attention'
                 c.execute('UPDATE external_sources SET status=?,error=? WHERE id=?', (status, error[:2000], sid))
                 return self.get(aid, sid)
             roles = result.get('roles')

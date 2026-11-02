@@ -171,7 +171,16 @@ class PublicReader:
             text = r.body.decode('utf-8', errors='replace')[:200_000]
         else:
             soup = BeautifulSoup(r.body, 'html.parser')
-            if soup.select('input[type="password"]') or soup.select('form[action*="login"]'):
+            # Optional sign-in forms often sit next to public course content.
+            # Treat a form as a gate only if there is no substantial main content.
+            has_form = bool(soup.select('input[type="password" i], form[action*="login" i]'))
+            def non_form_length(node):
+                copy = BeautifulSoup(str(node), 'html.parser')
+                for element in copy.select('form, script, style, iframe, object, noscript'):
+                    element.decompose()
+                return len(re.sub(r'\s+', '', copy.get_text(' ', strip=True)))
+            substantial = any(non_form_length(node) >= 300 for node in soup.select('main, article'))
+            if has_form and not substantial:
                 raise InvalidInput('Login page is not course content', code='needs_login')
             for tag in soup(['script', 'style', 'iframe', 'object', 'noscript', 'form']):
                 tag.decompose()

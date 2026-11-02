@@ -251,3 +251,36 @@ def test_batch_cancel_ui_and_item_scope(hub,account,source,monkeypatch):
             time.sleep(.05)
         assert not svc.get(aid,sid)['classification'] and not svc.get(aid,second)['analysis_request_id']
         browser.close()
+
+
+def test_site_connection_requires_review_and_consent_in_browser(hub, account, source, monkeypatch):
+    from playwright.sync_api import expect, sync_playwright
+    from .test_site_connection import FakeBrowser
+    created=[]
+    def make_browser(profile,target,domains):
+        created.append((profile,target,domains))
+        return FakeBrowser(profile,target,domains)
+    monkeypatch.setattr('canvas_hub.services.site_connection.BrowserConnection',make_browser)
+    with serve(hub,[]) as (base,token,_),sync_playwright() as p:
+        browser=p.chromium.launch(); page=browser.new_page(viewport={'width':380,'height':900})
+        errors=[]; page.on('pageerror',lambda e:errors.append(str(e)))
+        page.goto(f'{base}/?token={token}'); page.goto(f'{base}/#/course/4242')
+        listing=page.locator('.external-source-list')
+        listing.get_by_role('button',name='Workspace actions',exact=True).click()
+        listing.locator('.workspace-action-icon[aria-label="Analyse link"]').click()
+        panel=page.get_by_role('complementary',name='Source Agent',exact=True)
+        box=panel.get_by_role('region',name='Site connection')
+        expect(box.get_by_role('button',name='Review connection')).to_be_visible()
+        assert not created
+        box.get_by_label('Additional identity-provider origins').fill('https://identity.example.edu')
+        box.get_by_role('button',name='Review connection').click()
+        expect(box).to_contain_text('https://identity.example.edu')
+        expect(box).to_contain_text('persistent local browser profile')
+        assert not created
+        box.get_by_role('button',name='Agree and open sign-in window').click()
+        expect(box).to_contain_text('Connection: opening')
+        assert len(created)==1 and 'https://identity.example.edu' in created[0][2]
+        box.get_by_role('button',name='Close connection').click()
+        expect(box).to_contain_text('Connection: closed')
+        assert not errors
+        browser.close()
