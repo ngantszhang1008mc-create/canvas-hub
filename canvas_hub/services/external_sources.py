@@ -194,21 +194,25 @@ class ExternalSources:
             self.db.conn.execute('UPDATE external_sources SET analysis_request_id=?,error=NULL WHERE id=?', (req['id'], sid))
         return self.get(aid, sid)
 
-    def submit_analysis(self, aid, request_id, agent_name, result, *, _builtin=False, _attempt_token=None, _reader_failure=None, _connected=False):
+    def submit_analysis(self, aid, request_id, agent_name, result, *, _builtin=False, _attempt_token=None, _reader_failure=None, _connected=False, _classification_coverage=None):
         if _check_agent(agent_name) == 'Canvas Hub built-in Assistant' and not _builtin:
             raise Conflict('Built-in analysis cannot be submitted by a connected Agent')
         if _reader_failure is not None and (not _builtin or _reader_failure not in ('needs_login', 'needs_attention', 'stale')):
             raise InvalidInput('Invalid reader failure')
         if _connected and (not _builtin or not _attempt_token):
             raise InvalidInput('Connected snapshots require an active built-in attempt')
-        source = self._submit_analysis(aid, request_id, agent_name, result, _attempt_token=_attempt_token, _reader_failure=_reader_failure, _connected=_connected)
+        if _classification_coverage is not None and not _builtin:
+            raise InvalidInput('Classification coverage requires a built-in attempt')
+        source = self._submit_analysis(aid, request_id, agent_name, result, _attempt_token=_attempt_token,
+                                       _reader_failure=_reader_failure, _connected=_connected,
+                                       _classification_coverage=_classification_coverage)
         # Proposal/access changes can pause previously available evidence without
         # performing a read. Update saved tool status after releasing the source
         # transaction, preserving the user's interactive state.
         self.hub.components.sync_sources(aid)
         return source
 
-    def _submit_analysis(self, aid, request_id, agent_name, result, *, _attempt_token=None, _reader_failure=None, _connected=False):
+    def _submit_analysis(self, aid, request_id, agent_name, result, *, _attempt_token=None, _reader_failure=None, _connected=False, _classification_coverage=None):
         agent = _check_agent(agent_name)
         if not isinstance(result, dict) or set(result) - {'roles','confidence','evidence_url','read_at','summary','content','access_error','adapter_spec'}:
             raise InvalidInput('Invalid source analysis fields')
@@ -253,6 +257,8 @@ class ExternalSources:
                 raise InvalidInput('Login page evidence cannot establish course contents; report access_error')
             classification = {k: result[k] for k in ('roles','confidence','evidence_url','read_at','summary') if k in result}
             classification['provided_by'] = agent
+            if _classification_coverage is not None:
+                classification['evidence_coverage'] = _classification_coverage
             if _connected:
                 classification['access_mode'] = 'connected_local_reviewed'
             spec = validate_spec(result['adapter_spec']) if result.get('adapter_spec') else None
@@ -266,7 +272,7 @@ class ExternalSources:
             c.execute("UPDATE external_sources SET classification_json=?,status='analyzed',error=NULL WHERE id=?",
                       (canonical_json(classification), sid))
             c.execute('INSERT INTO external_reads(source_id,read_at,status,evidence_json,detail) VALUES (?,?,?,?,?)',
-                      (sid, result['read_at'], 'connected_read' if _connected else 'agent_read', canonical_json([{'url':evidence, 'content':result['content'], 'provided_by':agent, **({'access_mode':'connected_local_reviewed'} if _connected else {})}]), None))
+                      (sid, result['read_at'], 'connected_read' if _connected else 'agent_read', canonical_json([{'url':evidence, 'content':result['content'], 'provided_by':agent, **({'classification_coverage':_classification_coverage} if _classification_coverage is not None else {}), **({'access_mode':'connected_local_reviewed'} if _connected else {})}]), None))
             if _connected:
                 self._publish(aid, s, [{'url':evidence, 'content':result['content'], 'records':[]}], 0, result['read_at'], connected=True)
                 c.execute("UPDATE external_sources SET status='enabled',last_attempt_at=?,last_success_at=?,error=NULL WHERE id=?", (result['read_at'],result['read_at'],sid))

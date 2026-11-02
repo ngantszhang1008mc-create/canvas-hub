@@ -33,6 +33,7 @@ from ..util import HubError, InvalidInput, NotFound, now_iso
 from .providers import ANTHROPIC_DEFAULT_MODEL, RESERVED_PARAMS, ProviderError, Stopped, make_provider
 from .context import Policy, validate_settings
 from .context_service import ContextService
+from .source_context import source_manifest, restore_source_context
 from .gateway_settings import GATEWAY_FIELDS, GatewaySettings, apply_gateway
 
 log = logging.getLogger("canvas_hub.assistant")
@@ -621,7 +622,7 @@ class AssistantService(ContextService, GatewaySettings):
         return hashlib.sha256(json.dumps(fields, sort_keys=True).encode()).hexdigest()
 
     def send(self, account_id: int, text: str, conversation_id: int | None = None, profile_id: str | None = None,
-             reasoning: str | None = None, model: str | None = None) -> dict:
+             reasoning: str | None = None, model: str | None = None, *, request_context: dict | None = None) -> dict:
         # Pin the selected setup while claiming the conversation. A second send
         # cannot append a user message until the current run has finished.
         with self._cfg_lock:
@@ -666,15 +667,22 @@ class AssistantService(ContextService, GatewaySettings):
                             raise InvalidInput("Review and acknowledge this workspace's provider, model and source disclosure before sending.",
                                                code="disclosure_required")
                     cid = conv["id"]
+                    if request_context is not None and request_context["scope"] != {
+                            "course_id": conv["scope_course_id"], "item_id": conv["scope_item_id"]}:
+                        raise InvalidInput("Request sources must match the acknowledged workspace scope")
                 else:
+                    if request_context is not None:
+                        raise InvalidInput("Request sources require an acknowledged workspace conversation")
                     cid = c.execute("INSERT INTO assistant_conversations(account_id, title, created_at, updated_at) VALUES (?,?,?,?)",
                                     (account_id, text[:80], now_iso(), now_iso())).lastrowid
                 self._repair(cid)
                 self._append(cid, "user", {"text": text, "sent_text": sent, "setup": cfg.get("name"), "reasoning": reasoning,
-                                           "model": model or None})
+                                           "model": model or None,
+                                           **({"source_context": source_manifest(request_context)} if request_context is not None else {})})
                 self._set_state(cid, "running")
             self._cancel.discard(cid)
-            th = threading.Thread(target=self._run, args=(cid, account_id, cfg, acct), name=f"assistant-{cid}", daemon=True)
+            th = threading.Thread(target=self._run, args=(cid, account_id, cfg, acct),
+                                  kwargs={"request_context": request_context}, name=f"assistant-{cid}", daemon=True)
             self._threads[cid] = th
             try:
                 th.start()
@@ -736,7 +744,8 @@ class AssistantService(ContextService, GatewaySettings):
                                     deadlines_rule=("You may manage tabs and filters and archive/restore deadlines when asked."
                                       if "deadlines" in perms else "The user has disabled deadline management; do not change it."))
 
-    def _run(self, cid: int, account_id: int, cfg: dict, acct: dict, allow_tools=True, compact_only=False) -> None:
+    def _run(self, cid: int, account_id: int, cfg: dict, acct: dict, allow_tools=True, compact_only=False,
+             request_context=None) -> None:
         provider = None
         final_state, final_error = "idle", None
         try:
@@ -775,6 +784,10 @@ class AssistantService(ContextService, GatewaySettings):
                 self._compact_context(cid, account_id, cfg,
                                       self._context_projection(cid, account_id, self._transcript(cid)), make_provider)
                 return
+            if request_context is None:
+                latest_user = next((m for m in reversed(self._transcript(cid)) if m["role"] == "user"), {})
+                if latest_user.get("source_context"):
+                    request_context = restore_source_context(self.hub, account_id, latest_user["source_context"])
             provider = make_provider(cfg)
             compact_attempted = False
             for _step in range(MAX_STEPS):
@@ -792,7 +805,8 @@ class AssistantService(ContextService, GatewaySettings):
                         transcript.append({"role": "user", "sent_text": "Continue the interrupted answer using the existing conversation. Tools are unavailable for this retry."})
                     transcript, attempted = self._prepare_context(
                         cid, account_id, cfg, system, transcript, tools, make_provider,
-                        allow_compact=not compact_attempted, provider_pending=bool(getattr(provider, "pending", None)))
+                        allow_compact=not compact_attempted, provider_pending=bool(getattr(provider, "pending", None)),
+                        request_context=request_context)
                     compact_attempted = compact_attempted or attempted
                     turn, usage_request_id = self._complete_with_usage(cid, cfg, provider, system, transcript, tools, on_text)
                 except Stopped:

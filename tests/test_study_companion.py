@@ -86,12 +86,14 @@ def test_context_includes_evidence_and_limits_without_ai(study, monkeypatch):
                                   "extraction_status": "ok"}]
         return item
     monkeypatch.setattr(api, "read_item", with_attachment)
-    monkeypatch.setattr(api, "read_resource_text", lambda *a, **k: {"text": "Include three citations", "next_offset": 3500})
+    # A resource absent from the index must be disclosed, never a made-up
+    # opening excerpt treated as a complete requirement set.
+    monkeypatch.setattr(api, "read_resource_text", lambda *a, **k: pytest.fail("must not read an unversioned prefix"))
     before = api.hub.db.one("SELECT COUNT(*) n FROM assistant_conversations")["n"]
     request = api.study_context(aid, item_id=iid)
-    assert "Include three citations" in request["prompt"]
+    assert request["request_context"]["sources"]
     assert f"item_id={iid}" in request["prompt"] and "show_checklist" in request["prompt"]
-    assert "truncated" in " ".join(request["warnings"])
+    assert "no indexed text" in " ".join(request["warnings"])
     assert len(request["prompt"]) < 20000
     assert api.hub.db.one("SELECT COUNT(*) n FROM assistant_conversations")["n"] == before
     course_request = api.study_context(aid, course_id=course)

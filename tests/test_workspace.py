@@ -197,7 +197,7 @@ def test_prepare_has_reviewable_sources_and_never_calls_provider(workspace):
     assert not w["factories"]
     ask = prepare(w, action="ask", text="What should I do first?")
     assert ask["conversation_id"] == prepared["conversation_id"]
-    assert ask["prompt"].startswith("What should I do first?") and "Stored source excerpts" in ask["prompt"]
+    assert ask["prompt"].startswith("What should I do first?") and "Source manifest" in ask["prompt"]
     grading = prepare(w, action="grading", item_id=None, course_id=w["course"])
     assert "show_score_model" in grading["prompt"] and grading["conversation_id"] != ask["conversation_id"]
 
