@@ -448,7 +448,63 @@ class ComponentSourceSync:
     def sync_sources(self, account_id):
         with self._lock, self.db.tx():
             rows = self.db.query("SELECT * FROM components WHERE account_id=? AND source_config_json!='{}' ORDER BY id", (account_id,))
-            return [self._sync_component(account_id, dict(row)) for row in rows]
+            result = [self._sync_component(account_id, dict(row)) for row in rows]
+            self.db.conn.execute("DELETE FROM component_source_changes WHERE account_id=?", (account_id,))
+            return result
+
+    def sync_changed_sources(self, account_id, *, item_ids=(), course_ids=()):
+        """Refresh only components depending on this batch of observations.
+
+        Equal values with a newer observation still matter for source freshness.
+        Review sources also depend on their linked files, and collections depend
+        on new assignments/submissions and on assignment coverage, even when an
+        index has no rows. IDs are validated against account ownership in SQL.
+        Dependency triggers cover creation, reconfiguration, undo and migration;
+        no in-memory cache or delayed callback can lose work on restart.
+        """
+        item_ids = set(item_ids)
+        course_ids = {str(course) for course in course_ids if course is not None}
+        with self._lock, self.db.tx():
+            pending = self.db.query("SELECT dependency_kind,dependency_key FROM component_source_changes WHERE account_id=?", (account_id,))
+            item_ids.update(int(r["dependency_key"]) for r in pending if r["dependency_kind"] == "item")
+            course_ids.update(r["dependency_key"] for r in pending if r["dependency_kind"] == "collection")
+            item_ids = sorted(item_ids)
+            affected = set()
+            # Keep SQL variable use bounded for large packages; refresh each
+            # selected component just once after all dependency chunks merge.
+            for offset in range(0, len(item_ids), 400):
+                chunk = item_ids[offset:offset + 400]
+                placeholders = ",".join("?" for _ in chunk)
+                owned = self.db.query(
+                    f"SELECT id,item_type,course_canvas_id FROM items WHERE account_id=? AND id IN ({placeholders})",
+                    (account_id, *chunk))
+                owned_ids = [r["id"] for r in owned]
+                course_ids.update(str(r["course_canvas_id"]) for r in owned
+                                  if r["item_type"] in ("assignment", "submission") and r["course_canvas_id"] is not None)
+                if not owned_ids:
+                    continue
+                q = ",".join("?" for _ in owned_ids)
+                affected.update(r["component_id"] for r in self.db.query(
+                    f"""SELECT component_id FROM component_source_dependencies
+                        WHERE account_id=? AND dependency_kind='item' AND dependency_key IN (
+                            SELECT CAST(id AS TEXT) FROM items WHERE account_id=? AND id IN ({q})
+                            UNION
+                            SELECT CAST(l.from_item_id AS TEXT) FROM item_links l
+                            JOIN items target ON target.id=l.to_item_id AND target.account_id=l.account_id
+                            WHERE l.account_id=? AND l.to_item_id IN ({q})
+                            AND (l.relation='attachment' OR target.item_type='file'))""",
+                    (account_id, account_id, *owned_ids, account_id, *owned_ids)))
+            courses = sorted(course_ids)
+            for offset in range(0, len(courses), 400):
+                chunk = courses[offset:offset + 400]
+                q = ",".join("?" for _ in chunk)
+                affected.update(r["component_id"] for r in self.db.query(
+                    f"""SELECT component_id FROM component_source_dependencies
+                        WHERE account_id=? AND dependency_kind='collection' AND dependency_key IN ({q})""",
+                    (account_id, *chunk)))
+            result = [self._sync_component(account_id, self._row(account_id, cid)) for cid in sorted(affected)]
+            self.db.conn.execute("DELETE FROM component_source_changes WHERE account_id=?", (account_id,))
+            return result
 
     def set_source_override(self, account_id, cid, target, value=None, follow_source=False):
         if not isinstance(follow_source, bool):

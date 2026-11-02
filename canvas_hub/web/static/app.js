@@ -1110,9 +1110,9 @@ VIEWS.collect = async (main) => {
   const hasThorough = jobs.jobs.some((j) => ["baseline", "thorough"].includes(j.mode) && ["completed", "completed_with_gaps"].includes(j.state));
 
   const modes = h("div", { class: "grid cols-3" },
-    modeCard("Baseline", "Thorough first collection of everything in scope, including document downloads.", "baseline", !hasThorough),
-    modeCard("Thorough refresh", "Re-reads lists, bodies and documents. Needed to confirm unchanged content and to check items that disappeared.", "thorough", hasThorough),
-    modeCard("Quick check", "Re-reads lists, dates, submission states and grades. Bodies are re-read only if Canvas shows a newer update time.", "quick", false));
+    modeCard("Baseline", "First collection of everything in scope. Core data becomes usable before background downloads and document processing finish.", "baseline", !hasThorough),
+    modeCard("Thorough refresh", "Full verification: re-reads lists, bodies and documents, including unchanged content and disappeared items. Background work must finish before the job is complete.", "thorough", false),
+    modeCard("Incremental sync", "Everyday update of lists, dates, submission states and grades. Fetches new or changed content; unchanged bodies retain their earlier verification time.", "quick", hasThorough));
   const signBanner = !signedIn ? h("div", { class: "banner warn" }, h("div", { class: "b-body" }, h("div", { class: "b-title" }, "Not signed in"),
     h("div", { class: "small" }, "Jobs can be queued now; they start after you sign in and resume automatically if a session expires.")),
     inst ? h("button", { class: "primary", onclick: () => openLogin(inst.id) }, "Sign in") : null) : null;
@@ -1153,27 +1153,57 @@ function modeCard(title, text, mode, primary) {
     h("button", { class: primary ? "primary" : "", onclick: () => startJob(mode) }, `Start ${title.toLowerCase()}`));
 }
 
+function jobPhases(j) {
+  if (j.kind !== "collect") return null;
+  const phases = j.phases || {};
+  const active = ["running", "queued", "cancel_requested"].includes(j.state);
+  const coreStatus = j.stats?.core_status;
+  return h("div", { class: "job-phases" },
+    coreStatus ? h("div", { class: "job-core-notice small" },
+      h("strong", null, coreStatus === "updated" ? "Core data updated" : "Core collection finished with gaps"),
+      " · You can use your workspace now. Background work has its own status below. ",
+      h("a", { href: "#/overall" }, "Open workspace")) : null,
+    [["core", "Core metadata"], ["downloads", "Attachment downloads"], ["processing", "Document processing"],
+      ["verification", "Supplemental verification"]].map(([key, label]) => {
+      const counts = phases[key] || {};
+      const total = counts.total || 0;
+      const done = counts.done || 0;
+      const status = [
+        `${done} done`,
+        counts.running ? `${counts.running} running` : null,
+        counts.pending ? `${counts.pending} pending` : null,
+        counts.failed ? `${counts.failed} failed` : null,
+        counts.blocked ? `${counts.blocked} blocked` : null,
+        counts.skipped ? `${counts.skipped} skipped` : null,
+      ].filter(Boolean).join(" · ");
+      return h("div", { class: "job-phase", "data-phase": key },
+        h("div", { class: "spread small" }, h("strong", null, label),
+          h("span", { class: counts.failed || counts.blocked ? "warn-text" : "muted" },
+            total ? status : active ? "No tasks queued yet" : "No tasks queued")),
+        total ? h("div", { class: "progress", role: "meter", "aria-label": `${label}: successful tasks`,
+          "aria-valuenow": done, "aria-valuemin": 0, "aria-valuemax": total,
+          "aria-valuetext": `${done} of ${total} discovered tasks successful` },
+          h("span", { style: `width:${Math.min(100, done / total * 100)}%` })) : null);
+    }),
+    active ? h("div", { class: "tiny muted" }, "Counts reflect tasks discovered so far; more may be added. A finished phase does not mean all content is collected.") : null);
+}
+
 function jobLi(j) {
-  const t = j.tasks || {};
-  const total = Object.values(t).reduce((a, b) => a + b, 0);
-  const done = (t.done || 0) + (t.failed || 0) + (t.blocked || 0) + (t.skipped || 0);
-  const pct = total ? Math.round((done / total) * 100) : 0;
   const act = (a) => async () => { await guard(() => api(A(`/jobs/${j.id}/${a}`), { method: "POST" })); route(); };
-  return h("li", null, h("div", { class: "spread" },
-    h("div", { class: "row" }, h("span", { class: "strong" }, `Job ${j.id}`), h("span", { class: "muted" }, { baseline: "Baseline", thorough: "Thorough refresh", quick: "Quick check", import: "Import" }[j.mode] || j.mode),
+  return h("li", { class: "collection-job", "data-job-id": j.id }, h("div", { class: "spread" },
+    h("div", { class: "row" }, h("span", { class: "strong" }, `Job ${j.id}`), h("span", { class: "muted" }, { baseline: "Baseline", thorough: "Thorough refresh", quick: "Incremental sync", import: "Import" }[j.mode] || j.mode),
       pill(JOB_CLASS[j.state] || "muted", JOB_LABEL[j.state] || j.state)),
     h("div", { class: "row" },
       ["running", "queued"].includes(j.state) ? h("button", { class: "sm", onclick: act("pause") }, "Pause") : null,
-      j.resumable ? h("button", { class: "sm primary", onclick: act("resume") }, "Resume") : null,
+      j.resumable ? h("button", { class: "sm primary", onclick: act("resume") }, j.state === "completed_with_gaps" ? "Retry failed tasks" : "Resume") : null,
       j.cancellable ? h("button", { class: "sm danger", onclick: act("cancel") }, "Cancel") : null)),
     h("div", { class: "small", style: "margin-top:4px" }, j.message || ""),
-    total && j.kind === "collect" ? h("div", { style: "margin-top:6px" }, h("div", { class: "progress" }, h("span", { style: `width:${pct}%` })),
-      h("div", { class: "li-meta" }, h("span", null, `${t.done || 0} done`), t.pending ? h("span", null, `${t.pending} pending`) : null,
-        t.failed ? h("span", null, `${t.failed} failed`) : null, t.blocked ? h("span", null, `${t.blocked} blocked`) : null,
-        j.stats && j.stats.current_task && j.state === "running" ? h("span", { class: "mono" }, j.stats.current_task) : null,
-        j.stats && j.stats.view_completion_skipped ? h("span", null, `${j.stats.view_completion_skipped} view-to-complete item(s) not opened`) : null)) : null,
-    h("div", { class: "li-meta" }, h("span", null, "created " + fmtDate(j.created_at)), j.finished_at ? h("span", null, "finished " + ago(j.finished_at)) : null,
-      j.stats && j.stats.events ? h("span", null, `${j.stats.events} change events`) : null, j.error ? h("span", { class: "muted" }, j.error) : null));
+    jobPhases(j),
+    h("div", { class: "li-meta" },
+      j.stats?.current_task && j.state === "running" ? h("span", { class: "mono job-current-task" }, j.stats.current_task) : null,
+      j.stats?.view_completion_skipped ? h("span", null, `${j.stats.view_completion_skipped} view-to-complete item(s) not opened`) : null,
+      h("span", null, "created " + fmtDate(j.created_at)), j.finished_at ? h("span", null, "finished " + ago(j.finished_at)) : null,
+      j.stats?.events ? h("span", null, `${j.stats.events} change events`) : null, j.error ? h("span", { class: "muted" }, j.error) : null));
 }
 
 function scopeEditor(scope, courses) {
@@ -1200,6 +1230,9 @@ function scopeEditor(scope, courses) {
         h("label", { class: "field" }, h("span", null, "Discussion replies"), h("select", { onchange: (e) => { s.discussion_replies = e.target.value; } },
           [["staff_only", "Staff replies only"], ["counts_only", "Counts only"]].map(([v, l]) => h("option", { value: v, selected: v === s.discussion_replies ? true : null }, l))))),
       h("label", { class: "check" }, h("input", { type: "checkbox", checked: s.download_files ? true : null, onchange: (e) => { s.download_files = e.target.checked; } }), "Download files and extract their text"),
+      h("label", { class: "check", style: "display:flex;margin-top:10px" }, h("input", { type: "checkbox", checked: s.experimental_network_concurrency ? true : null,
+        onchange: (e) => { s.experimental_network_concurrency = e.target.checked; } }), "Concurrent Canvas requests (Experimental)"),
+      h("p", { class: "tiny muted" }, "Off by default. Allows up to two Canvas API requests at once, with shared rate limiting. Attachment downloads and document processing already run in bounded background queues."),
       h("label", { class: "check" }, viewC, "Allow opening view-to-complete module items", h("span", { class: "muted small" }, " (off by default)")),
       h("div", { class: "row" }, h("button", { class: "primary", onclick: async () => { const r = await guard(() => api(A("/scope"), { method: "PUT", body: s })); if (r) { toast("Scope saved"); await loadIdentities(); } } }, "Save scope"))));
 }

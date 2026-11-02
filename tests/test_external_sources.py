@@ -238,10 +238,11 @@ def test_text_pdf_and_multi_page_atomicity(source,account):
 def test_collection_finish_reuses_enabled_adapter(source,hub,account):
     from canvas_hub.collector.traversal import CollectionRun
     svc,sid,calls=source;aid=account['id'];enable(svc,aid,sid)
-    job=hub.jobs.create(account_id=aid,instance_id=account['instance_id'],kind='collect',mode='quick',scope={},state='running')
-    run=object.__new__(CollectionRun)
-    run.hub=hub;run.account=account;run.job_id=job['id'];run.scoped_courses=['4242']
+    job=hub.jobs.create(account_id=aid,instance_id=account['instance_id'],kind='collect',mode='quick',scope={'categories':[]},state='running')
+    run=CollectionRun(hub,None,job['id'])
+    run.scoped_courses=['4242']
     run._linked_coverage=lambda:None;run.should_stop=lambda:False
+    run._supplemental()
     assert run._finish()=='completed'
     assert len(calls)==2 and len(hub.requests.list(aid))==1
     assert hub.jobs.get(job['id'])['stats']['external_sources']==[{'id':sid,'status':'enabled'}]
@@ -275,6 +276,7 @@ def test_schema12_migration_preserves_existing_context_and_progress(tmp_path,mon
     monkeypatch.setattr(db,'_migration_files',lambda:[m for m in migrations() if m[0]<=12])
     old=Hub.open(paths)
     old.importer.after_discovery=None
+    old.importer.after_changed_import=None  # Simulate the pre-dependency-index application.
     fixture_pkg['items'][2].setdefault('links',[]).append({'relation':'body_link','to':{
         'type':'external_link','course_id':'4242','url':URL,'title':'Legacy course website'}})
     aid=old.importer.import_package(fixture_pkg,allow_new_account=True)['account_id']
