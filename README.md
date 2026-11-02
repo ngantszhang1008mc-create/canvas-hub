@@ -28,7 +28,13 @@ The main application is built and tested against a synthetic Canvas, both with a
 
 ## Install and run
 
-Install [uv](https://docs.astral.sh/uv/), which also installs a suitable Python.
+**First download Canvas Hub:** [Download ZIP](https://github.com/ngantszhang1008mc-create/canvas-hub/archive/refs/heads/main.zip)
+(or **Code → Download ZIP**), then extract it: double-click the ZIP on macOS, or
+right-click → **Extract All** on Windows. Open the extracted `canvas-hub-main`
+folder; keep the whole folder together and do not run launchers inside the ZIP.
+
+Install [uv](https://docs.astral.sh/uv/), which obtains a suitable Python when needed.
+**The commands below install uv only, not Canvas Hub.**
 
 On macOS:
 
@@ -42,20 +48,25 @@ On Windows, in PowerShell:
 powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 ```
 
-Start Canvas Hub by double-clicking the launcher for your computer:
+After installing uv, reopen Terminal/PowerShell to refresh PATH. In the extracted
+`canvas-hub-main` folder, double-click the launcher for your computer:
 
 - macOS: `scripts/start-canvas-hub.command`
 - Windows: `scripts/start-canvas-hub.cmd`
 
 The first run installs the Python dependencies and Playwright's Chromium browser (~150 MB). Your default browser opens the app at `http://127.0.0.1:8730/?token=…`. The link contains a private local access token.
 
-You can also start it from a terminal:
+You can also start it from a terminal: first `cd` into your extracted
+`canvas-hub-main` folder (the one containing `pyproject.toml`), then run:
 
 ```bash
 uv sync
 uv run playwright install chromium     # first time only
 uv run canvas-hub serve
 ```
+
+Alternatively, with Git installed, run `git clone https://github.com/ngantszhang1008mc-create/canvas-hub.git`
+and `cd canvas-hub`, then use the same launcher or terminal commands above.
 
 In the app:
 

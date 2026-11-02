@@ -8,8 +8,13 @@ Record each result as **pass**, **fail** (what you saw), or **n/a**. Once you've
 
 ## 0. Install and start
 
+First follow [Install and run](../README.md#install-and-run): download Canvas Hub,
+extract the ZIP, install uv, and reopen Terminal. Installing uv alone does not
+provide the project. The commands below assume the ZIP was extracted in Downloads;
+adjust the path for your location (a Git clone is normally named `canvas-hub`).
+
 ```bash
-cd canvas-hub
+cd "$HOME/Downloads/canvas-hub-main"
 ./scripts/start-canvas-hub.command
 ```
 
