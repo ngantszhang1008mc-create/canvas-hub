@@ -232,8 +232,10 @@ class SourceAnalysis:
     def eligible(sources):
         seen, result = set(), []
         for s in sources:
-            if (not s['analysis_request_id'] and not s['classification'] and s['decision'] == 'undecided'
-                    and not s['access_needed'] and s['status'] == 'unclassified' and s['url'] not in seen):
+            failed = (s.get('request') or {}).get('status') == 'declined'
+            fresh = not s['analysis_request_id'] and not s['classification'] and s['decision'] == 'undecided' and s['status'] == 'unclassified'
+            if ((fresh or failed) and not s.get('analysis_running')
+                    and not s['access_needed'] and s['url'] not in seen):
                 seen.add(s['url'])
                 result.append(s)
         return result
@@ -252,7 +254,7 @@ class SourceAnalysis:
         scope = self._scope(aid, course_id, item_id)
         sources = self.eligible(self.sources.list(aid, course_id, item_id))
         if not sources:
-            return {'available': False, 'message': 'No new public links in this scope.', 'scope': scope}
+            return {'available': False, 'message': 'No new or failed public links in this scope.', 'scope': scope}
         entries, disclosure = [], None
         for source in sources:
             disclosure = self.disclosure(aid, source['id'])
@@ -264,7 +266,9 @@ class SourceAnalysis:
             c.execute("DELETE FROM source_analysis_batches WHERE state='offered' AND julianday(created_at)<julianday('now','-1 day')")
             c.execute('INSERT INTO source_analysis_batches(token,account_id,scope_key,entries_json,created_at) VALUES (?,?,?,?,?)',
                       (token,aid,scope,canonical_json(entries),now_iso()))
-        return {**disclosure, 'token':token, 'urls':[e['url'] for e in entries], 'scope':scope, 'count':len(entries)}
+        retries = sum(1 for source in sources if (source.get('request') or {}).get('status') == 'declined')
+        return {**disclosure, 'token':token, 'urls':[e['url'] for e in entries], 'scope':scope, 'count':len(entries),
+                'new_count':len(entries)-retries, 'retry_count':retries}
 
     def _batch(self, aid, token):
         row = self.db.one('SELECT * FROM source_analysis_batches WHERE account_id=? AND token=?', (aid,token))
@@ -362,7 +366,8 @@ class SourceAnalysis:
                         if not self.eligible([s]):
                             entry['status']='skipped'
                         else:
-                            s=self.start(aid,entry['source_id'],entry['token'],consent=True)
+                            s=self.start(aid,entry['source_id'],entry['token'],consent=True,
+                                         reanalyze=(s.get('request') or {}).get('status') == 'declined')
                             entry.update(request_id=s['analysis_request_id'],status='running')
                     except (InvalidInput,Conflict,NotFound):
                         entry['status']='failed'
