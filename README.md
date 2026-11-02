@@ -160,7 +160,7 @@ or stop an assistant response.
 
 ## Your Overall workbench
 
-Overall holds directly interactive widgets: deadlines/tasks and optional Schedule, saved checklists, course score calculators and other useful tools. Use **> → Manage widgets** to pin, hide, reorder or set an explicit date/event/active-work condition. Ticks and sliders edit the same saved component you see in course/chat views, with undo. The Agent can propose placements for your review; opening Overall never runs a paid Agent request. See [widget behavior and synthetic preview](docs/OVERALL_WIDGETS.md).
+Overall holds directly interactive widgets: deadlines/tasks and optional Schedule, saved checklists, course score calculators and other useful tools. Use **‹ → Manage widgets** to pin, hide, reorder or set an explicit date/event/active-work condition. Ticks and sliders edit the same saved component you see in course/chat views, with undo. The Agent can propose placements for your review; opening Overall never runs a paid Agent request. See [widget behavior and synthetic preview](docs/OVERALL_WIDGETS.md).
 
 ## Organize deadlines
 
@@ -171,13 +171,15 @@ Archiving is local and survives refreshes and backups; it never changes Canvas o
 
 Each deadline tab saves its date range, course, type, completion and archive filters. Open **Edit deadline tabs**
 to rename, copy or delete a tab. These views are saved per Canvas account and shared with the assistant.
+Upcoming views also retain older unfinished assignments and quizzes until they are completed or archived.
+The course, type and archive filters still apply; **Completed**, **Past 30 days** and **All dates** keep their selected date behavior.
 
 The in-app assistant can manage these tabs, filters and archives too. **Assistant → Settings → The assistant may →
 Manage deadline tabs, filters and archives** is on by default; switch it off to disable assistant changes.
 
 ## Academic workspace
 
-Overall brings together upcoming work across courses and a saved Continue action. Assignment and course workspaces keep checklists beside requirements and source material, with an optional contextual Agent pane and a compact `>` action launcher. Checklist progress, local whole-assignment completion and Canvas submission state stay separate. Grade planning and optional hours tools remain secondary.
+Overall brings together upcoming work across courses and a saved Continue action. Assignment and course workspaces keep checklists beside requirements and source material, with an optional contextual Agent pane and a compact `‹` action launcher. Checklist progress, local whole-assignment completion and Canvas submission state stay separate. Grade planning and optional hours tools remain secondary.
 
 Declared Canvas field bindings refresh trackers deterministically after collection, retaining user state and explicit overrides. Interpreted text or attachment changes flag rules for review; Agent reparsing is explicit. Definition/grading replacements are proposed for approval. Contextual actions disclose the provider/model and source scope before first use, and each assignment has its own persistent conversation. See [the implementation note](docs/WORKSPACE_REDESIGN.md) for the source schema, migration behavior and optional follow-up work.
 

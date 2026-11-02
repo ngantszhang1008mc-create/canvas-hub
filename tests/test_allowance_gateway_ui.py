@@ -1,0 +1,86 @@
+"""One combined settings/context/source UI flow at desktop and phone widths."""
+import json
+import os
+from pathlib import Path
+
+import pytest
+
+from .test_allowance_gateway import gateway, setup, INVITE, SESSION, SUMMARY
+from .test_components_ui import serve
+from .test_external_sources import source
+from .test_source_analysis import RESULT
+from .test_assistant_context import conversation
+
+pytestmark = pytest.mark.browser
+
+
+@pytest.mark.parametrize('width', [1280, 380])
+def test_gateway_opt_in_context_and_source_flow(hub, account, source, gateway, width, tmp_path):
+    from playwright.sync_api import expect, sync_playwright
+    _, cid = conversation(hub, account)
+    def response(request):
+        system = request['body']['messages'][0]['content']
+        text = SUMMARY if system.startswith('Summarize historical') else json.dumps(RESULT)
+        return gateway.events(request, text)
+    gateway.action = response
+    with serve(hub, []) as (base, token, api), sync_playwright() as pw:
+        service, pid = setup(api, gateway, consent=False)
+        browser = pw.chromium.launch()
+        try:
+            page = browser.new_page(viewport={'width': width, 'height': 1000})
+            errors = []
+            page.on('pageerror', lambda e: errors.append(str(e)))
+            page.goto(f'{base}/?token={token}')
+            page.goto(f'{base}/#/assistant/settings?p={pid}')
+            card = page.locator('.card').filter(has=page.get_by_role('heading', name='Offline allowance', exact=True))
+            expect(card.get_by_label('Automatically compact older turns', exact=False)).not_to_be_checked()
+            expect(card.get_by_role('button', name='Connect with invitation')).to_be_disabled()
+            card.get_by_label('I allow selected conversation and course excerpts', exact=False).check()
+            card.get_by_label('Invitation', exact=True).fill(INVITE)
+            assert not gateway.enrollments and not gateway.requests
+            card.get_by_role('button', name='Connect with invitation').click()
+            expect(card).to_contain_text('Gateway connected', timeout=10000)
+            expect(card.get_by_label('Invitation', exact=True)).to_have_value('')
+            expect(page.locator('[data-setup-summary]').filter(has_text='mock-text')).to_contain_text('session saved')
+            expect(card).to_contain_text('9000000 micro-USD')
+            assert len(gateway.enrollments) == 1 and not gateway.requests
+            gateway.tools = ['get_component_context', 'patch_component_state']
+            card.get_by_role('button', name='Check allowance', exact=True).click()
+            expect(card).to_contain_text('Reported allowance')
+            card.get_by_text('3 enabled tools · model limits', exact=True).click()
+            stale = card.get_by_label('list_components (unavailable; uncheck to remove)', exact=True)
+            expect(stale).to_be_checked()
+            stale.uncheck()
+            card.get_by_role('button', name='Check allowance', exact=True).click()
+            expect(card).to_contain_text('2 enabled tools · model limits')
+            assert service._load(pid)['gateway_tools'] == gateway.tools
+            assert not gateway.requests and SESSION not in page.content()
+            artifact = Path(os.environ.get('CANVAS_HUB_NEXT_SCREENSHOTS', str(tmp_path / 'screenshots')))
+            artifact.mkdir(parents=True, exist_ok=True)
+            page.screenshot(path=str(artifact / f'gateway-settings-{width}.png'), full_page=True)
+            assert page.evaluate('document.documentElement.scrollWidth <= innerWidth + 1'), page.evaluate('''() =>
+                [...document.querySelectorAll('body *')].filter(el => el.getBoundingClientRect().right > innerWidth + 1)
+                .slice(0, 15).map(el => ({tag:el.tagName, cls:el.className, width:el.getBoundingClientRect().width}))''')
+
+            page.goto(f'{base}/#/assistant/{cid}')
+            page.get_by_text('Context & usage', exact=True).click()
+            page.get_by_role('button', name='Compact conversation', exact=True).click()
+            expect(page.get_by_text('Older turns compacted through message', exact=False)).to_be_visible(timeout=10000)
+            assert len(gateway.requests) == 1 and gateway.requests[0]['body']['max_output_tokens'] == 1024
+            page.screenshot(path=str(artifact / f'gateway-context-{width}.png'), full_page=True)
+
+            page.goto(f'{base}/#/course/4242')
+            listing = page.locator('.external-source-list')
+            listing.get_by_role('button', name='Workspace actions', exact=True).click()
+            listing.locator('.workspace-action-icon[aria-label="Analyse link"]').click()
+            panel = page.get_by_role('complementary', name='Source Agent', exact=True)
+            expect(panel).to_contain_text('mock gateway; no paid model is contacted')
+            assert len(gateway.requests) == 1
+            panel.get_by_role('button', name='Approve and analyse', exact=True).click()
+            expect(panel.get_by_role('button', name='Approve, test and enable')).to_be_visible(timeout=10000)
+            assert len(gateway.requests) == 2 and gateway.requests[-1]['body']['tools'] == []
+            assert page.evaluate('document.documentElement.scrollWidth <= innerWidth + 1')
+            page.screenshot(path=str(artifact / f'gateway-source-{width}.png'), full_page=True)
+            assert not errors, errors
+        finally:
+            browser.close()

@@ -10,6 +10,7 @@ import shutil
 import sys
 from importlib import resources as importlib_resources
 from pathlib import Path
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
@@ -42,10 +43,23 @@ def mcp_command() -> list[str]:
 
 
 def create_app(api: HubAPI, *, token: str, port: int) -> FastAPI:
-    app = FastAPI(title="Canvas Hub", docs_url=None, redoc_url=None, openapi_url=None)
+    from ..services.site_connection import SiteConnections
+    site_connections = SiteConnections(api.hub)
+
+    @asynccontextmanager
+    async def lifespan(_app):
+        try:
+            yield
+        finally:
+            await run_in_threadpool(site_connections.close)
+
+    app = FastAPI(title="Canvas Hub", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
     from ..services.source_analysis import SourceAnalysis
     source_analysis = SourceAnalysis(api)
     app.state.source_analysis = source_analysis
+    login_detection = source_analysis.login_detection
+    app.state.login_detection = login_detection
+    app.state.site_connections = site_connections
     hosts = allowed_hosts(port)
     own_origins = {f"http://{h}" for h in hosts}
 
@@ -419,11 +433,59 @@ def create_app(api: HubAPI, *, token: str, port: int) -> FastAPI:
 
     @app.get("/api/accounts/{aid}/external-sources/{sid}")
     def external_get(aid: int, sid: int):
+        source_analysis.check_failed_source(aid, sid)
         return external(aid).get(aid, sid)
 
     @app.get("/api/accounts/{aid}/external-sources/{sid}/disclosure")
     def external_disclosure(aid: int, sid: int):
         return source_analysis.disclosure(aid, sid)
+
+    @app.get("/api/accounts/{aid}/external-sources/{sid}/login-check")
+    def external_login_check(aid: int, sid: int):
+        return login_detection.get(aid, sid)
+
+    @app.post("/api/accounts/{aid}/external-sources/{sid}/login-check")
+    def external_login_check_start(aid: int, sid: int):
+        return login_detection.start(aid, sid)
+
+    @app.get("/api/accounts/{aid}/external-sources/{sid}/site-connection")
+    def site_connection_status(aid: int, sid: int):
+        return site_connections.status(aid, sid)
+
+    @app.post("/api/accounts/{aid}/external-sources/{sid}/site-connection/offer")
+    async def site_connection_offer(aid: int, sid: int, request: Request):
+        b = await body(request)
+        return site_connections.offer(aid, sid, b.get('identity_origins', []))
+
+    @app.post("/api/accounts/{aid}/external-sources/{sid}/site-connection/start")
+    async def site_connection_start(aid: int, sid: int, request: Request):
+        b = await body(request)
+        return site_connections.start(aid, sid, b.get('token'), b.get('consent'))
+
+    @app.post("/api/accounts/{aid}/external-sources/{sid}/https-source")
+    async def site_https_source(aid: int, sid: int, request: Request):
+        b = await body(request)
+        return site_connections.https_source(aid, sid, b.get('consent'))
+
+    @app.post("/api/accounts/{aid}/external-sources/{sid}/site-connection/{action}")
+    async def site_connection_action(aid: int, sid: int, action: str, request: Request):
+        b = await body(request)
+        if action == 'analysis_snapshot':
+            raise InvalidInput('Use the connected source review flow')
+        return await run_in_threadpool(lambda: site_connections.action(aid, sid, action, b.get('request')))
+
+    @app.post("/api/accounts/{aid}/external-sources/{sid}/connected-disclosure")
+    def connected_disclosure(aid: int, sid: int):
+        return source_analysis.connected_disclosure(aid, sid, site_connections)
+
+    @app.post("/api/accounts/{aid}/external-sources/{sid}/analyze-connected")
+    async def analyze_connected(aid: int, sid: int, request: Request):
+        b = await body(request)
+        # Connected approval rechecks the page synchronously in its browser.
+        # Keep that wait off the event loop so status/cancel requests can run.
+        return await run_in_threadpool(lambda: source_analysis.start(
+            aid, sid, b.get('token'), consent=b.get('consent') is True,
+            reanalyze=True, connected=True))
 
     @app.post("/api/accounts/{aid}/external-sources/{sid}/analyze")
     async def external_analyze(aid: int, sid: int, request: Request):
@@ -726,13 +788,22 @@ def create_app(api: HubAPI, *, token: str, port: int) -> FastAPI:
 
     @app.put("/api/assistant/config")
     async def assistant_set_config(request: Request):
-        return _assistant().update_config(await body(request))
+        data = await body(request)
+        return await run_in_threadpool(_assistant().update_config, data)
 
     @app.post("/api/assistant/test")
     async def assistant_test(request: Request):
         # The provider call can take minutes; keep it off the event loop.
         pid = (await body(request)).get("profile_id")
         return await run_in_threadpool(_assistant().test, pid)
+
+    @app.post('/api/assistant/gateway/enroll')
+    async def assistant_gateway_enroll(request: Request):
+        data = await body(request)
+        if set(data) - {'profile_id', 'invite', 'consent'}:
+            raise InvalidInput('Unsupported gateway enrollment fields.')
+        return await run_in_threadpool(lambda: _assistant().gateway_enroll(
+            data.get('profile_id'), data.get('invite'), consent=data.get('consent') is True))
 
     @app.get("/api/assistant/codex/models")
     async def assistant_codex_models(refresh: bool = False):
@@ -752,6 +823,10 @@ def create_app(api: HubAPI, *, token: str, port: int) -> FastAPI:
         api.get_account(aid)
         return {"conversations": _assistant().list_conversations(aid)}
 
+    @app.get("/api/accounts/{aid}/assistant/tools")
+    def assistant_tools(aid: int, profile_id: str | None = None):
+        return _assistant().tool_catalog(aid, profile_id)
+
     @app.post("/api/accounts/{aid}/assistant/messages")
     async def assistant_send(aid: int, request: Request):
         b = await body(request)
@@ -759,7 +834,7 @@ def create_app(api: HubAPI, *, token: str, port: int) -> FastAPI:
         cid = b.get("conversation_id")
         pid, reasoning, model = b.get("profile_id"), b.get("reasoning"), b.get("model")
         return _assistant().send(aid, b.get("text", ""), int(cid) if cid else None, str(pid) if pid else None,
-                                 str(reasoning) if reasoning else None, str(model) if model else None)
+                                 str(reasoning) if reasoning else None, str(model) if model else None, b.get("tool_selection"))
 
     @app.get("/api/accounts/{aid}/assistant/conversations/{cid}")
     def assistant_conversation(aid: int, cid: int, after: int = 0):
@@ -773,6 +848,11 @@ def create_app(api: HubAPI, *, token: str, port: int) -> FastAPI:
     async def assistant_retry(aid: int, cid: int, request: Request):
         b = await body(request)
         return _assistant().retry(aid, cid, b.get('profile_id'), b.get('reasoning'), b.get('model'))
+
+    @app.post("/api/accounts/{aid}/assistant/conversations/{cid}/compact")
+    async def assistant_compact(aid: int, cid: int, request: Request):
+        b = await body(request)
+        return _assistant().compact(aid, cid, b.get('profile_id'), b.get('reasoning'), b.get('model'))
 
     @app.delete("/api/accounts/{aid}/assistant/conversations/{cid}")
     def assistant_delete(aid: int, cid: int):

@@ -42,54 +42,79 @@ export function makeWorkspace(env) {
       h("span", null, `${p.done}/${p.total} steps`));
   }
 
-  // Mouse and keyboard activate directly; touch can inspect before confirming.
+  // One compact action row, shared by workspaces, widgets and source reviews.
+  let closeActiveLauncher = null;
   function launcher(actions) {
     const id = `workspace-actions-${++sequence}`;
-    let selected = null, executing = false;
-    const detail = h("div", { class: "workspace-action-description", id: `${id}-description`, "aria-live": "polite" }, "Choose an action to see what it does.");
-    const confirm = h("button", { class: "workspace-action-confirm", disabled: true });
-    const options = h("div", { class: "workspace-action-options", role: "group", "aria-label": "Available actions" });
-    const panel = h("div", { class: "workspace-action-popover", id, hidden: true, role: "dialog", "aria-label": "Workspace actions" }, options, detail, confirm);
+    let executing = false, listeners = null;
+    const options = h("div", { class: "workspace-action-options" });
+    const tray = h("div", { class: "workspace-action-tray", id, hidden: true, role: "group", "aria-label": "Available actions" }, options);
     const toggle = h("button", { class: "workspace-launcher-toggle", title: "Workspace actions", "aria-label": "Workspace actions", "aria-expanded": "false", "aria-controls": id },
-      h("span", { "aria-hidden": "true" }, ">"));
-    const root = h("div", { class: "workspace-launcher" }, toggle, panel);
+      h("span", { "aria-hidden": "true" }, "‹"));
+    const error = h("span", { class: "workspace-action-error", role: "alert", hidden: true });
+    const root = h("div", { class: "workspace-launcher" }, toggle, tray, error);
+    const tips = new Map();
+    const hideTips = () => root.querySelectorAll(".workspace-action-tooltip").forEach(t => { t.hidden = true; });
     function close(focus = false) {
-      panel.hidden = true; toggle.setAttribute("aria-expanded", "false");
-      if (focus) toggle.focus();
+      tray.hidden = true; hideTips(); error.hidden = true; toggle.setAttribute("aria-expanded", "false");
+      root.classList.remove("is-open");
+      listeners?.abort(); listeners = null;
+      if (closeActiveLauncher === close) closeActiveLauncher = null;
+      if (focus && toggle.isConnected) toggle.focus({ preventScroll: true });
     }
-    function choose(action, button) {
-      selected = action;
-      options.querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String(b === button)));
-      detail.replaceChildren(h("strong", null, action.label), h("p", null, action.description || action.label));
-      confirm.textContent = action.confirm || action.label;
-      confirm.disabled = executing;
+    function fitTray() {
+      const room = Math.max(0, toggle.getBoundingClientRect().left - 16);
+      root.style.setProperty("--launcher-room", `${room}px`);
+      root.classList.toggle("is-constrained", options.scrollWidth > room);
     }
     async function execute(action) {
-      if (!action || executing) return;
-      executing = true; confirm.disabled = true;
-      try { await action.run(); close(); }
-      catch (e) { detail.replaceChildren(notice(errorText(e))); }
-      finally { executing = false; confirm.disabled = false; }
+      if (executing) return;
+      executing = true; error.hidden = true; hideTips();
+      options.querySelectorAll("button").forEach(b => b.setAttribute("aria-disabled", "true"));
+      try { await action.run(); close(options.contains(document.activeElement)); }
+      catch (e) { error.textContent = errorText(e); error.hidden = false; }
+      finally { executing = false; options.querySelectorAll("button").forEach(b => b.removeAttribute("aria-disabled")); }
     }
-    for (const action of actions) {
-      const button = h("button", { class: "workspace-action-icon", title: `${action.label}: ${action.description || action.label}`,
-        "aria-label": action.label, "aria-pressed": "false", "aria-describedby": `${id}-description`, onclick: (event) => {
-          choose(action, button);
-          if (event.pointerType !== "touch" && !matchMedia("(hover: none) and (pointer: coarse)").matches) execute(action);
-        } }, icon(action.icon || "message"));
-      button.addEventListener("focus", () => choose(action, button));
-      button.addEventListener("mouseenter", () => choose(action, button));
+    for (const [index, action] of actions.entries()) {
+      const tip = h("span", { class: "workspace-action-tooltip", id: `${id}-tip-${index}`, role: "tooltip", hidden: true }, action.label);
+      const button = h("button", { class: "workspace-action-icon", "aria-label": action.label,
+        "aria-description": action.description || action.label, "aria-describedby": tip.id,
+        style: `--action-step:${index + 1}`, onclick: () => execute(action) }, icon(action.icon || "message"));
+      const showTip = () => {
+        if (tray.hidden || executing) return;
+        hideTips();
+        const rect = button.getBoundingClientRect();
+        if (rect.bottom < 0 || rect.top > innerHeight || rect.right < 0 || rect.left > innerWidth) return;
+        tip.hidden = false;
+        const width = tip.getBoundingClientRect().width;
+        tip.style.left = `${Math.max(8, Math.min(rect.left + (rect.width - width) / 2, innerWidth - width - 8))}px`;
+        tip.style.top = `${rect.bottom + tip.offsetHeight + 8 < innerHeight ? rect.bottom + 8 : rect.top - tip.offsetHeight - 8}px`;
+      };
+      button.addEventListener("focus", showTip);
+      button.addEventListener("mouseenter", showTip);
+      button.addEventListener("animationend", () => { if (button === document.activeElement || button.matches(":hover")) showTip(); });
+      button.addEventListener("mouseleave", () => { if (!button.matches(":focus-visible")) tip.hidden = true; });
+      button.addEventListener("blur", () => { tip.hidden = true; });
+      tips.set(button, showTip);
       options.append(button);
+      root.append(tip);
     }
     toggle.addEventListener("click", () => {
-      const opening = panel.hidden;
-      panel.hidden = !opening;
-      toggle.setAttribute("aria-expanded", String(opening));
-      if (opening) options.querySelector("button")?.focus();
-    });
-    confirm.addEventListener("click", async () => {
-      if (!selected || confirm.disabled) return;
-      await execute(selected);
+      if (!tray.hidden) { close(); return; }
+      closeActiveLauncher?.(); closeActiveLauncher = close;
+      tray.hidden = false; error.hidden = true; root.classList.add("is-open");
+      toggle.setAttribute("aria-expanded", "true"); fitTray();
+      options.querySelector("button")?.focus({ preventScroll: true });
+      listeners = new AbortController();
+      const { signal } = listeners;
+      document.addEventListener("pointerdown", e => { if (!root.contains(e.target)) close(); }, { signal });
+      document.addEventListener("click", e => { if (!root.contains(e.target)) close(); }, { signal });
+      document.addEventListener("focusin", e => { if (!root.contains(e.target)) close(); }, { signal });
+      window.addEventListener("resize", () => { hideTips(); fitTray(); }, { signal });
+      document.addEventListener("scroll", () => {
+        if (!root.isConnected) { close(); return; }
+        hideTips(); tips.get(document.activeElement)?.();
+      }, { signal, capture: true });
     });
     root.addEventListener("keydown", (e) => {
       if (e.key === "Escape") { e.stopPropagation(); close(true); }
@@ -97,19 +122,9 @@ export function makeWorkspace(env) {
         e.preventDefault();
         const buttons = [...options.querySelectorAll("button")];
         const index = buttons.indexOf(document.activeElement);
-        buttons[(index + (e.key === "ArrowRight" ? 1 : -1) + buttons.length) % buttons.length].focus();
-      }
-      if (e.key === "Tab" && !panel.hidden) {
-        if (e.shiftKey && document.activeElement === toggle) { e.preventDefault(); confirm.focus(); }
-        else if (!e.shiftKey && document.activeElement === confirm) { e.preventDefault(); toggle.focus(); }
+        buttons[(index + (e.key === "ArrowLeft" ? 1 : -1) + buttons.length) % buttons.length].focus();
       }
     });
-    // Aborting disconnected listeners prevents a new listener for every deadline row.
-    const controller = new AbortController();
-    document.addEventListener("click", (e) => {
-      if (!root.isConnected) { controller.abort(); return; }
-      if (!root.contains(e.target)) close();
-    }, { signal: controller.signal });
     return root;
   }
 

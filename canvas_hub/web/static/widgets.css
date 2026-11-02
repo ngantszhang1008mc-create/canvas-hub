@@ -7,11 +7,11 @@
 .overall-widget.widget-wide { grid-column:1 / -1; }
 .widget-heading { display:flex; justify-content:space-between; align-items:center; gap:12px; min-height:34px; }
 .widget-type { font:600 10px/1.4 var(--sans); letter-spacing:.08em; text-transform:uppercase; color:var(--text-3); }
-.widget-heading .workspace-launcher-toggle { width:34px; height:34px; font-size:20px; }
+.widget-heading .workspace-launcher { --launcher-size:34px; }
 .widget-why { display:flex; flex-wrap:wrap; gap:4px 12px; color:var(--text-2); font-size:11px; line-height:1.6; margin:4px 0 14px; overflow-wrap:anywhere; }
 .widget-why a { color:inherit; }
 .widget-origin { display:inline-block; font-size:12px; margin-top:10px; }
-.overall-widget > .saved-cmp { max-height:650px; overflow:auto; overscroll-behavior:contain; scrollbar-gutter:stable; }
+.overall-widget > .saved-cmp { min-width:0; }
 .overall-widget .cmp { margin:0; border:0; box-shadow:none; }
 .overall-widget .cmp-bar { padding:0 0 12px; flex-wrap:wrap; gap:8px; align-items:start; }
 .overall-widget .cmp-head { font-size:18px; }
@@ -48,17 +48,8 @@
 .widget-field :is(input,select) { width:100%; min-width:0; min-height:40px; }
 .widget-proposal { background:var(--accent-soft); border:1px solid var(--rule); border-radius:8px; padding:14px; margin-top:14px; font-size:13px; overflow-wrap:anywhere; }
 .widget-proposal p { margin:8px 0; }
-/* Reflow calculator rows; no sideways clipped controls on narrow cards/phones. */
+/* Projectors and hours widgets also retain their paired controls on phones. */
 @container (max-width:520px) {
-  .overall-widget .score-t:not(.proj-t) { table-layout:auto; }
-  .overall-widget .score-t:not(.proj-t) thead { display:none; }
-  .overall-widget .score-t:not(.proj-t) :is(tbody,tr) { display:block; }
-  .overall-widget .score-t:not(.proj-t) tr:not(.t-group) { display:grid; grid-template-columns:28px minmax(0,1fr) auto; align-items:center; padding:8px 0; border-bottom:1px solid var(--rule); }
-  .overall-widget .score-t:not(.proj-t) td { border:0; padding:4px; min-width:0; }
-  .overall-widget .score-t:not(.proj-t) td:nth-child(3) { display:none; }
-  .overall-widget .score-t:not(.proj-t) .st-inline { display:block; }
-  .overall-widget .score-t:not(.proj-t) td:nth-child(4) { grid-column:2 / -1; grid-row:2; }
-  .overall-widget .score-t:not(.proj-t) td:nth-child(5) { grid-column:3; grid-row:1; }
   .overall-widget .num-pair { width:100%; display:flex; gap:12px; }
   .overall-widget .num-slider { display:block; flex:1; min-width:0; height:36px; }
   .overall-widget .num-in { width:70px; min-height:36px; }
@@ -78,11 +69,10 @@
   .overall-widget .workspace-controls { gap:8px; }
   .overall-widget .cmp-tools { gap:2px; }
   .overall-widget .cmp-tools button { min-height:36px; }
-  .widget-heading .workspace-launcher-toggle { width:40px; height:40px; }
-  .overall-widget > .saved-cmp { max-height:650px; }
+  .widget-heading .workspace-launcher { --launcher-size:40px; }
 }
 
-.overall-widget .sl-kv { grid-template-columns:auto 1fr auto 1fr; font-size:11px; gap:4px 12px; }
+.overall-widget .sl-kv { font-size:11px; gap:4px 12px; }
 .overall-widget .sl-side { padding:10px; gap:8px; }
 
 .overall-widget .cmp-score:not(.fullscreen) .sl-side > .gauge-wrap { display:none; }

@@ -16,7 +16,6 @@ def launch(host, name, touch):
     activate = lambda control: control.tap() if touch else control.click()
     activate(host.get_by_role('button', name='Workspace actions', exact=True))
     activate(host.locator(f'.workspace-action-icon[aria-label="{name}"]'))
-    if touch: host.locator('.workspace-action-confirm').tap()
 
 
 @pytest.mark.parametrize('theme', ['light', 'dark'])
@@ -46,7 +45,7 @@ def test_source_refresh_home_controls_panels_and_stale_recovery(hub, integrated,
         launch(page.locator('.external-source-list'), 'Review source', touch)
         source_panel = page.get_by_role('complementary', name='Source Agent', exact=True)
         expect(source_panel.get_by_role('button', name='Refresh without Agent', exact=True)).to_be_visible()
-        # Both modules share the context shell and > launcher, but preserve their own panels.
+        # Both modules share the context shell and left-facing launcher, but preserve their own panels.
         launch(page.locator('.workspace-context-toolbar'), 'Ask Agent', touch)
         agent_panel = page.get_by_role('complementary', name='Agent', exact=True)
         expect(agent_panel).to_be_visible(); expect(source_panel).to_be_hidden()

@@ -20,7 +20,12 @@ from __future__ import annotations
 import json
 from contextlib import closing
 import os
+import re
 from dataclasses import dataclass, field
+from urllib.parse import urlsplit
+
+from .request_shape import stable_json, stable_object, stable_tools
+from .usage import normalize_usage
 
 ANTHROPIC_DEFAULT_MODEL = "claude-opus-5-5"
 # Models that accept the server-side refusal fallback ("default" routing) on the Claude API.
@@ -74,7 +79,10 @@ class AnthropicProvider:
         self.effort = cfg.get("effort") or None
         self.base_url = (cfg.get("base_url") or "").strip() or None
         self.single_attempt = cfg.get("_single_attempt", False)
-        kw = {"max_retries": 0 if self.single_attempt else 2, "timeout": 120.0 if self.single_attempt else 600.0}
+        self.response_tokens = cfg.get("_response_tokens", MAX_TOKENS)
+        # A transport failure can occur after acceptance/billing. Recovery is
+        # the existing explicit Retry action, never an invisible SDK replay.
+        kw = {"max_retries": 0, "timeout": 120.0 if self.single_attempt else 600.0}
         if cfg.get("api_key"):
             kw["api_key"] = cfg["api_key"]
         if self.base_url:
@@ -105,56 +113,56 @@ class AnthropicProvider:
         return out
 
     def complete(self, system: str, transcript: list[dict], tools: list[dict], on_text=None) -> Turn:
+        self.last_usage = normalize_usage(None, "anthropic", final=False)
         sdk = self._sdk
         official = self.base_url is None
         tool_defs = []
-        for t in tools:
+        for t in stable_tools(tools):
             d = {"name": t["name"], "description": t["description"], "input_schema": t["schema"]}
             if official:
                 d["eager_input_streaming"] = True   # inputs are validated before any tool runs
             tool_defs.append(d)
-        kwargs = dict(model=self.model, max_tokens=MAX_TOKENS, system=system, messages=self._messages(transcript),
+        kwargs = dict(model=self.model, max_tokens=self.response_tokens, system=system, messages=self._messages(transcript),
                       cache_control={"type": "ephemeral"})
         if tool_defs:
             kwargs["tools"] = tool_defs
         if self.effort:
             kwargs["output_config"] = {"effort": self.effort}
         use_fallback = not self.single_attempt and official and self.model in _FALLBACK_MODELS
-        msg = None
-        for attempt in range(1 if self.single_attempt else 2):
-            try:
-                if use_fallback:
-                    opener = self.client.beta.messages.stream(betas=["server-side-fallback-2026-07-01"], fallbacks="default",
-                                                              **kwargs)
-                else:
-                    opener = self.client.messages.stream(**kwargs)
-                with opener as stream:
-                    if on_text:
-                        so_far = ""
-                        for piece in stream.text_stream:
-                            so_far += piece
-                            on_text(so_far)
-                    msg = stream.get_final_message()
-                break
-            except sdk.AuthenticationError as e:
-                raise ProviderError("The API key was rejected by Anthropic. Check it in Assistant settings.") from e
-            except sdk.PermissionDeniedError as e:
-                raise ProviderError(f"This API key may not use {self.model}: {e.message}") from e
-            except sdk.NotFoundError as e:
-                raise ProviderError(f"Model or endpoint not found ({self.model}). Check the model name.") from e
-            except sdk.RateLimitError as e:
-                raise ProviderError("Rate limited by Anthropic. Wait a moment and try again.", retryable=True) from e
-            except sdk.BadRequestError as e:
-                raise ProviderError(f"Anthropic rejected the request: {e.message}") from e
-            except sdk.APIStatusError as e:
-                raise ProviderError(f"Anthropic API error {e.status_code}: {e.message}", retryable=e.status_code >= 500) from e
-            except sdk.APIConnectionError as e:
-                raise ProviderError("Could not reach the Anthropic API. Check your internet connection.", retryable=True) from e
-            except ValueError:
-                # A streamed tool input that could not be parsed at all: re-issue once.
-                if attempt or self.single_attempt:
-                    raise ProviderError("The model produced an unreadable tool call twice.")
+        try:
+            if use_fallback:
+                opener = self.client.beta.messages.stream(betas=["server-side-fallback-2026-07-01"], fallbacks="default",
+                                                          **kwargs)
+            else:
+                opener = self.client.messages.stream(**kwargs)
+            with opener as stream:
+                if on_text:
+                    so_far = ""
+                    for piece in stream.text_stream:
+                        self.last_usage = normalize_usage(stream.current_message_snapshot.usage, "anthropic", final=False)
+                        so_far += piece
+                        on_text(so_far)
+                msg = stream.get_final_message()
+        except sdk.AuthenticationError as e:
+            raise ProviderError("The API key was rejected by Anthropic. Check it in Assistant settings.") from e
+        except sdk.PermissionDeniedError as e:
+            raise ProviderError(f"This API key may not use {self.model}: {e.message}") from e
+        except sdk.NotFoundError as e:
+            raise ProviderError(f"Model or endpoint not found ({self.model}). Check the model name.") from e
+        except sdk.RateLimitError as e:
+            raise ProviderError("Rate limited by Anthropic. Wait a moment and try again.", retryable=True) from e
+        except sdk.BadRequestError as e:
+            raise ProviderError(f"Anthropic rejected the request: {e.message}") from e
+        except sdk.APIStatusError as e:
+            raise ProviderError(f"Anthropic API error {e.status_code}: {e.message}", retryable=e.status_code >= 500) from e
+        except sdk.APIConnectionError as e:
+            raise ProviderError("Could not reach the Anthropic API. Check your internet connection.", retryable=True) from e
+        except ValueError as e:
+            raise ProviderError("The model produced an unreadable tool call. Review the reply before retrying.") from e
         data = msg.to_dict()
+        self.last_usage = normalize_usage(data.get("usage"), "anthropic", final=bool(data.get("stop_reason")))
+        if not data.get("stop_reason"):
+            raise ProviderError("The provider's reply was cut off before it finished. Try again.", retryable=True)
         content = data.get("content") or []
         text = "".join(b.get("text", "") for b in content if b.get("type") == "text")
         calls = [ToolCall(b["id"], b["name"], b.get("input") if isinstance(b.get("input"), dict) else None,
@@ -164,10 +172,8 @@ class AnthropicProvider:
         if stop == "truncated" and calls:
             for c in calls:
                 c.input_error = "tool input was cut off by the output limit; not executed"
-        usage = data.get("usage") or {}
         return Turn(text=text, tool_calls=calls, stop=stop, raw={"provider": "anthropic", "content": content},
-                    model=data.get("model"), usage={k: usage.get(k) for k in ("input_tokens", "output_tokens",
-                                                                             "cache_read_input_tokens")})
+                    model=data.get("model"), usage=self.last_usage)
 
 
 # --------------------------------------------------------------------- OpenAI-compatible
@@ -186,12 +192,22 @@ class OpenAICompatibleProvider:
         key = cfg.get("api_key") or os.environ.get("OPENAI_API_KEY") or "not-needed"
         self.client = openai.OpenAI(api_key=key, base_url=(cfg.get("base_url") or "").strip() or None,
                                     timeout=120.0 if cfg.get("_single_attempt") else 600.0,
-                                    max_retries=0 if cfg.get("_single_attempt") else 2)
+                                    max_retries=0)
         # Extra request settings are the setup's defaults; a reasoning level
         # picked in the chat for this message takes precedence.
         self.extra_body = dict(cfg.get("extra_params") or {})
         self.extra_body.update(thinking_params(cfg.get("preset"), cfg.get("thinking") or ""))
+        self.response_tokens = cfg.get("_response_tokens")
+        self.output_limit_key = "max_completion_tokens" if cfg.get("preset") == "openai" else "max_tokens"
+        self.single_attempt = cfg.get("_single_attempt", False)
         self.no_streaming = False
+        host = urlsplit(str(self.client.base_url)).hostname
+        self.usage_provider = "gemini" if host == "generativelanguage.googleapis.com" else "openai_compatible"
+        # Officially documented opt-in. OpenRouter reports usage automatically;
+        # custom endpoints are unknown unless the user supplies stream_options.
+        self.include_usage = host in {"api.openai.com", "api.deepseek.com", "generativelanguage.googleapis.com", "ollama.com"}
+        if cfg.get("preset") == "ollama" and host in {"localhost", "127.0.0.1", "::1"}:
+            self.include_usage = True
 
     def _messages(self, system: str, transcript: list[dict]) -> list[dict]:
         out: list[dict] = [{"role": "system", "content": system}]
@@ -208,7 +224,7 @@ class OpenAICompatibleProvider:
                     d["reasoning_content"] = reasoning
                 if calls:
                     d["tool_calls"] = [{"id": c["id"], "type": "function",
-                                        "function": {"name": c["name"], "arguments": json.dumps(c.get("input") or {})}}
+                                        "function": {"name": c["name"], "arguments": stable_json(c.get("input") or {})}}
                                        for c in calls]
                 elif not text:
                     d["content"] = "(no reply)"
@@ -218,14 +234,49 @@ class OpenAICompatibleProvider:
                     out.append({"role": "tool", "tool_call_id": r["id"], "content": r["content"]})
         return out
 
-    def _streamed(self, kwargs: dict, on_text) -> tuple:
+    def _open_stream(self, kwargs):
+        """Capability fallback ONLY around the initial HTTP request creation.
+
+        An error while consuming an accepted stream must never enter this path.
+        At most one retry per explicitly rejected option, and none for summaries.
+        """
+        options = dict(self.extra_body.get("stream_options") or {})
+        if self.include_usage:
+            options["include_usage"] = True
+        stream_kwargs = {**kwargs, "stream": True}
+        if options:
+            stream_kwargs["stream_options"] = stable_object(options)
+        while True:
+            try:
+                return self.client.chat.completions.create(**stream_kwargs)
+            except self._sdk.BadRequestError as e:
+                if self.single_attempt:
+                    raise
+                if "stream_options" in stream_kwargs and _unsupported_stream_parameter(e, "stream_options"):
+                    stream_kwargs.pop("stream_options")
+                    self.include_usage = False
+                    # Remember a rejection of a user-specified option for this
+                    # provider instance, too; never retry it each tool round.
+                    self.extra_body.pop("stream_options", None)
+                elif _unsupported_stream_parameter(e, "stream"):
+                    self.no_streaming = True
+                    return None
+                else:
+                    raise
+
+    def _streamed(self, kwargs: dict, on_text) -> tuple | None:
         """Stream a Chat Completions reply; returns (content, reasoning, calls, finish, model, usage)."""
         text, reasoning, calls = "", None, {}
         finish = model = usage = None
-        with closing(self.client.chat.completions.create(**kwargs, stream=True)) as stream:
+        opened = self._open_stream(kwargs)
+        if opened is None:
+            return None
+        with closing(opened) as stream:
             for chunk in stream:
                 model = getattr(chunk, "model", None) or model
                 usage = getattr(chunk, "usage", None) or usage
+                if usage is not None:
+                    self.last_usage = normalize_usage(usage, self.usage_provider, final=False)
                 if not chunk.choices:
                     continue
                 ch = chunk.choices[0]
@@ -253,22 +304,21 @@ class OpenAICompatibleProvider:
         return text, reasoning, [calls[i] for i in sorted(calls)], finish, model, usage
 
     def complete(self, system: str, transcript: list[dict], tools: list[dict], on_text=None) -> Turn:
+        self.last_usage = normalize_usage(None, self.usage_provider, final=False)
         sdk = self._sdk
         kwargs = dict(model=self.model, messages=self._messages(system, transcript))
-        if self.extra_body:
-            kwargs["extra_body"] = dict(self.extra_body)
+        if self.response_tokens and not any(k in self.extra_body for k in ("max_tokens", "max_completion_tokens")):
+            kwargs[self.output_limit_key] = self.response_tokens
+        extra = {k: v for k, v in self.extra_body.items() if k != "stream_options"}
+        if extra:
+            kwargs["extra_body"] = stable_object(extra)
         if tools:
             kwargs["tools"] = [{"type": "function", "function": {"name": t["name"], "description": t["description"],
-                                                                 "parameters": t["schema"]}} for t in tools]
+                                                                 "parameters": t["schema"]}} for t in stable_tools(tools)]
         try:
             streamed = None
             if on_text and not self.no_streaming:
-                try:
-                    streamed = self._streamed(kwargs, on_text)
-                except sdk.BadRequestError as e:
-                    if "stream" not in str(e.message).lower():
-                        raise
-                    self.no_streaming = True   # this endpoint does not stream: ask again without, and stop trying
+                streamed = self._streamed(kwargs, on_text)
             resp = None if streamed else self.client.chat.completions.create(**kwargs)
         except sdk.AuthenticationError as e:
             raise ProviderError("The API key was rejected by the provider. Check it in Assistant settings.") from e
@@ -285,6 +335,7 @@ class OpenAICompatibleProvider:
         if streamed:
             content, reasoning, raw_calls, finish, model, usage = streamed
         else:
+            self.last_usage = normalize_usage(getattr(resp, "usage", None), self.usage_provider)
             if not resp.choices:
                 raise ProviderError("The provider returned no answer.")
             ch = resp.choices[0]
@@ -293,6 +344,7 @@ class OpenAICompatibleProvider:
             model, usage = getattr(resp, "model", None), getattr(resp, "usage", None)
             raw_calls = [{"id": tc.id, "name": tc.function.name, "arguments": tc.function.arguments}
                          for tc in m.tool_calls or [] if getattr(tc, "function", None) is not None]
+        self.last_usage = normalize_usage(usage, self.usage_provider)
         calls = []
         for tc in raw_calls:
             try:
@@ -301,7 +353,9 @@ class OpenAICompatibleProvider:
             except ValueError:
                 args, err = None, f"arguments were not valid JSON: {(tc['arguments'] or '')[:200]}"
             calls.append(ToolCall(tc["id"], tc["name"], args if isinstance(args, dict) else None, err))
-        stop = "tool_use" if calls else {"length": "truncated", "content_filter": "refusal"}.get(finish, "end")
+        # A context-managed output cap can stop a tool-bearing response. Even
+        # parseable arguments must not execute when the provider marks it cut off.
+        stop = {"length": "truncated", "content_filter": "refusal"}.get(finish, "tool_use" if calls else "end")
         if stop == "truncated" and calls:
             for c in calls:
                 c.input_error = "tool input was cut off by the output limit; not executed"
@@ -309,8 +363,30 @@ class OpenAICompatibleProvider:
         if reasoning is not None:
             raw["reasoning_content"] = reasoning
         return Turn(text=content or "", tool_calls=calls, stop=stop, raw=raw, model=model,
-                    usage={"input_tokens": getattr(usage, "prompt_tokens", None),
-                           "output_tokens": getattr(usage, "completion_tokens", None)} if usage else None)
+                    usage=self.last_usage)
+
+
+def _unsupported_stream_parameter(error, parameter):
+    """Only an unambiguous 400 validation rejection allows capability fallback."""
+    if getattr(error, "status_code", None) != 400:
+        return False
+    body = getattr(error, "body", None)
+    if not isinstance(body, dict):
+        return False
+    body = body.get("error", body)
+    if not isinstance(body, dict):
+        return False
+    names = {parameter} if parameter == "stream" else {"stream_options", "stream_options.include_usage", "include_usage"}
+    if body.get("param") in names and body.get("code") in {"unsupported_parameter", "unknown_parameter", "unrecognized_parameter"}:
+        return True
+    message = str(body.get("message", "")).lower().strip()
+    for name in names:
+        token = r"[`'\"]?" + re.escape(name) + r"[`'\"]?"
+        if re.fullmatch(token + r" (?:is |are )?(?:not supported|unsupported)(?: for (?:this|the) (?:model|endpoint))?\.?", message):
+            return True
+        if re.fullmatch(r"(?:unsupported|unknown|unrecognized) (?:parameter|field|argument):? " + token + r"\.?", message):
+            return True
+    return False
 
 
 THINKING_LEVELS = ("", "off", "low", "medium", "high", "xhigh", "max")
@@ -337,6 +413,9 @@ def thinking_params(preset: str | None, level: str) -> dict:
 
 def make_provider(cfg: dict):
     kind = cfg.get("provider")
+    if kind == 'allowance_gateway':
+        from .gateway import AllowanceGatewayProvider
+        return AllowanceGatewayProvider(cfg)
     if kind == "anthropic":
         return AnthropicProvider(cfg)
     if kind == "openai_compatible":

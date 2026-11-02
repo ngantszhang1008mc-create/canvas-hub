@@ -22,6 +22,20 @@ SPEC = {'version':1,'pages':[URL],'format':'html','records':{'selector':'article
     'points_possible':{'selector':'.points'},'body':{'selector':'p'}}},'limitations':'Public pages; no submission or grade inference.'}
 
 
+def test_public_article_with_optional_login_form_is_not_a_login_gate():
+    page = b'<article>' + b'Public course information. ' * 30 + b'</article><form><input type="password" value="secret"></form>'
+    result = PublicReader(lambda url:Read(url,200,'text/html',page)).read({'version':1,'pages':[URL],'format':'html'})
+    assert result[0]['content'].startswith('Public course information.')
+    assert 'secret' not in result[0]['content']
+
+
+def test_long_login_form_is_not_mistaken_for_course_content():
+    page = b'<main><form><input type="password">' + b'Please sign in. '*100 + b'</form></main>'
+    with pytest.raises(InvalidInput) as exc:
+        PublicReader(lambda url:Read(url,200,'text/html',page)).read({'version':1,'pages':[URL],'format':'html'})
+    assert exc.value.code == 'needs_login'
+
+
 @pytest.fixture
 def source(hub, account, fixture_pkg):
     fixture_pkg['items'][2].setdefault('links',[]).append({'relation':'body_link','to':{
@@ -106,6 +120,7 @@ def test_decline_cancel_reanalysis_and_failed_analysis(source,hub,account):
     hub.requests.claim(aid,rid,'agent')
     svc.submit_analysis(aid,rid,'agent',{'access_error':'Login required'})
     assert svc.get(aid,sid)['classification'] is None
+    assert svc.get(aid,sid)['status']=='needs_attention'  # Agent assertion is not verified login evidence.
     assert svc.analyze(aid,sid)['analysis_request_id']!=rid
     s=classify(svc,aid,sid);p=s['adapters'][0]
     svc.decide(aid,sid,p['revision'],p['spec_hash'],approve=False)
@@ -118,7 +133,9 @@ def test_decline_cancel_reanalysis_and_failed_analysis(source,hub,account):
     assert svc.analyze(aid,sid)['classification'] and svc.get(aid,sid)['decision']=='declined'
 
 
-@pytest.mark.parametrize('failure,expected',[(Read(URL,401,'text/html',b'login'),'needs_login'),
+@pytest.mark.parametrize('failure,expected',[(Read(URL,401,'text/html',b'',auth_challenge=True),'needs_login'),
+    (Read(URL,401,'text/html',b''),'needs_attention'),
+    (Read(URL,403,'text/html',b''),'needs_attention'),
     (Read(URL,200,'text/html',b'<input type="password">'),'needs_login'),
     (Read(URL,200,'text/html',b'<p>template changed</p>'),'needs_attention'),
     (Read(URL,503,'text/plain',b'error'),'stale')])
@@ -271,12 +288,17 @@ def test_external_url_identity_survives_canvas_discovery():
 def test_schema12_migration_preserves_existing_context_and_progress(tmp_path,monkeypatch,fixture_pkg):
     from canvas_hub import db
     from canvas_hub.services import Hub
+    from canvas_hub.services import context_sources
     paths=tmp_path/'previous-store'
     migrations=db._migration_files
     monkeypatch.setattr(db,'_migration_files',lambda:[m for m in migrations() if m[0]<=12])
     old=Hub.open(paths)
     old.importer.after_discovery=None
     old.importer.after_changed_import=None  # Simulate the pre-dependency-index application.
+    index_source=context_sources.index_source
+    # Schema 12 used the original search index, before the schema 17 context
+    # hook existed. Disable only that newer hook while seeding the old store.
+    monkeypatch.setattr(context_sources,'index_source',lambda *args:None)
     fixture_pkg['items'][2].setdefault('links',[]).append({'relation':'body_link','to':{
         'type':'external_link','course_id':'4242','url':URL,'title':'Legacy course website'}})
     aid=old.importer.import_package(fixture_pkg,allow_new_account=True)['account_id']
@@ -286,11 +308,15 @@ def test_schema12_migration_preserves_existing_context_and_progress(tmp_path,mon
     assert db.schema_version(old.db.conn)==12
     old.close()
     monkeypatch.setattr(db,'_migration_files',migrations)
+    monkeypatch.setattr(context_sources,'index_source',index_source)
     new=Hub.open(paths)
     try:
         assert db.schema_version(new.db.conn)==max(version for version, *_ in migrations())
         assert new.components.get(aid,cmp['id'])['state']['done']['r']
         assert new.query.get_item(aid,iid)['course_canvas_id']=='4242'
+        indexed=context_sources.ContextSources(new.db).catalog(aid,item_id=iid)
+        assert indexed['sources'] and indexed['sources'][0]['version']
+        assert new.db.one('SELECT COUNT(*) AS n FROM context_sources')['n'] > 0
         new.external_sources.backfill(aid)
         sources=new.external_sources.list(aid)
         assert len(sources)==1 and sources[0]['course_id']=='4242' and sources[0]['status']=='unclassified'

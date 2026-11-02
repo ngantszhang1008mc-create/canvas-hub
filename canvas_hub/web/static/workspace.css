@@ -53,12 +53,14 @@ button.workspace-attention-link:hover { color: var(--accent); background: transp
 .main:has(> .workspace-context) { max-width: none; }
 .workspace-center { min-width: 0; }
 .workspace-context-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: -6px 0 22px; min-height: 44px; }
+.workspace-context-toolbar > .workspace-launcher { margin-left: auto; }
 .workspace-context-label { color: var(--text-3); font-size: 11px; flex: 1; }
 .workspace-deadline-status { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 16px; padding: 0 0 18px; margin: -8px 0 20px; border-bottom: 1px solid var(--rule); color: var(--text-2); font-size: 12px; }
 .workspace-local-completion { margin-left: auto; min-height: 36px; }
 .workspace-active-status { font-size: 11.5px; color: var(--text-2); }
 .workspace-activate { min-height: 36px; }
 .workspace-content { min-width: 0; }
+.workspace-content .grid > * { min-width: 0; overflow-wrap: anywhere; }
 .workspace-content > * + * { margin-top: 16px; }
 .workspace-requirements { max-width: 80ch; font-size: 15px; line-height: 1.75; }
 .workspace-requirements :is(img,video,table) { max-width: 100%; }
@@ -95,17 +97,28 @@ button.workspace-attention-link:hover { color: var(--accent); background: transp
 .workspace-agent-body .chat { min-width: 0; width: 100%; }
 .workspace-agent-body :is(.chat-scroll,.composer) { min-width: 0; width: 100%; }
 .workspace-agent-body .chat-scroll { max-height: 48dvh; }
-.workspace-launcher { position: relative; flex: none; }
-.workspace-launcher-toggle { width: 42px; height: 42px; border-radius: 50%; padding: 0; display: inline-flex; align-items: center; justify-content: center; font: 500 25px/1 var(--mono); background: var(--paper); color: var(--accent); }
+.workspace-launcher { --launcher-size: 42px; --launcher-gap: 8px; position: relative; flex: none; width: var(--launcher-size); height: var(--launcher-size); }
+.drawer-body > .workspace-launcher { margin-left: auto; margin-bottom: 12px; }
+.workspace-launcher.is-open { z-index: 30; }
+.workspace-launcher .workspace-launcher-toggle, .workspace-launcher .workspace-action-icon { width: var(--launcher-size); height: var(--launcher-size); min-width: var(--launcher-size); min-height: var(--launcher-size); padding: 0; flex: none; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; background: var(--paper); color: var(--accent); }
+.workspace-launcher-toggle { position: relative; z-index: 1; font: 500 28px/1 var(--mono); }
 .workspace-launcher-toggle[aria-expanded="true"] { background: var(--accent-soft); border-color: var(--accent); }
-.workspace-action-popover { position: absolute; top: calc(100% + 8px); right: 0; width: min(300px, calc(100vw - 40px)); z-index: 20; padding: 14px; background: var(--paper); border: 1px solid var(--border-strong); border-radius: 12px; box-shadow: 0 10px 35px rgb(0 0 0 / 14%); }
-.workspace-action-options { display: flex; gap: 10px; }
-.workspace-action-icon { border-radius: 50%; width: 44px; height: 44px; padding: 11px; background: var(--surface-2); color: var(--text-2); }
-.workspace-action-icon[aria-pressed="true"] { color: var(--accent); background: var(--accent-soft); border-color: var(--accent); }
-.workspace-action-description { margin: 14px 0 12px; font-size: 12px; color: var(--text-2); line-height: 1.55; }
-.workspace-action-description strong { font-size: 13px; color: var(--ink); }
-.workspace-action-description p { margin: 4px 0 0; }
-.workspace-action-confirm { min-height: 40px; width: 100%; justify-content: center; color: var(--accent); }
+.workspace-action-tray { position: absolute; right: calc(100% + var(--launcher-gap)); top: 0; width: max-content; max-width: var(--launcher-room, calc(100vw - 80px)); }
+.workspace-action-options { display: flex; flex-direction: row-reverse; gap: var(--launcher-gap); width: max-content; }
+.workspace-action-icon { box-shadow: 0 3px 10px rgb(0 0 0 / 10%); animation: workspace-action-enter .2s cubic-bezier(.2,.75,.3,1) backwards; }
+.workspace-action-icon > .ui-icon { display: inline-block; width: 20px; height: 20px; }
+.workspace-launcher .workspace-action-icon:is(:hover,:focus-visible) { color: var(--accent); background: var(--accent-soft); border-color: var(--accent); }
+.workspace-action-icon[aria-disabled="true"] { opacity: .6; cursor: wait; }
+.workspace-action-tooltip { position: fixed; z-index: 100; max-width: calc(100vw - 16px); padding: 5px 9px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--paper); color: var(--ink); box-shadow: var(--shadow); font: 500 12px/1.5 var(--sans); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none; }
+.workspace-action-error { position: absolute; top: calc(100% + 8px); right: 0; width: min(260px, calc(100vw - 32px)); padding: 8px 10px; border: 1px solid var(--bad); border-radius: 6px; background: var(--paper); color: var(--bad); font-size: 12px; overflow-wrap: anywhere; }
+.workspace-launcher.is-constrained .workspace-action-tray { overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain; scrollbar-width: thin; direction: rtl; padding-bottom: 5px; }
+.workspace-action-options { direction: ltr; }
+.workspace-launcher.is-constrained .workspace-action-icon { animation: none; }
+@keyframes workspace-action-enter {
+  from { opacity: 0; transform: translateX(calc(var(--action-step) * (var(--launcher-size) + var(--launcher-gap)))) scale(.7); }
+  to { opacity: 1; transform: none; }
+}
+@media (prefers-reduced-motion: reduce) { .workspace-action-icon { animation: none; } }
 .workspace-nav-toggle { position: fixed; bottom: 18px; left: 16px; z-index: 60; width: 42px; height: 42px; display: inline-flex; justify-content: center; align-items: center; padding: 10px; border-radius: 50%; background: var(--paper); color: var(--text-2); box-shadow: var(--shadow); }
 .workspace-shell.workspace-nav-closed .sidebar { display: none; }
 .workspace-nav-scrim { position: fixed; inset: 0; z-index: 39; border: 0; border-radius: 0; padding: 0; background: rgb(0 0 0 / 35%); }
@@ -147,6 +160,9 @@ button.workspace-attention-link:hover { color: var(--accent); background: transp
   .workspace-source-actions button { min-height: 40px; }
   .workspace-requirements { font-size: 14px; }
 }
+@media (max-width: 640px) {
+  .workspace-content .grid.cols-2 { grid-template-columns: minmax(0, 1fr); }
+}
 @media (prefers-reduced-motion: reduce) { .workspace * { scroll-behavior: auto !important; } }
 
 /* The optional agenda replaces the task list inside the same central zone. */
@@ -168,8 +184,20 @@ button.workspace-attention-link:hover { color: var(--accent); background: transp
 }
 
 /* Contextual external-source review, using the same compact launcher. */
-.external-source-row { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:12px 0; border-bottom:1px solid var(--rule); }
-.external-source-row > div:first-child { min-width:0; overflow-wrap:anywhere; }
+.external-source-list { --source-padding:17px; }
+.external-source-row { display:grid; grid-template-columns:minmax(0,1fr) 154px; align-items:center; gap:12px; padding:14px var(--source-padding); border-top:1px solid var(--rule); }
+.external-source-info { min-width:0; overflow-wrap:anywhere; }
+.external-source-info p { margin:5px 0 0; }
+.external-source-actions { display:grid; grid-template-columns:minmax(0,1fr) 42px; align-items:center; gap:10px; }
+.external-source-actions > button { width:100%; padding-inline:8px; }
+.external-source-actions > .workspace-launcher { grid-column:2; }
+.external-source-list > .external-batch:not(:empty) { margin:0 var(--source-padding) 14px; }
+@media (max-width:520px) {
+  .external-source-list { --source-padding:14px; }
+  .external-source-row { grid-template-columns:minmax(0,1fr); gap:10px; }
+  .external-source-actions { width:154px; justify-self:end; }
+  .external-source-list > summary { padding-inline:var(--source-padding); }
+}
 .external-agent { padding:16px; min-width:0; overflow-wrap:anywhere; }
 .external-agent-content { display:grid; gap:12px; }
 .external-agent-content pre { white-space:pre-wrap; overflow-wrap:anywhere; max-height:360px; overflow:auto; }

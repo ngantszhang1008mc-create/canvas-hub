@@ -123,16 +123,13 @@ def test_resume_step_and_action_launcher_keep_the_same_workspace(hub, account, d
         page.get_by_role("link", name="Resume", exact=True).click()
         expect(page.get_by_label("Active step in Proposal checklist")).to_have_value("draft")
         toggle = page.get_by_role("button", name="Workspace actions", exact=True)
-        expect(page.locator(".workspace-action-popover")).to_be_hidden()
+        expect(page.locator(".workspace-action-tray")).to_be_hidden()
         toggle.click()
         expect(page.get_by_role("button", name="Interpret grading", exact=True)).to_have_count(0)
         ask = page.get_by_role("button", name="Ask Agent", exact=True)
-        expect(ask).to_have_attribute("title", "Ask Agent: Open the conversation for this workspace. Your question is sent only when you choose Send.")
+        expect(ask).to_have_attribute("aria-description", "Open the conversation for this workspace. Your question is sent only when you choose Send.")
         if width == 380:
             ask.tap()
-            expect(page.locator(".workspace-action-description")).to_contain_text("Your question is sent only")
-            expect(page.locator(".workspace-agent")).to_be_hidden()
-            page.get_by_role("button", name="Open Agent", exact=True).click()
         else:
             ask.focus()
             page.keyboard.press("Enter")

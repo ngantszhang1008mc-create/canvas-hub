@@ -18,8 +18,8 @@ def widget_examples(hub,fixture_pkg):
 def open_manager(page, touch=False):
     toolbar=page.locator('.overall-widget-toolbar')
     toolbar.get_by_role('button',name='Workspace actions',exact=True).click()
-    toolbar.get_by_role('button',name='Manage widgets',exact=True).click()
-    if touch:toolbar.locator('.workspace-action-confirm').click()
+    action=toolbar.get_by_role('button',name='Manage widgets',exact=True)
+    action.tap() if touch else action.click()
     return page.get_by_role('dialog',name='Manage widgets',exact=True)
 
 

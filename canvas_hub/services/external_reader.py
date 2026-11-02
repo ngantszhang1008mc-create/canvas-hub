@@ -86,6 +86,7 @@ class Read:
     content_type: str
     body: bytes
     location: str | None = None
+    auth_challenge: bool = False
 
 
 class _PinnedHTTPS(http.client.HTTPSConnection):
@@ -126,7 +127,7 @@ def public_get(url):
                 break
             chunks.append(chunk)
         return Read(url, resp.status, resp.getheader('Content-Type', '').split(';')[0].lower(),
-                    b''.join(chunks), resp.getheader('Location'))
+                    b''.join(chunks), resp.getheader('Location'), bool(resp.getheader('WWW-Authenticate')))
     finally:
         conn.close()
 
@@ -148,8 +149,10 @@ class PublicReader:
                     raise InvalidInput('Redirect lacks destination')
                 url = urljoin(safe, r.location)
                 continue
+            if r.status == 401 and r.auth_challenge:
+                raise InvalidInput('Site requested HTTP authentication', code='needs_login')
             if r.status in (401, 403):
-                raise InvalidInput('Site access requires login/permission', code='needs_login')
+                raise InvalidInput('Site denied access; login requirement is unknown', code='needs_attention')
             if r.status != 200:
                 raise InvalidInput('Site read failed; previous observations retained', code='stale')
             return r
@@ -168,7 +171,19 @@ class PublicReader:
             text = r.body.decode('utf-8', errors='replace')[:200_000]
         else:
             soup = BeautifulSoup(r.body, 'html.parser')
-            if soup.select('input[type="password"]') or soup.select('form[action*="login"]'):
+            visible_text = soup.get_text(' ', strip=True)
+            if re.search(r'join classes|add another class', visible_text, re.I) and re.search(r'log[ -]?in|sign[ -]?in', visible_text, re.I):
+                raise InvalidInput('Login or enrollment chooser; course access is unknown', code='needs_attention')
+            # Optional sign-in forms often sit next to public course content.
+            # Treat a form as a gate only if there is no substantial main content.
+            has_form = bool(soup.select('input[type="password" i], form[action*="login" i]'))
+            def non_form_length(node):
+                copy = BeautifulSoup(str(node), 'html.parser')
+                for element in copy.select('form, script, style, iframe, object, noscript'):
+                    element.decompose()
+                return len(re.sub(r'\s+', '', copy.get_text(' ', strip=True)))
+            substantial = any(non_form_length(node) >= 300 for node in soup.select('main, article'))
+            if has_form and not substantial:
                 raise InvalidInput('Login page is not course content', code='needs_login')
             for tag in soup(['script', 'style', 'iframe', 'object', 'noscript', 'form']):
                 tag.decompose()

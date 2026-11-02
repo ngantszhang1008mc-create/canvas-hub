@@ -4,6 +4,7 @@ import { makeContextAgent } from "./context-agent.js";
 import { makeComponents } from "./components.js";
 import { icon, decorateNavigation } from "./icons.js";
 import { currentTheme, themeSwitcher } from "./appearance.js";
+import { makeAssistantToolPicker } from "./assistant-tools.js";
 decorateNavigation();
 // Canvas Hub UI. Vanilla JS, no build step.
 // Safety: everything is rendered with textContent except item HTML fields,
@@ -390,6 +391,7 @@ async function route() {
   const params = new URLSearchParams(query || "");
   clearInterval(S.jobPoll);
   clearInterval(assistantPoll);
+  assistantToolPicker?.destroy(); assistantToolPicker = null;
   document.body.classList.remove("chat-focus");      // only the assistant pages use focus mode; they turn it back on
   let view = parts[0] || "overview";
   if (!S.accountId && !["setup", "settings"].includes(view)) view = "setup";
@@ -570,15 +572,29 @@ VIEWS.deadlines = async (main, _p, params) => {
   if (["7", "14", "30", "120", "365", "past", "all"].includes(params.get("range"))) filters.range = params.get("range");
   if (params.has("cal")) filters.include_calendar = params.get("cal") !== "0";
   const range = filters.range;
-  const start = range === "all" ? new Date("1900-01-01T00:00:00Z") : new Date(Date.now() - (range === "past" ? 30 : 1) * 86400000);
-  const end = range === "all" ? new Date("9999-01-01T00:00:00Z") : new Date(Date.now() + (range === "past" ? 0 : Number(range)) * 86400000 + 1);
+  const now = Date.now(), earliest = "1900-01-01T00:00:00Z";
+  const start = range === "all" ? new Date(earliest) : new Date(now - (range === "past" ? 30 : 1) * 86400000);
+  const end = range === "all" ? new Date("9999-01-01T00:00:00Z") : new Date(now + (range === "past" ? 0 : Number(range)) * 86400000 + 1);
   const request = { start: start.toISOString(), end: end.toISOString(), include_calendar: filters.include_calendar,
     course_id: filters.course_id, item_type: filters.item_type, status: filters.status, archive: filters.archive, limit: 500 };
-  const data = await api(A("/deadlines") + qs(request));
-  while (data.next_cursor) {
-    const next = await api(A("/deadlines") + qs({ ...request, cursor: data.next_cursor }));
-    data.deadlines.push(...next.deadlines); data.next_cursor = next.next_cursor;
-  }
+  const readPages = async (query) => {
+    const result = await api(A("/deadlines") + qs(query));
+    while (result.next_cursor) {
+      const next = await api(A("/deadlines") + qs({ ...query, cursor: result.next_cursor }));
+      result.deadlines.push(...next.deadlines); result.next_cursor = next.next_cursor;
+    }
+    return result;
+  };
+  // Upcoming views keep unfinished work visible after it becomes overdue. The
+  // saved range still bounds upcoming/completed work; all other filters apply
+  // unchanged. Past calendar events do not represent unfinished assignments.
+  const carryOver = !["past", "all"].includes(range) && filters.status !== "completed" && filters.item_type !== "calendar_event";
+  const [data, earlier] = await Promise.all([
+    readPages(request),
+    carryOver ? readPages({ ...request, start: earliest, end: request.start, status: "unfinished", include_calendar: false }) : null,
+  ]);
+  const overdue = earlier?.deadlines || [];
+  data.deadlines.unshift(...overdue);
   const saveFilters = async (patch) => {
     if (await guard(() => api(A("/deadline-views"), { method: "POST", body: { id: tab.id, filters: patch } }))) {
       if (location.hash !== "#/deadlines") location.hash = "#/deadlines"; else route();
@@ -594,7 +610,7 @@ VIEWS.deadlines = async (main, _p, params) => {
         if (location.hash !== "#/deadlines") location.hash = "#/deadlines"; else route();
       }
     } }, t.name))),
-    h("div", { class: "row", style: "margin-top:12px;align-items:end;flex-wrap:wrap" },
+    h("div", { class: "row deadline-filters", style: "margin-top:12px;align-items:end;flex-wrap:wrap" },
       picker("Date range", "range", [["7", "7 days"], ["14", "14 days"], ["30", "30 days"], ["120", "Term"], ["365", "Year"], ["past", "Past 30 days"], ["all", "All dates"]]),
       picker("Deadline course", "course_id", [["", "All courses"], ...coursesData.courses.map((c) => [c.course_id, c.title])]),
       picker("Deadline type", "item_type", [["", "All types"], ["assignment", "Assignments"], ["quiz", "Quizzes"], ["calendar_event", "Calendar events"]]),
@@ -648,6 +664,7 @@ VIEWS.deadlines = async (main, _p, params) => {
         h("button", { class: "sm ghost", onclick: async () => { if (await guard(() => api(A(`/date-candidates/${c.id}/dismiss`), { method: "POST" }))) route(); } }, "Not a date")))))) : null,
     conf.length ? h("div", { class: "small", style: "margin-top:8px" }, h("strong", null, "Confirmed: "), conf.map((c, i) => [i ? " · " : "", `${c.label} (${fmtDate(c.starts_at, { weekday: true })})`])) : null) : null;
   mount(main, pageHead("Deadlines", `Times in ${data.time_zone}. Submission states are as Canvas reported them when last read.`), chips,
+    overdue.length ? h("p", { class: "small muted deadline-carryover" }, `${overdue.length} unfinished overdue ${overdue.length === 1 ? "assignment or quiz is" : "assignments or quizzes are"} included from before this date range.`) : null,
     h("div", { style: "margin-top:18px" }, body), fromText, unresolved,
     h("p", { class: "muted small", style: "margin-top:16px" }, "The ✓ toggle is a private reminder stored locally. It never submits anything or changes Canvas."));
 };
@@ -730,7 +747,7 @@ VIEWS.course = async (main, parts, params) => {
         h("p", { class: "muted small" }, "Sections missing here are not guessed. Content they hide is still collected when Home, the syllabus, modules or pages link to it."),
         syl ? h("p", null, h("a", { href: `#/item/${syl.id}` }, "Read the syllabus")) : null,
         pagesHome.items.length ? h("p", { class: "small" }, `${pagesHome.items.length} page(s) collected`) : null),
-      h("div", { class: "card" }, h("h2", null, "Coverage for this course"), coverageTable(cov.records)),
+      h("div", { class: "card" }, h("h2", null, "Coverage for this course"), h("div", { class: "table-wrap" }, coverageTable(cov.records))),
       h("details", {class:"card grade-planning", style:"grid-column:1/-1"}, h("summary",null,"Grade planning"), await gradingCard(cid)));
   } else {
     const list = await api(A("/items") + qs({ course_id: cid, type: tab, limit: 200 }));
@@ -1386,6 +1403,7 @@ function renderMessages(list, msgs, ctx = {}) {
   const out = [];
   for (const m of msgs) {
     if (m.role === "user") out.push(h("div", { class: "msg user" }, h("div", { class: "bubble" }, m.text),
+      m.tool_selection?.length ? h("div", {class:"msg-meta tiny muted"}, `Requested tools: ${m.tool_selection.map(s=>s.replace('group:', '/').replace('tool:', '')).join(', ')}`) : null,
       m.setup ? h("div", { class: "msg-meta tiny muted" }, `${m.setup}${m.model ? ` · ${m.model}` : ""}${m.reasoning ? ` · reasoning ${m.reasoning}` : ""}`) : null));
     else if (m.role === "assistant") {
       const parts = [];
@@ -1401,6 +1419,7 @@ function renderMessages(list, msgs, ctx = {}) {
 }
 
 let assistantPoll = null;
+let assistantToolPicker = null;
 VIEWS.assistant = async (main, parts, params) => {
   clearInterval(assistantPoll);
   let cfg, settingsUnavailable = false;
@@ -1448,7 +1467,18 @@ VIEWS.assistant = async (main, parts, params) => {
   const input = h("textarea", { rows: 2, placeholder: "Ask about deadlines, announcements, materials, grades…  (Enter to send, Shift+Enter for a new line)" });
   const sendBtn = h("button", { class: "primary" }, icon("send"), "Send");
   const stopBtn = h("button", { class: "danger", hidden: true }, "Stop");
+  const toolCatalog = await api(A('/assistant/tools') + qs({profile_id:cfg.active_profile})).catch(()=>null);
+  if (!main.isConnected) return;
+  const toolPicker = makeAssistantToolPicker({h, input, catalog:toolCatalog});
+  assistantToolPicker = toolPicker;
+  const compactBtn = h("button", { class: "ghost sm", disabled: !convId,
+    title: "Summarize older turns using the selected provider. This uses model quota; original messages stay saved." }, "Compact conversation");
+  const contextInfo = h("div", { class: "tiny muted", "aria-live": "polite" });
+  const contextDetails = h("details", { class: "chat-context" }, h("summary", { class: "tiny" }, "Context & usage"),
+    h("p", { class: "tiny muted" }, "Compaction sends older turns to the selected provider and uses model quota. Original messages remain saved. Automatic compaction follows this setup's settings."),
+    contextInfo, compactBtn);
   let current = convId; let lastSeq = 0; let all = []; let stick = true; let wasBusy = false;
+  let catalogLoading = false, catalogRevision = 0, sending = false;
   showConvs(convs);
   const listTop = main.querySelector(".conv-scroll")?.scrollTop || 0;      // the chat list being replaced, if any
 
@@ -1510,11 +1540,27 @@ VIEWS.assistant = async (main, parts, params) => {
       log.append(h("div", { class: "msg assistant live", "aria-busy": "true" }, typer("live", d.draft.text, true)));
     } else typers.delete("live");
     const st = d.conversation.run_state;
+    const contextBlocked = (d.conversation.run_error || '').startsWith('Context budget exceeded');
     const busy = st === "running" || st === "cancelling";
-    sendBtn.disabled = busy || settingsUnavailable; stopBtn.hidden = !busy;
+    sendBtn.disabled = busy || settingsUnavailable || catalogLoading || sending; stopBtn.hidden = !busy;
+    toolPicker.setBusy(busy || settingsUnavailable || catalogLoading || sending);
+    compactBtn.disabled = busy || settingsUnavailable;
+    const cx = d.context || {}, cost = cx.summary_usage || {}, total = cx.total_usage || {};
+    const reportedTokens = (usage, key) => {
+      const missing = (usage.missing_fields || {})[key] || 0;
+      return missing && missing === usage.requests ? "unreported" : `${usage[key] ?? 0}${missing ? " (partial)" : ""}`;
+    };
+    const budget = cx.budget;
+    mount(contextInfo,
+      h("p", null, cx.compacted_through ? (cx.stale ? "Saved summary is stale after data changes; original context will be used." : `Older turns compacted through message ${cx.compacted_through}.`) : "Using original conversation context."),
+      cx.compacted_through && !cx.stale && cx.live_state_changed ? h('p', null, 'Local trackers or notes changed. The historical summary is retained; current state must be read again before using or updating it.') : null,
+      h("p", null, `${cx.summary_requests || 0} summary requests · reported summary tokens: ${reportedTokens(cost, "input_tokens")} in / ${reportedTokens(cost, "output_tokens")} out. Total reported tokens: ${reportedTokens(total, "input_tokens")} in / ${reportedTokens(total, "output_tokens")} out; included cache read ${reportedTokens(total, "cache_read_input_tokens")}, cache write ${reportedTokens(total, "cache_creation_input_tokens")}; included reasoning ${reportedTokens(total, "reasoning_output_tokens")}.${total.unreported_requests ? ` Usage unavailable or incomplete for ${total.unreported_requests} request(s); these are not counted as zero cost.` : ""} Local telemetry does not determine free allowance or billed cost.`),
+      h("p", null, "Usage from earlier interrupted requests may be absent from these totals."),
+      budget ? h("p", null, `Last request estimate: ${budget.estimated_tokens} input tokens; ${budget.response_reserved} reserved for output/reasoning. Safety budget: ${budget.capacity} (${budget.capacity_source}).`) : null,
+      d.conversation.context_notice ? h("p", null, d.conversation.context_notice) : null);
     mount(status, busy ? h("span", { class: "working" }, st === "cancelling" ? "Stopping…" : "Working…")
       : st === "error" ? h("div", { class: "banner bad", style: "margin:0" }, h("div", { class: "b-body" }, h("div", { class: "b-title" }, "The assistant stopped"), h("div", { class: "small" }, d.conversation.run_error || ""),
-        !settingsUnavailable ? h("div", null, h("button", { onclick: retry }, "Retry answer"), h("span", { class: "small" }, " Retry makes a new provider request with tools disabled. If more tools are needed, review previous results and send a new message.")) : null)) : null);
+        !settingsUnavailable && !contextBlocked ? h("div", null, h("button", { onclick: retry }, "Retry answer"), h("span", { class: "small" }, " Retry makes a new provider request with tools disabled. If more tools are needed, review previous results and send a new message.")) : null)) : null);
     const seq = all.length ? all[all.length - 1].seq : 0;
     scroller.scrollTop = atBottom && (seq !== lastSeq || stick || busy) ? scroller.scrollHeight : prevTop;
     lastSeq = seq; stick = false;
@@ -1523,14 +1569,22 @@ VIEWS.assistant = async (main, parts, params) => {
     if (!busy) clearInterval(assistantPoll);
   };
   const send = async (text) => {
-    if (settingsUnavailable) return;
-    const t = (text ?? input.value).trim();
-    if (!t) return;
-    sendBtn.disabled = true;
+    if (settingsUnavailable || catalogLoading || sending) return;
+    const requested = toolPicker.prepare((text ?? input.value).trim());
+    if (!requested) return;
+    const t = requested.text;
+    if (!t) { if (text === undefined) input.value = ''; return; }
+    sending = true; sendBtn.disabled = true; toolPicker.setBusy(true);
     const r = await guard(() => api(A("/assistant/messages"), { method: "POST", body: { text: t, conversation_id: current, profile_id: setupSel.value || cfg.active_profile,
-      reasoning: reasoningSel.hidden ? "" : reasoningSel.value, model: modelSel.hidden ? "" : modelSel.value } }));
-    if (!r) { sendBtn.disabled = false; return; }
+      reasoning: reasoningSel.hidden ? "" : reasoningSel.value, model: modelSel.hidden ? "" : modelSel.value,
+      tool_selection: requested.selection } }));
+    sending = false;
+    if (!r) {
+      sendBtn.disabled = wasBusy || settingsUnavailable || catalogLoading;
+      toolPicker.setBusy(sendBtn.disabled); return;
+    }
     input.value = "";
+    toolPicker.sent(requested);
     scroller.querySelector(".study-context")?.remove();
     const emptyEl = document.getElementById("chat-empty");
     if (emptyEl) emptyEl.remove();
@@ -1552,6 +1606,15 @@ VIEWS.assistant = async (main, parts, params) => {
   };
   sendBtn.addEventListener("click", () => send());
   stopBtn.addEventListener("click", async () => { await guard(() => api(A(`/assistant/conversations/${current}/stop`), { method: "POST" })); refresh(); });
+  compactBtn.addEventListener("click", async () => {
+    if (!current || compactBtn.disabled) return;
+    compactBtn.disabled = true;
+    const result = await guard(() => api(A(`/assistant/conversations/${current}/compact`), { method: "POST", body: {
+      profile_id: setupSel.value || cfg.active_profile, reasoning: reasoningSel.hidden ? "" : reasoningSel.value,
+      model: modelSel.hidden ? "" : modelSel.value } }));
+    if (result) { clearInterval(assistantPoll); assistantPoll = setInterval(refresh, 400); }
+    await refresh();
+  });
   input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } });
 
   const suggestions = h("div", { class: "chips suggest" }, ["What's due in the next 7 days?", "Plan my study time this week",
@@ -1599,16 +1662,26 @@ VIEWS.assistant = async (main, parts, params) => {
     fillReasoning();
     // Also make it the default for new chats; each message names its setup anyway.
     api(`/api/assistant/profiles/${encodeURIComponent(setupSel.value)}/activate`, { method: "POST" }).catch(() => null);
+    const selectedSetup = setupSel.value;
+    const requestedCatalog = ++catalogRevision;
+    catalogLoading = true; sendBtn.disabled = true; toolPicker.setBusy(true);
+    toolPicker.updateCatalog(null);
+    api(A('/assistant/tools') + qs({profile_id:selectedSetup})).catch(()=>null).then(catalog=>{
+      if (!main.isConnected || requestedCatalog !== catalogRevision) return;
+      catalogLoading = false;
+      sendBtn.disabled = wasBusy || settingsUnavailable || sending;
+      toolPicker.updateCatalog(catalog); toolPicker.setBusy(sendBtn.disabled);
+    });
   });
   reasoningSel.addEventListener("change", () => store.set(`reasoning.${setupSel.value}`, reasoningSel.value));
   const perms = cfg.permissions;
   const footer = h("div", { class: "chat-foot tiny muted" },
     icon("bulb"),
     h("span", null, `Can ${["read your data", perms.notes ? "edit your notes" : null, perms.collect ? "check Canvas" : null, perms.deadlines ? "manage deadlines" : null, perms.settings ? "change scope" : null].filter(Boolean).join(", ")}. Questions and the data it reads go to the chosen provider.`));
-  scroller.append(log, status);
+  scroller.append(log, status, contextDetails);
   if (!current) scroller.append(h("div", { class: "chat-empty", id: "chat-empty" }, icon("sparkles", "empty-sparkles"), h("div", { class: "e-title" }, "What would you like to know?"), suggestions));
   const chat = h("div", { class: "chat" }, scroller,
-    h("div", { class: "composer" }, input,
+    h("div", { class: "composer" }, h("div", {class:'assistant-input-row'}, input, toolPicker.root), toolPicker.chips, toolPicker.message,
       h("div", { class: "composer-bar" }, h("span", { class: "select-icon-wrap" }, icon("cube"), setupSel),
         h("span", { class: "select-icon-wrap" }, icon("brain"), modelSel),
         h("span", { class: "select-icon-wrap" }, icon("sliders"), reasoningSel), h("span", { class: "grow" }), stopBtn, sendBtn)), footer);
@@ -1654,6 +1727,10 @@ VIEWS.assistant = async (main, parts, params) => {
   input.focus({ preventScroll: true });
 };
 
+function assistantSetupSummary(x) {
+  return [x.model || "default model", x.provider === "allowance_gateway" ? `${x.gateway_mode || "mock"} gateway · ${x.gateway_session_saved ? "session saved" : "not connected"}` : x.api_key_saved ? "key saved" : null].filter(Boolean).join(" · ");
+}
+
 function assistantSettingsView(main, head, tabs, cfg, params) {
   const sel = params.get("p") || cfg.active_profile || "new";
   const prof = cfg.profiles.find((x) => x.id === sel) || null;
@@ -1661,10 +1738,10 @@ function assistantSettingsView(main, head, tabs, cfg, params) {
     h("div", { class: "card-head" }, h("h2", null, "Saved setups"), h("a", { class: "btn sm", href: "#/assistant/settings?p=new" }, "+ Add setup")),
     cfg.profiles.length ? cfg.profiles.map((x) => h("div", { class: "setup-row" + (x.id === sel ? " on" : "") },
       h("a", { class: "setup-main", href: `#/assistant/settings?p=${encodeURIComponent(x.id)}` },
-        h("span", { class: "strong" }, x.name), h("span", { class: "tiny muted" }, [x.model || "default model", x.api_key_saved ? "key saved" : null].filter(Boolean).join(" · "))),
+        h("span", { class: "strong" }, x.name), h("span", { class: "tiny muted", "data-setup-summary": x.id }, assistantSetupSummary(x))),
       x.id === cfg.active_profile ? pill("ok", "In use") : h("button", { class: "sm ghost", disabled: x.configured ? null : true, onclick: async () => {
         if (await guard(() => api(`/api/assistant/profiles/${encodeURIComponent(x.id)}/activate`, { method: "POST" }))) { toast(`Now using ${x.name}`); route(); }
-      } }, "Use"))) : h("p", { class: "muted small" }, "No setups yet. Add an API provider or connect your Codex CLI login."));
+      } }, "Use"))) : h("p", { class: "muted small" }, "No setups yet. Add an API provider, connect your Codex CLI login, or use a gateway invitation."));
   mount(main, head, tabs, h("div", { class: "settings-layout" }, list,
     h("div", { class: "stack" }, assistantSettingsCard(cfg, prof), assistantPermissionsCard(cfg))));
 }
@@ -1722,82 +1799,273 @@ function assistantSettingsCard(cfg, prof) {
   extra.value = cur.extra_params && Object.keys(cur.extra_params).length ? JSON.stringify(cur.extra_params) : "";
   const extraField = h("label", { class: "field", style: "grid-column:1/-1" },
     h("span", null, "Extra request settings (JSON, optional — sent as-is to the provider)"), extra);
+  const autoCompact = h("input", { type: "checkbox", checked: cur.context?.auto_compact === true });
+  const capacity = h("input", { type: "number", min: 4096, max: 2000000, step: 1,
+    value: cur.context?.capacity || "", placeholder: "Application safety default", "aria-label": "Context token capacity" });
+  const contextField = h("div", { class: "field", style: "grid-column:1/-1" },
+    h("label", null, autoCompact, " Automatically compact older turns near the context budget"),
+    h("label", null, "Context token capacity (optional)", capacity),
+    h("p", { class: "tiny muted" }, "Set this to a capacity verified for your model and endpoint. Defaults are conservative application budgets, not advertised model limits. Compaction uses model quota; original history stays saved. Replies and reasoning have reserved space."));
+  const isGateway = () => presetSel.value === "allowance_gateway"
+    || cfg.presets.some((p) => p.id === presetSel.value && p.provider === "allowance_gateway");
+  const gatewayMode = h("select", { "aria-label": "Gateway mode" },
+    h("option", { value: "mock", selected: cur.gateway_mode !== "production" }, "Mock — synthetic responses"),
+    h("option", { value: "production", selected: cur.gateway_mode === "production" }, "Production — OpenAI"));
+  const gatewayConsent = h("input", { type: "checkbox", checked: cur.gateway_consent === true });
+  const invitation = h("input", { type: "password", autocomplete: "off", autocapitalize: "off", spellcheck: "false", maxlength: 128,
+    placeholder: "Invitation from your gateway operator" });
+  const gatewaySession = h("p", { class: "small", "aria-live": "polite" });
+  const gatewayToolSummary = h("summary");
+  const gatewayToolNames = h("p", { class: "tiny wrap-anywhere" });
+  const gatewayToolChoices = h("div", { class: "perm-list" });
+  const gatewayModels = h("div", { class: "tiny muted" });
+  const gatewayDetails = h("details", null, gatewayToolSummary, gatewayToolNames, gatewayToolChoices,
+    h("p", { class: "tiny muted" }, "Save to apply tool changes. Local permissions and scope are checked again before any tool runs."), gatewayModels);
+  const gatewayAllowance = h("div", { class: "small", "aria-live": "polite" });
+  const enrollBtn = h("button", { type: "button" }, "Connect with invitation");
+  const removeSessionBtn = h("button", { type: "button", class: "ghost" }, "Remove saved gateway session");
+  const gatewayField = h("div", { class: "field", style: "grid-column:1/-1", hidden: true },
+    h("label", { class: "field" }, h("span", null, "Gateway mode (must match your operator's gateway)"), gatewayMode),
+    h("label", { class: "check" }, gatewayConsent,
+      "I allow selected conversation and course excerpts to pass through this gateway. Production mode also sends them to OpenAI. Tools still run under local permissions. Canvas Hub will not switch to an API-key provider automatically."),
+    gatewaySession,
+    h("label", { class: "field" }, h("span", null, "Invitation"), invitation),
+    h("div", { class: "row" }, enrollBtn, removeSessionBtn),
+    h("p", { class: "tiny muted" }, "Connecting saves these settings and uses the invitation once. The invitation is cleared immediately and enrollment is never retried automatically."),
+    gatewayDetails, gatewayAllowance);
+  let gatewayProfile = cur.provider === "allowance_gateway" || cur.preset === "allowance_gateway" ? { ...cur } : null;
+  let reportedAllowance = null;
+  let gatewayToolsChanged = false;
+  let gatewaySelectedTools = new Set(cur.gateway_tools || []);
+  const sameGateway = () => gatewayProfile && gatewayMode.value === (gatewayProfile.gateway_mode || "mock")
+    && base.value.trim().replace(/\/+$/, "") === (gatewayProfile.base_url || "").replace(/\/+$/, "");
+  const activeGatewaySession = () => sameGateway() && gatewayProfile.gateway_session_saved
+    && (!Number.isSafeInteger(gatewayProfile.gateway_expires_at) || gatewayProfile.gateway_expires_at > Date.now());
+  const utcTime = (value) => {
+    if (!Number.isSafeInteger(value) || value < 0) return "not reported";
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? "not reported" : date.toISOString().replace("T", " ").replace(/\.000Z$/, " UTC");
+  };
+  const microUsd = (value) => typeof value === "string" && /^\d{1,40}$/.test(value)
+    ? `${value.replace(/^0+(?=\d)/, "")} micro-USD` : "not reported";
+  const toolSummary = () => {
+    gatewayToolSummary.textContent = `${gatewaySelectedTools.size} enabled tools · model limits`;
+    gatewayToolNames.textContent = gatewaySelectedTools.size ? `Enabled: ${[...gatewaySelectedTools].join(", ")}` : "No tools enabled.";
+  };
+  const renderGateway = () => {
+    const matches = sameGateway();
+    const saved = matches && gatewayProfile.gateway_session_saved;
+    gatewaySession.textContent = saved
+      ? `Gateway session saved · ${gatewayMode.value} mode · expires ${utcTime(gatewayProfile.gateway_expires_at)}${Number.isSafeInteger(gatewayProfile.gateway_expires_at) && gatewayProfile.gateway_expires_at <= Date.now() ? " (expired)" : ""}.${activeGatewaySession() ? " Remove the saved session before using another invitation." : ""}`
+      : "No session saved for these gateway settings. Check the URL and mode, give consent, then connect with an invitation.";
+    const available = matches && Array.isArray(gatewayProfile.gateway_available_tools) ? gatewayProfile.gateway_available_tools : [];
+    gatewayDetails.hidden = !matches;
+    toolSummary();
+    const choices = [...new Set([...available, ...gatewaySelectedTools])];
+    mount(gatewayToolChoices, choices.length ? choices.map((tool) => {
+      const unavailable = !available.includes(tool);
+      const toggle = h("input", { type: "checkbox", checked: gatewaySelectedTools.has(tool) });
+      toggle.addEventListener("change", () => {
+        if (toggle.checked) gatewaySelectedTools.add(tool); else gatewaySelectedTools.delete(tool);
+        if (unavailable && !toggle.checked) toggle.disabled = true;
+        gatewayToolsChanged = true; toolSummary();
+      });
+      return h("label", { class: "check" }, toggle, `${tool}${unavailable ? " (unavailable; uncheck to remove)" : ""}`);
+    }) : h("p", { class: "tiny muted" }, "No available local tools reported. Connect or check allowance to refresh capabilities."));
+    const models = matches ? reportedAllowance?.models || gatewayProfile.gateway_models || [] : [];
+    mount(gatewayModels, h("strong", null, "Reported model output limits"), models.length ? models.map((entry) => h("div", null,
+      `${entry.id}: ${Number.isSafeInteger(entry.min_output_tokens) ? entry.min_output_tokens : "unknown"}–${Number.isSafeInteger(entry.max_output_tokens) ? entry.max_output_tokens : "unknown"} output tokens`))
+      : h("div", null, "No model limits reported yet."));
+    if (!reportedAllowance || !matches) mount(gatewayAllowance);
+    else mount(gatewayAllowance,
+      h("p", null, h("strong", null, `Reported allowance · ${reportedAllowance.mode || gatewayMode.value} mode`),
+        reportedAllowance.gateway_paused ? " · gateway paused" : ""),
+      h("div", { style: "overflow-x:auto" }, h("table", null,
+        h("thead", null, h("tr", null, ["Period", "Remaining", "Held", "Spent", "Resets (UTC)"].map((title) => h("th", { scope: "col" }, title)))),
+        h("tbody", null, ["daily", "monthly"].map((period) => {
+          const amount = reportedAllowance[period] || {};
+          return h("tr", null, h("th", { scope: "row" }, period === "daily" ? "Daily" : "Monthly"),
+            h("td", null, microUsd(amount.remaining_microusd)), h("td", null, microUsd(amount.held_microusd)),
+            h("td", null, microUsd(amount.spent_microusd)), h("td", null, utcTime(amount.resets_at)));
+        })))),
+      h("p", { class: "tiny muted" }, "1,000,000 micro-USD = US$1. Held amounts are reservations, not final charges. Checking allowance does not generate a model response."));
+    updateButtons();
+  };
+  const adoptProfile = (response, syncFields = true) => {
+    const updated = response?.profiles?.find((p) => p.id === (response.saved_profile || cur.id));
+    if (updated) {
+      Object.assign(cur, updated);
+      const listed = document.querySelector(`[data-setup-summary="${CSS.escape(cur.id)}"]`);
+      if (listed) listed.textContent = assistantSetupSummary(cur);
+      if (cur.provider === "allowance_gateway" || cur.preset === "allowance_gateway") {
+        gatewayProfile = { ...cur }; gatewaySelectedTools = new Set(cur.gateway_tools || []); gatewayToolsChanged = false;
+        if (syncFields) {
+          gatewayMode.value = cur.gateway_mode || "mock"; gatewayConsent.checked = cur.gateway_consent === true;
+          base.value = cur.base_url || "";
+        }
+      } else {
+        gatewayProfile = null; gatewaySelectedTools = new Set(); gatewayToolsChanged = false; reportedAllowance = null;
+      }
+    }
+  };
   const hint = h("div", { class: "tiny muted" });
+  const reasoningHint = h("div", { class: "tiny muted" }, "Reasoning effort is not part of a setup: choose it next to the message box for each message.");
   const sync = () => {
     const p = cfg.presets.find((x) => x.id === presetSel.value);
     const isAnthropic = p && p.provider === "anthropic";
     const isCodex = p && p.provider === "codex";
-    extraField.hidden = !p || isAnthropic || isCodex;
-    baseField.hidden = keyField.hidden = !!isCodex;
-    model.placeholder = isCodex ? "Codex default (optional)" : "model name";
+    const gateway = isGateway();
+    extraField.hidden = !p || isAnthropic || isCodex || gateway;
+    baseField.hidden = !!isCodex;
+    keyField.hidden = !!isCodex || gateway;
+    gatewayField.hidden = !gateway; reasoningHint.hidden = gateway;
+    model.placeholder = isCodex ? "Codex default (optional)" : gateway ? "Model alias supplied by your operator" : "model name";
+    base.placeholder = gateway ? "https://your-gateway.example" : "https://…/v1";
 
-    baseField.querySelector("span").textContent = isAnthropic ? "Base URL (leave empty for the Claude API)" : "Base URL";
-    if (p && presetSel.value !== cur.preset) { base.value = p.base_url; if (p.model) model.value = p.model; else if (cur.provider !== p.provider) model.value = ""; }
+    baseField.querySelector("span").textContent = gateway ? "Gateway URL" : isAnthropic ? "Base URL (leave empty for the Claude API)" : "Base URL";
+    if (p && presetSel.value !== cur.preset) { base.value = p.base_url || ""; if (p.model) model.value = p.model; else if (cur.provider !== p.provider) model.value = ""; }
     if (isCodex) listCodexModels();
     modelPick.hidden = !isCodex || !modelPick.options.length || modelPick.options[0].textContent.startsWith("Loading");
     model.hidden = !!isCodex && !modelPick.hidden;
     if (!modelPick.hidden) modelPick.value = model.value;
-    mount(hint, p ? (isCodex ? "Install Codex CLI 0.163.0 or newer and run `codex login` on this computer, then Save & test. Canvas Hub uses that login without storing its credentials. Pick a model or keep your Codex default; you can also switch models next to the message box. Questions and selected course data are sent to Codex." : isAnthropic ? "Without a pasted key, ANTHROPIC_API_KEY or an `ant auth login` profile is used." : p.id === "ollama" ? "Runs on your own computer; no key and nothing leaves it." : `Key format: ${p.key_hint || "provider API key"}. For OpenAI-compatible providers OPENAI_API_KEY is used if no key is saved.`) : "");
+    mount(hint, p ? (gateway ? "Use your operator's gateway origin, model alias and invitation. The URL must have no /v1 path, query or fragment. Production requires HTTPS; mock mode also permits HTTP on localhost, 127.0.0.1 or [::1]. Mock responses are synthetic. The saved session stays on this computer, outside course backups." : isCodex ? "Install Codex CLI 0.163.0 or newer and run `codex login` on this computer, then Save & test. Canvas Hub uses that login without storing its credentials. Pick a model or keep your Codex default; you can also switch models next to the message box. Questions and selected course data are sent to Codex." : isAnthropic ? "Without a pasted key, ANTHROPIC_API_KEY or an `ant auth login` profile is used." : p.id === "ollama" ? "Runs on your own computer; no key and nothing leaves it." : `Key format: ${p.key_hint || "provider API key"}. For OpenAI-compatible providers OPENAI_API_KEY is used if no key is saved.`) : "");
+    testBtn.textContent = gateway ? "Check allowance" : "Save & test";
+    removeKeyBtn.hidden = gateway || !cur.api_key_saved;
+    renderGateway();
   };
-  presetSel.addEventListener("change", sync); sync();
-  const result = h("div", { class: "small" });
+  presetSel.addEventListener("change", () => {
+    key.value = ""; invitation.value = ""; gatewayConsent.checked = false; reportedAllowance = null;
+    mount(result); sync();
+  });
+  gatewayConsent.addEventListener("change", () => updateButtons());
+  const changeGateway = () => { gatewayConsent.checked = false; invitation.value = ""; reportedAllowance = null; mount(result); renderGateway(); };
+  gatewayMode.addEventListener("change", changeGateway);
+  base.addEventListener("input", () => { if (isGateway()) changeGateway(); });
+  const result = h("div", { class: "small", "aria-live": "polite" });
   const save = async () => {
     if (!presetSel.value) { toast("Choose a provider first", true); return null; }
     let extraParams = {};
     const isCodex = presetSel.value === "codex";
-    if (!isCodex && extra.value.trim()) {
+    const gateway = isGateway();
+    if (gateway) {
+      let url;
+      try { url = new URL(base.value.trim()); } catch { toast("Enter your gateway's full origin URL", true); return null; }
+      if (url.username || url.password || url.pathname !== "/" || /[?#]/.test(base.value)) {
+        toast("Use only the gateway origin, without credentials, paths such as /v1, queries or fragments", true); return null;
+      }
+      if (url.protocol !== "https:" && !(gatewayMode.value === "mock" && url.protocol === "http:"
+        && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname))) {
+        toast("Use HTTPS; HTTP is allowed only for a loopback gateway in mock mode", true); return null;
+      }
+      base.value = url.origin;
+    }
+    if (!isCodex && !gateway && extra.value.trim()) {
       try { extraParams = JSON.parse(extra.value); } catch { toast("Extra request settings must be valid JSON", true); return null; }
     }
     const body = { profile_id: cur.id, name: name.value, preset: presetSel.value, model: model.value };
-    if (!isCodex) Object.assign(body, { base_url: base.value, extra_params: extraParams, ...(key.value ? { api_key: key.value } : {}) });
+    body.context = { ...(cur.context || {}), auto_compact: autoCompact.checked };
+    if (capacity.value.trim()) body.context.capacity = Number(capacity.value); else delete body.context.capacity;
+    if (gateway) Object.assign(body, { base_url: base.value, gateway_mode: gatewayMode.value, gateway_consent: gatewayConsent.checked,
+      ...(gatewayToolsChanged && sameGateway() ? { gateway_tools: [...gatewaySelectedTools] } : {}) });
+    else if (!isCodex) Object.assign(body, { base_url: base.value, extra_params: extraParams, ...(key.value ? { api_key: key.value } : {}) });
     const r = await guard(() => api("/api/assistant/config", { method: "PUT", body }));
-    if (r) { key.value = ""; cur.id = r.saved_profile; toast("Setup saved"); return r; }   // later saves edit this setup
+    if (r) { key.value = ""; cur.id = r.saved_profile; adoptProfile(r); renderGateway(); toast("Setup saved"); return r; }   // later saves edit this setup
     return null;
   };
   // One save or test at a time: overlapping clicks would each send profile_id "new" and create duplicates.
   const saveBtn = h("button", { class: "primary" }, "Save");
   const testBtn = h("button", null, "Save & test");
+  const useBtn = h("button", { class: "ghost", hidden: isNew || cur.id === cfg.active_profile }, "Use this setup");
+  const removeKeyBtn = h("button", { class: "ghost", hidden: !cur.api_key_saved }, "Remove saved key");
+  const deleteBtn = h("button", { class: "danger", hidden: isNew }, "Delete setup");
   let busy = false;
+  const updateButtons = () => {
+    const gateway = isGateway();
+    saveBtn.disabled = deleteBtn.disabled = removeKeyBtn.disabled = busy;
+    testBtn.disabled = busy || (gateway && (!gatewayConsent.checked || !sameGateway() || !gatewayProfile.gateway_session_saved));
+    enrollBtn.disabled = busy || !gatewayConsent.checked || !!activeGatewaySession();
+    invitation.disabled = !!activeGatewaySession();
+    removeSessionBtn.disabled = busy;
+    removeSessionBtn.hidden = !gateway || !gatewayProfile?.gateway_session_saved;
+    useBtn.disabled = busy || !cur.configured || (gateway && (!gatewayConsent.checked || !sameGateway()));
+  };
   const exclusive = (fn) => async () => {
     if (busy) return;
-    busy = true; saveBtn.disabled = testBtn.disabled = true;
-    try { await fn(); } finally { busy = false; saveBtn.disabled = testBtn.disabled = false; }
+    busy = true; fields.disabled = true; updateButtons();
+    try { await fn(); } finally { busy = false; fields.disabled = false; updateButtons(); }
   };
   saveBtn.addEventListener("click", exclusive(async () => { const r = await save(); if (r && card.isConnected) goTo(r.saved_profile); }));
   testBtn.addEventListener("click", exclusive(async () => {
+    const gateway = isGateway();
     const r = await save(); if (!r) return;
-    mount(result, h("span", { class: "muted" }, "Testing…"));
-    const t = await guard(() => api("/api/assistant/test", { method: "POST", body: { profile_id: r.saved_profile } }));
-    if (t) mount(result, t.ok ? pill("ok", `Connected · ${t.model || ""}`) : h("span", { style: "color:var(--bad)" }, t.message));
+    if (gateway) { reportedAllowance = null; renderGateway(); }
+    mount(result, h("span", { class: "muted" }, gateway ? "Checking allowance…" : "Testing…"));
+    const t = await guard(() => api("/api/assistant/test", { method: "POST", body: { profile_id: r.saved_profile } }), result);
+    if (t) {
+      if (gateway && t.ok) {
+        const latest = await guard(() => api("/api/assistant/config"));
+        if (latest) adoptProfile({ ...latest, saved_profile: r.saved_profile });
+        reportedAllowance = t.allowance || null; renderGateway();
+      }
+      mount(result, t.ok ? pill("ok", `${gateway ? "Allowance checked" : "Connected"} · ${t.model || ""}`) : h("span", { style: "color:var(--bad)" }, t.message || "Connection check failed."),
+        t.ok && t.message ? h("span", { class: "tiny muted" }, ` ${t.message}`) : null);
+    }
     // Show the new setup's own page, unless the user has moved on meanwhile.
-    if (isNew) setTimeout(() => { if (card.isConnected) goTo(r.saved_profile); }, t && t.ok ? 1200 : 4000);
+    if (isNew && !gateway) setTimeout(() => { if (card.isConnected) goTo(r.saved_profile); }, t && t.ok ? 1200 : 4000);
+  }));
+  enrollBtn.addEventListener("click", exclusive(async () => {
+    if (!isGateway() || !gatewayConsent.checked) { toast("Give gateway consent before connecting", true); return; }
+    if (activeGatewaySession()) { toast("Remove the saved gateway session before using another invitation", true); return; }
+    const invite = invitation.value.trim(); invitation.value = "";
+    if (!invite) { toast("Enter an invitation from your gateway operator", true); return; }
+    const saved = await save(); if (!saved) return;
+    if (!gatewayConsent.checked) { mount(result, "Review and enable gateway consent before connecting."); return; }
+    mount(result, h("span", { class: "muted" }, "Connecting with invitation…"));
+    const connected = await guard(() => api("/api/assistant/gateway/enroll", { method: "POST",
+      body: { profile_id: saved.saved_profile, invite, consent: true } }), result);
+    if (!connected) {
+      // Enrollment may have saved its one-time session before allowance failed.
+      // Recover that local state without redeeming the invitation again.
+      const latest = await guard(() => api('/api/assistant/config'));
+      if (latest) { adoptProfile(latest); renderGateway(); }
+      return;
+    }
+    adoptProfile(connected); reportedAllowance = connected.allowance || null; renderGateway();
+    mount(result, connected.ok ? pill("ok", "Gateway connected") : h("span", { style: "color:var(--bad)" }, connected.message || "Gateway connection failed."));
+  }));
+  removeSessionBtn.addEventListener("click", exclusive(async () => {
+    const removed = await guard(() => api("/api/assistant/config", { method: "PUT", body: { profile_id: cur.id, clear_gateway_session: true } }), result);
+    if (!removed) return;
+    adoptProfile(removed, false); reportedAllowance = null; invitation.value = ""; renderGateway();
+    mount(result, "Saved gateway session removed from this computer.");
+  }));
+  useBtn.addEventListener("click", exclusive(async () => {
+    if (await guard(() => api(`/api/assistant/profiles/${encodeURIComponent(cur.id)}/activate`, { method: "POST" }))) { toast(`Now using ${cur.name}`); route(); }
+  }));
+  removeKeyBtn.addEventListener("click", exclusive(async () => {
+    if (await guard(() => api("/api/assistant/config", { method: "PUT", body: { profile_id: cur.id, clear_key: true } }))) { toast("Saved key removed"); route(); }
+  }));
+  deleteBtn.addEventListener("click", exclusive(async () => {
+    if (!confirm(`Delete the setup “${cur.name}” and its saved credentials?`)) return;
+    if (await guard(() => api(`/api/assistant/profiles/${encodeURIComponent(cur.id)}`, { method: "DELETE" }))) {
+      toast("Setup deleted");
+      if (location.hash === "#/assistant/settings") route(); else location.hash = "#/assistant/settings";
+    }
   }));
   const goTo = (pid) => { const h2 = `#/assistant/settings?p=${encodeURIComponent(pid)}`; if (location.hash === h2) route(); else location.hash = h2; };
+  const fields = h("fieldset", { class: "grid cols-2", style: "border:0;padding:0;margin:0;min-width:0", "aria-label": "Assistant provider settings" },
+    h("label", { class: "field", style: "grid-column:1/-1" }, h("span", null, "Name"), name),
+    h("label", { class: "field" }, h("span", null, "Provider"), presetSel), h("label", { class: "field" }, h("span", null, "Model"), model, modelPick),
+    baseField, keyField, extraField, gatewayField, contextField);
   const card = h("div", { class: "card" },
     h("div", { class: "card-head" }, h("h2", null, isNew ? "New setup" : cur.name),
       !isNew && cur.id === cfg.active_profile ? pill("ok", "In use") : h("span", { class: "sub" }, "provider settings stored only on this computer")),
     h("div", { class: "banner info" }, h("div", { class: "b-body small" }, cfg.privacy, " Keys are kept in a private file outside your course data, so they are never included in backups or exports.")),
-    h("div", { class: "grid cols-2" }, h("label", { class: "field", style: "grid-column:1/-1" }, h("span", null, "Name"), name),
-      h("label", { class: "field" }, h("span", null, "Provider"), presetSel), h("label", { class: "field" }, h("span", null, "Model"), model, modelPick),
-      baseField, keyField, extraField),
-    hint,
-    h("div", { class: "tiny muted" }, "Reasoning effort is not part of a setup: choose it next to the message box for each message."),
+    fields, hint, reasoningHint,
     h("div", { class: "row", style: "margin-top:14px" },
-      saveBtn, testBtn,
-      !isNew && cur.id !== cfg.active_profile ? h("button", { class: "ghost", disabled: cur.configured ? null : true, onclick: async () => {
-        if (await guard(() => api(`/api/assistant/profiles/${encodeURIComponent(cur.id)}/activate`, { method: "POST" }))) { toast(`Now using ${cur.name}`); route(); }
-      } }, "Use this setup") : null,
-      !isNew && cur.api_key_saved ? h("button", { class: "ghost", onclick: async () => {
-        if (await guard(() => api("/api/assistant/config", { method: "PUT", body: { profile_id: cur.id, clear_key: true } }))) { toast("Saved key removed"); route(); }
-      } }, "Remove saved key") : null,
-      !isNew ? h("button", { class: "danger", onclick: async () => {
-        if (!confirm(`Delete the setup “${cur.name}” and its saved key?`)) return;
-        if (await guard(() => api(`/api/assistant/profiles/${encodeURIComponent(cur.id)}`, { method: "DELETE" }))) {
-          toast("Setup deleted");
-          if (location.hash === "#/assistant/settings") route(); else location.hash = "#/assistant/settings";   // same hash fires no hashchange
-        }
-      } }, "Delete setup") : null,
+      saveBtn, testBtn, useBtn, removeKeyBtn, deleteBtn,
       result));
+  sync();
   return card;
 }
 
