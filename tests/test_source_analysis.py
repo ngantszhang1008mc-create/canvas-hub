@@ -20,6 +20,80 @@ RESULT = {'roles':['course_website','material'],'confidence':0.9,'summary':'Cour
           'adapter_spec': {'version':1,'pages':[URL],'format':'html'}}
 
 
+@pytest.mark.parametrize('batch', [False, True])
+def test_codex_analysis_cancel_closes_process_without_retry(hub, source, account, fake_codex, monkeypatch, batch):
+    from pathlib import Path
+    from canvas_hub.assistant.codex import CodexProvider
+    setup, messages = fake_codex
+    setup(hang=True)
+    api = HubAPI(hub)
+    api.assistant = AssistantService(hub, api)
+    api.assistant.update_config({'preset': 'codex', 'model': 'chosen-model'})
+    service = SourceAnalysis(api)
+    svc, sid, reads = source
+    aid = account['id']
+    providers = []
+    def factory(cfg):
+        provider = CodexProvider(cfg)
+        providers.append(provider)
+        return provider
+    monkeypatch.setattr('canvas_hub.services.source_analysis.make_provider', factory)
+    if batch:
+        disclosure = service.batch_disclosure(aid, course_id='4242')
+        service.batch_start(aid, disclosure['token'], consent=True)
+    else:
+        disclosure = service.disclosure(aid, sid)
+        service.start(aid, sid, disclosure['token'], consent=True)
+    try:
+        deadline = time.monotonic() + 10
+        while not any(m.get('method') == 'turn/start' for m in messages()):
+            assert time.monotonic() < deadline
+            time.sleep(.02)
+        thread_config = next(m['params'] for m in messages() if m.get('method') == 'thread/start')
+        assert thread_config['model'] == 'chosen-model'
+        if batch:
+            service.batch_cancel(aid, disclosure['token'])
+        else:
+            hub.requests.cancel(aid, svc.get(aid, sid)['analysis_request_id'])
+        finish(service)
+        for thread in list(service.batch_threads.values()):
+            thread.join(5)
+            assert not thread.is_alive()
+        assert svc.get(aid, sid)['request']['status'] == 'cancelled'
+        assert svc.get(aid, sid)['classification'] is None
+        assert providers[0].server.process.poll() is not None
+        assert not Path(providers[0].server.workspace.name).exists()
+        assert len([m for m in messages() if m.get('method') == 'turn/start']) == 1
+        assert reads == [URL]
+    finally:
+        for provider in providers:
+            provider.close()
+
+
+@pytest.mark.parametrize('plan', [
+    {'signed_out': True}, {'turn_error': True}, {'reply': 'private-error-sentinel'},
+    {'calls': [{'name': 'run_shell', 'arguments': {'command': 'private-error-sentinel'}}]},
+])
+def test_codex_analysis_failure_is_redacted_and_never_executes_tools(hub, source, account, fake_codex, plan):
+    setup, messages = fake_codex
+    setup(**plan)
+    api = HubAPI(hub)
+    api.assistant = AssistantService(hub, api)
+    api.assistant.update_config({'preset': 'codex', 'model': ''})
+    service = SourceAnalysis(api)
+    svc, sid, reads = source
+    aid = account['id']
+    disclosure = service.disclosure(aid, sid)
+    service.start(aid, sid, disclosure['token'], consent=True)
+    finish(service)
+    result = svc.get(aid, sid)
+    assert result['request']['status'] == 'declined' and result['classification'] is None
+    assert 'private-error-sentinel' not in json.dumps(result)
+    assert not any(m.get('id') == 1000 and 'result' in m for m in messages())
+    service.start(aid, sid, disclosure['token'], consent=True)
+    assert len([m for m in messages() if m.get('method') == 'turn/start']) <= 1
+
+
 def test_codex_source_analysis_discloses_then_uses_sandboxed_cli(hub, source, account, fake_codex):
     setup, messages = fake_codex
     setup(reply=json.dumps(RESULT))

@@ -155,8 +155,11 @@ class SourceAnalysis:
             self._active(aid, sid, rid, token)
             provider = make_provider({**cfg, '_single_attempt': True})
             # No streaming fallback and no automatic SDK retries for paid analysis.
+            # Codex polls this callback while waiting on its private app-server.
+            # Cancellation closes that process in finally; never retry the turn.
+            options = {'on_text': lambda _text: self._active(aid, sid, rid, token)} if cfg['provider'] == 'codex' else {}
             turn = provider.complete(SYSTEM, [{'role':'user','sent_text':canonical_json({
-                'url':s['url'], 'format':fmt, 'untrusted_page_text':page['content']})}], [])
+                'url':s['url'], 'format':fmt, 'untrusted_page_text':page['content']})}], [], **options)
             self._active(aid, sid, rid, token)
             if turn.tool_calls or turn.stop != 'end' or len(turn.text) > 20_000:
                 raise InvalidInput('Model returned unsupported or incomplete output.')

@@ -7,9 +7,15 @@ reads that URL and sends its extracted text to the existing Assistant provider.
 The key stays in the existing server-side settings; no second setup is needed.
 Nothing is fetched or sent merely by opening a page or during automatic sync.
 
-The built-in path supports Anthropic and OpenAI-compatible API setups (including
-local endpoints). With no API setup, the panel links to **Assistant settings**.
-Codex CLI setups can use the explicit **Use connected Agent instead** fallback.
+The built-in path supports Anthropic, OpenAI-compatible API setups (including
+local endpoints), and the existing Codex CLI setup. Codex reuses its CLI login and
+selected model; it does not need a second API key. Its disclosure names Codex quota
+and shows "Provider default" when no model is selected. With no configured setup,
+the panel links to **Assistant settings**. **Use connected Agent instead** remains
+an explicit MCP fallback.
+Codex runs in an ephemeral temporary workspace with read-only sandboxing, no
+dynamic tools, MCP servers, shell, web search or apps, and no automatic approvals.
+Cancellation closes its local process; usage already incurred cannot be refunded.
 Built-in analysis supplies no tools, chat history, account data or credentials to
 the model. Page instructions are untrusted. Evidence URL, timestamp and text come
 from the reader, not the model. JSON output uses the existing classification and
