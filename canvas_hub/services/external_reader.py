@@ -86,6 +86,7 @@ class Read:
     content_type: str
     body: bytes
     location: str | None = None
+    auth_challenge: bool = False
 
 
 class _PinnedHTTPS(http.client.HTTPSConnection):
@@ -126,7 +127,7 @@ def public_get(url):
                 break
             chunks.append(chunk)
         return Read(url, resp.status, resp.getheader('Content-Type', '').split(';')[0].lower(),
-                    b''.join(chunks), resp.getheader('Location'))
+                    b''.join(chunks), resp.getheader('Location'), bool(resp.getheader('WWW-Authenticate')))
     finally:
         conn.close()
 
@@ -148,8 +149,10 @@ class PublicReader:
                     raise InvalidInput('Redirect lacks destination')
                 url = urljoin(safe, r.location)
                 continue
+            if r.status == 401 and r.auth_challenge:
+                raise InvalidInput('Site requested HTTP authentication', code='needs_login')
             if r.status in (401, 403):
-                raise InvalidInput('Site access requires login/permission', code='needs_login')
+                raise InvalidInput('Site denied access; login requirement is unknown', code='needs_attention')
             if r.status != 200:
                 raise InvalidInput('Site read failed; previous observations retained', code='stale')
             return r

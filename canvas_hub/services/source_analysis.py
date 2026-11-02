@@ -144,10 +144,10 @@ class SourceAnalysis:
                 c.execute("UPDATE view_requests SET status='declined',result_note=?,completed_at=? WHERE id=? AND account_id=? AND status='claimed' AND claimed_by=?", (error, now_iso(), rid, aid, AGENT))
             c.execute("UPDATE source_analysis_attempts SET state='finished' WHERE token=?", (token,))
 
-    def _submit(self, aid, sid, rid, token, result):
+    def _submit(self, aid, sid, rid, token, result, *, reader_failure=None):
         # Bind publication to the durable attempt too: deleted/recreated account
         # and request integer IDs must never accept an old worker's result.
-        return self.sources.submit_analysis(aid, rid, AGENT, result, _builtin=True, _attempt_token=token)
+        return self.sources.submit_analysis(aid, rid, AGENT, result, _builtin=True, _attempt_token=token, _reader_failure=reader_failure)
 
     def _run_reserved(self, *args):
         try:
@@ -212,7 +212,10 @@ class SourceAnalysis:
             error = 'Public page or analysis could not be validated. Previous data retained; use a connected Agent or explicitly reanalyse.'
             if e.code in ('needs_login', 'needs_attention', 'stale'):
                 try:
-                    self._submit(aid, sid, rid, token, {'access_error': 'Cannot read this public page (login, JavaScript, unsupported content or unavailable site). Previous data retained.'})
+                    message = {'needs_login': 'The page requested authentication. Course access after login is not yet verified.',
+                               'needs_attention': 'The page could not be read; whether login is required is unknown.',
+                               'stale': 'The site is temporarily unavailable or returned an unsuccessful response.'}[e.code]
+                    self._submit(aid, sid, rid, token, {'access_error': message + ' Previous data retained.'}, reader_failure=e.code)
                 except Exception:
                     pass
         except Exception:

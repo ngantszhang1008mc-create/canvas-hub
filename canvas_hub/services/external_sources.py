@@ -193,17 +193,19 @@ class ExternalSources:
             self.db.conn.execute('UPDATE external_sources SET analysis_request_id=?,error=NULL WHERE id=?', (req['id'], sid))
         return self.get(aid, sid)
 
-    def submit_analysis(self, aid, request_id, agent_name, result, *, _builtin=False, _attempt_token=None):
+    def submit_analysis(self, aid, request_id, agent_name, result, *, _builtin=False, _attempt_token=None, _reader_failure=None):
         if _check_agent(agent_name) == 'Canvas Hub built-in Assistant' and not _builtin:
             raise Conflict('Built-in analysis cannot be submitted by a connected Agent')
-        source = self._submit_analysis(aid, request_id, agent_name, result, _attempt_token=_attempt_token)
+        if _reader_failure is not None and (not _builtin or _reader_failure not in ('needs_login', 'needs_attention', 'stale')):
+            raise InvalidInput('Invalid reader failure')
+        source = self._submit_analysis(aid, request_id, agent_name, result, _attempt_token=_attempt_token, _reader_failure=_reader_failure)
         # Proposal/access changes can pause previously available evidence without
         # performing a read. Update saved tool status after releasing the source
         # transaction, preserving the user's interactive state.
         self.hub.components.sync_sources(aid)
         return source
 
-    def _submit_analysis(self, aid, request_id, agent_name, result, *, _attempt_token=None):
+    def _submit_analysis(self, aid, request_id, agent_name, result, *, _attempt_token=None, _reader_failure=None):
         agent = _check_agent(agent_name)
         if not isinstance(result, dict) or set(result) - {'roles','confidence','evidence_url','read_at','summary','content','access_error','adapter_spec'}:
             raise InvalidInput('Invalid source analysis fields')
@@ -224,7 +226,7 @@ class ExternalSources:
                 if not isinstance(error, str):
                     raise InvalidInput('Access error must be text')
                 self.hub.requests._set(request_id, status='declined', result_note=error[:2000], completed_at=now_iso())
-                status = 'needs_attention' if agent == 'Canvas Hub built-in Assistant' else 'needs_login'
+                status = _reader_failure or ('needs_attention' if agent == 'Canvas Hub built-in Assistant' else 'needs_login')
                 c.execute('UPDATE external_sources SET status=?,error=? WHERE id=?', (status, error[:2000], sid))
                 return self.get(aid, sid)
             roles = result.get('roles')

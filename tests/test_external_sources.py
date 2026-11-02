@@ -118,7 +118,9 @@ def test_decline_cancel_reanalysis_and_failed_analysis(source,hub,account):
     assert svc.analyze(aid,sid)['classification'] and svc.get(aid,sid)['decision']=='declined'
 
 
-@pytest.mark.parametrize('failure,expected',[(Read(URL,401,'text/html',b'login'),'needs_login'),
+@pytest.mark.parametrize('failure,expected',[(Read(URL,401,'text/html',b'',auth_challenge=True),'needs_login'),
+    (Read(URL,401,'text/html',b''),'needs_attention'),
+    (Read(URL,403,'text/html',b''),'needs_attention'),
     (Read(URL,200,'text/html',b'<input type="password">'),'needs_login'),
     (Read(URL,200,'text/html',b'<p>template changed</p>'),'needs_attention'),
     (Read(URL,503,'text/plain',b'error'),'stale')])
