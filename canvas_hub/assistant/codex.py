@@ -10,6 +10,7 @@ into the Canvas Hub data directory.
 from __future__ import annotations
 
 import json
+import errno
 import os
 import queue
 import shutil
@@ -50,9 +51,19 @@ class AppServer:
                 start_new_session=os.name != "nt")
         except OSError as e:
             self.workspace.cleanup()
+            if e.errno in (errno.EMFILE, errno.ENFILE):
+                raise ProviderError("The system has too many open files. Close unused work and retry; check Canvas Hub's descriptor limits if this persists.", retryable=True) from e
             raise ProviderError("The Codex CLI could not start. Check CANVAS_HUB_CODEX or your PATH.") from e
         self.reader = threading.Thread(target=self._read, name="canvas-hub-codex-stdio", daemon=True)
-        self.reader.start()
+        try:
+            self.reader.start()
+        except BaseException:
+            self.process.kill()
+            self.process.wait(timeout=2)
+            self.process.stdin.close()
+            self.process.stdout.close()
+            self.workspace.cleanup()
+            raise
 
     def _put(self, message):
         while not self.closed.is_set():

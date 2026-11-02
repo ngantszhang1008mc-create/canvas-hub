@@ -47,6 +47,9 @@ def _hub(args):
 def cmd_serve(args):
     import uvicorn
 
+    from .resource_limits import configure_nofile
+    configure_nofile()
+
     from .boundary import HubAPI
     from .collector.browser import BrowserWorker
     from .collector.runner import JobRunner

@@ -261,3 +261,13 @@ Code map:
 | `canvas_hub/testing/fake_canvas.py` | Synthetic Canvas for tests |
 
 Keep credentials, browser profiles, real course data and databases out of git; `.gitignore` covers the defaults.
+
+# File descriptor headroom
+
+On supported Unix systems, `canvas-hub serve` attempts to raise only its own
+soft open-file limit to 1024 (or the hard limit if lower). This modest headroom
+helps a service launched with a 256-descriptor limit; it does not fix leaks.
+`CANVAS_HUB_NOFILE` can select a target from 1 to 4096. Existing higher limits
+are never lowered. Unsupported platforms or permission failures continue with
+the current limit; startup logs report the effective limits when available.
+No system-wide settings are changed.

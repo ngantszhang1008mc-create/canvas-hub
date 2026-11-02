@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+import weakref
 from contextlib import contextmanager
 from importlib import resources as importlib_resources
 from pathlib import Path
@@ -26,12 +27,16 @@ def _migration_files() -> list[tuple[int, str, str]]:
 
 def connect(path: Path | str) -> sqlite3.Connection:
     conn = sqlite3.connect(str(path), timeout=30, isolation_level=None, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA busy_timeout = 30000")
-    if str(path) != ":memory:":
-        conn.execute("PRAGMA journal_mode = WAL")
-        conn.execute("PRAGMA synchronous = NORMAL")
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA busy_timeout = 30000")
+        if str(path) != ":memory:":
+            conn.execute("PRAGMA journal_mode = WAL")
+            conn.execute("PRAGMA synchronous = NORMAL")
+    except BaseException:
+        conn.close()
+        raise
     return conn
 
 
@@ -82,25 +87,40 @@ def schema_version(conn: sqlite3.Connection) -> int:
     return int(row[0] or 0)
 
 
+class _ThreadConnection:
+    """Owned by thread-local storage; released when the worker exits."""
+
+    def __init__(self, conn):
+        self.conn = conn
+
+    def close(self):
+        if self.conn is not None:
+            self.conn.close()
+            self.conn = None
+
+    def __del__(self):
+        self.close()
+
+
 class Database:
     """Thread-aware wrapper: one connection per thread, explicit transactions."""
 
     def __init__(self, path: Path | str):
         self.path = str(path)
         self._local = threading.local()
-        self._all: list[sqlite3.Connection] = []
+        self._all = weakref.WeakSet()
         self._lock = threading.Lock()
         migrate(self.conn)
 
     @property
     def conn(self) -> sqlite3.Connection:
-        c = getattr(self._local, "conn", None)
-        if c is None:
-            c = connect(self.path)
-            self._local.conn = c
+        holder = getattr(self._local, "holder", None)
+        if holder is None or holder.conn is None:
+            holder = _ThreadConnection(connect(self.path))
+            self._local.holder = holder
             with self._lock:
-                self._all.append(c)
-        return c
+                self._all.add(holder)
+        return holder.conn
 
     @contextmanager
     def tx(self) -> Iterator[sqlite3.Connection]:
@@ -153,9 +173,9 @@ class Database:
 
     def close(self) -> None:
         with self._lock:
-            for c in self._all:
+            for holder in list(self._all):
                 try:
-                    c.close()
+                    holder.close()
                 except Exception:  # noqa: BLE001
                     pass
             self._all.clear()

@@ -29,7 +29,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from ..agent_tools import ToolContext, run_tool_display, tools_for
-from ..util import InvalidInput, NotFound, now_iso
+from ..util import HubError, InvalidInput, NotFound, now_iso
 from .providers import ANTHROPIC_DEFAULT_MODEL, RESERVED_PARAMS, ProviderError, Stopped, make_provider
 
 log = logging.getLogger("canvas_hub.assistant")
@@ -152,8 +152,10 @@ class AssistantService:
     def _load_store(self) -> dict:
         try:
             data = json.loads(self._path.read_text())
-        except (OSError, ValueError):
+        except FileNotFoundError:
             data = {}
+        except (OSError, ValueError) as e:
+            raise HubError("Assistant settings could not be read. Your settings and conversations are retained; free resources or check file access, then retry.", code="assistant_settings_unavailable", status=503) from e
         perms = {**DEFAULT_CONFIG["permissions"], **(data.get("permissions") or {})}
         if "profiles" in data:
             profiles = [self._profile(x) for x in data["profiles"] if isinstance(x, dict) and x.get("id")]
@@ -471,7 +473,7 @@ class AssistantService:
         if msgs and msgs[-1]["role"] == "assistant" and msgs[-1].get("tool_calls"):
             self._append(cid, "tool", {"results": [
                 {"id": c["id"], "name": c["name"], "is_error": True,
-                 "content": json.dumps({"error": "interrupted", "message": "This tool call was not executed."})}
+                 "content": json.dumps({"error": "interrupted", "message": "The outcome of this tool call is unknown; check before repeating it."})}
                 for c in msgs[-1]["tool_calls"]]})
 
     def _set_state(self, cid: int, state: str, error: str | None = None) -> None:
@@ -532,6 +534,8 @@ class AssistantService:
         # The time stamp is stored with the message (history stays append-only).
         sent = f"[Now: {now_local.strftime('%A %d %B %Y %H:%M %Z')}]\n\n{text}"
         with self._lock:
+            if len(self._threads) >= 4:
+                raise InvalidInput("The assistant is busy with other conversations. Wait for one to finish, then try again.", code="assistant_busy")
             with self.hub.db.tx() as c:
                 if conversation_id is not None:
                     if isinstance(conversation_id, bool) or not isinstance(conversation_id, int):
@@ -562,13 +566,40 @@ class AssistantService:
             except Exception:
                 self._threads.pop(cid, None)
                 self._set_state(cid, "error", "The assistant could not start. Try again.")
-                raise
         return {"conversation_id": cid}
 
     def wait(self, cid: int, timeout: float | None = None) -> None:
         th = self._threads.get(cid)
         if th:
             th.join(timeout)
+
+    def retry(self, account_id, cid, profile_id=None, reasoning=None, model=None):
+        """Explicitly continue a failed answer without executing any tools again."""
+        with self._cfg_lock:
+            cfg, _, _ = self._message_config(profile_id, reasoning, model)
+        acct = self.hub.identity.get_account(account_id)
+        with self._lock:
+            if len(self._threads) >= 4:
+                raise InvalidInput("The assistant is busy; wait and try again.", code="assistant_busy")
+            with self.hub.db.tx() as c:
+                conv = self._conv(account_id, cid)
+                if conv['run_state'] != 'error':
+                    raise InvalidInput("Only a stopped turn can be retried.", code="assistant_busy")
+                if conv['scope_course_id'] is not None or conv['scope_item_id'] is not None:
+                    fingerprint = self._disclosure_fingerprint(account_id, cfg, course_id=conv['scope_course_id'], item_id=conv['scope_item_id'])
+                    if not c.execute("SELECT 1 FROM workspace_disclosures WHERE account_id=? AND fingerprint=?", (account_id, fingerprint)).fetchone():
+                        raise InvalidInput("Review the provider and source disclosure before retrying.", code="disclosure_required")
+                self._repair(cid)
+                self._set_state(cid, 'running')
+            self._cancel.discard(cid)
+            thread = threading.Thread(target=self._run, args=(cid, account_id, cfg, acct, False), name=f'assistant-{cid}', daemon=True)
+            self._threads[cid] = thread
+            try:
+                thread.start()
+            except Exception:
+                self._threads.pop(cid, None)
+                self._set_state(cid, 'error', 'The assistant could not start. Try again.')
+        return {'conversation_id': cid}
 
     # ---- the agent loop ----------------------------------------------------------
     def _system(self, acct: dict, perms: set[str]) -> str:
@@ -585,7 +616,7 @@ class AssistantService:
                                     deadlines_rule=("You may manage tabs and filters and archive/restore deadlines when asked."
                                       if "deadlines" in perms else "The user has disabled deadline management; do not change it."))
 
-    def _run(self, cid: int, account_id: int, cfg: dict, acct: dict) -> None:
+    def _run(self, cid: int, account_id: int, cfg: dict, acct: dict, allow_tools=True) -> None:
         provider = None
         final_state, final_error = "idle", None
         try:
@@ -593,6 +624,8 @@ class AssistantService:
             if self.hub.writes.get_settings(account_id)["enabled"]:
                 perms.add("prepare")       # prepare only; sending needs the user's click in the app
             tools = [{"name": t.name, "description": t.description, "schema": t.schema()} for t in tools_for(perms)]
+            if not allow_tools:
+                tools = []
             conv = self._conv(account_id, cid)
             ctx = ToolContext(api=self.api, account_id=account_id, worker=self.worker, conversation_id=cid,
                               scope_course_id=conv["scope_course_id"], scope_item_id=conv["scope_item_id"])
@@ -633,7 +666,9 @@ class AssistantService:
                     break
                 results = []
                 for c in turn.tool_calls:
-                    if cid in self._cancel:
+                    if not allow_tools:
+                        content, is_err, display = json.dumps({"error": "retry_tool_disabled", "message": "Tools are disabled during retry; this call was not executed."}), True, None
+                    elif cid in self._cancel:
                         content, is_err, display = json.dumps({"error": "cancelled", "message": "The user stopped the assistant."}), True, None
                     elif c.input_error or c.input is None:
                         content, is_err, display = json.dumps({"INVALID_INPUT": c.input_error or "missing input"}), True, None
@@ -654,6 +689,9 @@ class AssistantService:
                         entry["content"] = json.dumps({"shown_to_user": True, **rest}, ensure_ascii=False)
                     results.append(entry)
                 self._append(cid, "tool", {"results": results})
+                if not allow_tools:
+                    final_state, final_error = "error", "Retry needs tools. Send a new message after reviewing previous tool results."
+                    break
             else:
                 self._append(cid, "assistant", {"text": "I stopped after many steps without finishing. Try a narrower question.",
                                                 "stop": "end", "tool_calls": [], "raw": {"provider": "canvas_hub"}})
@@ -661,7 +699,7 @@ class AssistantService:
             final_state, final_error = "error", str(e)
         except Exception as e:  # noqa: BLE001
             log.exception("assistant run failed")
-            final_state, final_error = "error", f"{type(e).__name__}: {e}"
+            final_state, final_error = "error", "The assistant could not finish. Resources or access may be unavailable; try again after checking the app."
         finally:
             try:
                 if provider and callable(getattr(provider, "close", None)):
@@ -670,7 +708,12 @@ class AssistantService:
                 log.exception("assistant provider cleanup failed")
                 final_state, final_error = "error", "The assistant connection could not close cleanly. Restart Canvas Hub before retrying."
             with self._live_lock:
-                self._live.pop(cid, None)
+                partial = self._live.pop(cid, "")
+                if partial:
+                    try:
+                        self._append(cid, "assistant", {"text": partial, "stop": "end", "tool_calls": [], "raw": {"provider": "canvas_hub"}})
+                    except Exception:
+                        self._live[cid] = partial
             self._cancel.discard(cid)
             with self._lock:
                 self._set_state(cid, final_state, final_error)
