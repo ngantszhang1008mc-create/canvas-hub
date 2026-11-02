@@ -1,6 +1,5 @@
 """Local browser QA for truthful phase progress; never contacts Canvas."""
 import json
-from pathlib import Path
 
 import pytest
 from playwright.sync_api import expect, sync_playwright
@@ -56,7 +55,7 @@ def test_phase_progress_and_scope_settings(hub, account, width, tmp_path):
         expect(page.get_by_text('Scope saved', exact=True)).to_be_visible()
         assert hub.identity.get_account(account['id'])['scope']['experimental_network_concurrency'] is True
         assert page.evaluate('document.documentElement.scrollWidth <= innerWidth + 1')
-        screenshots = Path('/tmp/collection-pipeline-qa')
+        screenshots = tmp_path / 'collection-pipeline-qa'
         screenshots.mkdir(exist_ok=True)
         page.evaluate("scrollTo(0,0)")
         page.screenshot(path=str(screenshots / f'collection-phases-{width}.png'), full_page=True)
