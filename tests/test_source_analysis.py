@@ -348,6 +348,20 @@ def test_unreadable_or_redirect_does_not_call_provider(builtin,source,account,re
     assert not calls and reads==[URL] and not svc.get(aid,sid)['classification']
 
 
+@pytest.mark.parametrize('response,status', [
+    (Read(URL,401,'text/html',b'',auth_challenge=True),'needs_login'),
+    (Read(URL,401,'text/html',b''),'needs_attention'),
+    (Read(URL,403,'text/html',b''),'needs_attention'),
+    (Read(URL,503,'text/html',b''),'stale'),
+])
+def test_reader_failures_are_distinguished_without_model(builtin,source,account,response,status):
+    service,api,calls=builtin;svc,sid,_=source;aid=account['id']
+    svc.reader=PublicReader(lambda url:response)
+    start(service,aid,sid);finish(service)
+    assert svc.get(aid,sid)['status']==status
+    assert not calls and not svc.get(aid,sid)['classification']
+
+
 def test_provider_failure_redacted_single_attempt_and_retry_explicit(builtin,source,account,monkeypatch):
     service,api,calls=builtin;svc,sid,_=source;aid=account['id']
     class Provider:

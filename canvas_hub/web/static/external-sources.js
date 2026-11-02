@@ -51,6 +51,74 @@ export function makeExternalSources(env) {
         const token=++generation;
         setTimeout(async()=>{ if(token!==generation||!alive())return; try{source=await api(aidPath);await draw();if(!source.analysis_running&&!['open','claimed'].includes(source.request?.status))window.dispatchEvent(new Event('external-sources-updated'));}catch(e){status.textContent=e.message;} },1200);
       } else {
+        const checkResult=h('p',{role:'status'});
+        content.append(note('Check login requirement anonymously in a new temporary browser. No saved sessions or model calls are used.'),
+          h('button',{onclick:async e=>{
+            const button=e.currentTarget; button.disabled=true;
+            try {
+              await api(aidPath+'/login-check',{method:'POST',body:{}});
+              while(alive()) {
+                await new Promise(resolve=>setTimeout(resolve,1000));
+                const result=await api(aidPath+'/login-check');
+                if(result.state!=='running') {
+                  checkResult.textContent=`${(result.outcome||'unknown').replaceAll('_',' ')} · ${result.final_host||'site unavailable'} · course access after login is not verified.`;
+                  break;
+                }
+              }
+            } catch(err) { if(alive())checkResult.textContent=err.message; }
+            finally { if(alive())button.disabled=false; }
+          }},'Check login requirement'),checkResult);
+        const connectBox=h('section',{'aria-label':'Site connection'});
+        content.append(connectBox);
+        async function connectionPanel() {
+          const cp=aidPath+'/site-connection';
+          let state=await api(cp); if(!alive())return;
+          const output=h('div',{'aria-live':'polite'});
+          const button=(label,fn)=>h('button',{onclick:async e=>{
+            const b=e.currentTarget; b.disabled=true;
+            try { await fn(); } catch(err) { if(alive())output.append(h('p',{role:'alert'},err.message)); }
+            finally { if(alive())b.disabled=false; }
+          }},label);
+          mount(connectBox,h('h3',null,'Connect this site'),
+            note('Use a separate local browser profile for this account and site. You enter your own credentials and MFA in its window. No page text or session is sent to the Assistant.'),
+            note('Only the site and identity-provider origins you approve may receive requests. Login form submissions require a separate one-time approval.'),
+            note(`Connection: ${state.state.replaceAll('_',' ')}`),output);
+          if(['not_connected','closed','error'].includes(state.state)) {
+            const ids=h('input',{type:'text',placeholder:'https://identity.example.edu', 'aria-label':'Additional identity-provider origins'});
+            connectBox.append(note('Optional: enter identity-provider HTTPS origins separated by commas. Unknown origins are blocked.'),ids,
+              button('Review connection',async()=>{
+                const origins=ids.value.split(',').map(s=>s.trim()).filter(Boolean);
+                const offer=await api(cp+'/offer',{method:'POST',body:{identity_origins:origins}});
+                if(!alive())return;
+                mount(output,note(`Approve local sign-in for ${offer.site}. Network access will be limited to: ${offer.origins.join(', ')}. A persistent local browser profile will be created.`),
+                  button('Agree and open sign-in window',async()=>{
+                    await api(cp+'/start',{method:'POST',body:{token:offer.token,consent:true}}); if(alive())await connectionPanel();
+                  }));
+              }));
+          } else {
+            if(state.blocked_origins?.length)connectBox.append(note(`Blocked origins: ${state.blocked_origins.join(', ')}. Close and reopen after reviewing any identity-provider origin you need.`));
+            if(state.blocked_submission_origin)connectBox.append(note(`A submission to ${state.blocked_submission_origin} was blocked because its purpose could not be verified. This sign-in flow may not be supported.`));
+            if(state.pending_post)connectBox.append(note(`A sign-in submission to ${state.pending_post.origin} is waiting for approval. Approve once, then submit again in the site window.`),
+              button('Approve one sign-in submission',async()=>{await api(cp+'/approve_post',{method:'POST',body:{request:state.pending_post}});if(alive())await connectionPanel();}));
+            if(state.state==='connected')connectBox.append(button('Review connected source analysis',async()=>{
+              const offer=await api(aidPath+'/connected-disclosure',{method:'POST',body:{}}); if(!alive())return;
+              if(!offer.available){mount(output,note(offer.message));return;}
+              mount(output,note(`The exact text below and the website origin will be sent to ${offer.setup||offer.provider} (${offer.endpoint}), model ${offer.model}; this may use your quota. The reviewed text and classification will be saved locally and included in data backups.`),
+                note('Forms, common credential patterns, links and email addresses are removed automatically, but no filter can recognize every secret. Review the entire text and do not approve if it contains credentials, tokens, or information you do not want sent.'),
+                h('details',{open:true},h('summary',null,'Exact text to send and save'),h('pre',{class:'text'},offer.content)),
+                button('Approve, analyse and save',()=>action('/analyze-connected',{token:offer.token,consent:true})));
+            }));
+            connectBox.append(button('Refresh connection status',connectionPanel),
+              button('Reopen sign-in page',async()=>{await api(cp+'/retry_login',{method:'POST',body:{}});if(alive())await connectionPanel();}),
+              button('Check requested page',async()=>{
+                const result=await api(cp+'/verify',{method:'POST',body:{}}); if(!alive())return;
+                mount(output,note(result.state==='content_visible'?'Content appeared at the exact requested address. Confirm it is your course page; this does not prove enrollment or send text to an Assistant.':`Could not verify the requested page: ${result.state.replaceAll('_',' ')}. Existing saved data is unchanged.`),
+                  result.content?h('details',null,h('summary',null,'View retrieved page text'),h('pre',{class:'text'},result.content)):null,
+                  result.review_token?button('Confirm this is the requested course page',async()=>{await api(cp+'/confirm_content',{method:'POST',body:{request:result.review_token}});if(alive())await connectionPanel();}):null);
+              }),button('Close connection',async()=>{await api(cp+'/cancel',{method:'POST',body:{}});if(alive())await connectionPanel();}));
+          }
+        }
+        await connectionPanel(); if(!alive())return;
         if(req?.status==='declined') content.append(note('Latest inspection failed. Previous successful results are retained; you can re-inspect after reviewing the disclosure.'));
         if(req?.result_note) content.append(note(req.result_note));
         if (!disclosure) disclosure=await api(aidPath+'/disclosure');

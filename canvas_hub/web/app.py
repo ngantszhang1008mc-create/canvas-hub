@@ -10,6 +10,7 @@ import shutil
 import sys
 from importlib import resources as importlib_resources
 from pathlib import Path
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
@@ -42,10 +43,24 @@ def mcp_command() -> list[str]:
 
 
 def create_app(api: HubAPI, *, token: str, port: int) -> FastAPI:
-    app = FastAPI(title="Canvas Hub", docs_url=None, redoc_url=None, openapi_url=None)
+    from ..services.site_connection import SiteConnections
+    site_connections = SiteConnections(api.hub)
+
+    @asynccontextmanager
+    async def lifespan(_app):
+        try:
+            yield
+        finally:
+            await run_in_threadpool(site_connections.close)
+
+    app = FastAPI(title="Canvas Hub", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
     from ..services.source_analysis import SourceAnalysis
     source_analysis = SourceAnalysis(api)
     app.state.source_analysis = source_analysis
+    from ..services.login_detection import LoginDetection
+    login_detection = LoginDetection(api.hub)
+    app.state.login_detection = login_detection
+    app.state.site_connections = site_connections
     hosts = allowed_hosts(port)
     own_origins = {f"http://{h}" for h in hosts}
 
@@ -424,6 +439,45 @@ def create_app(api: HubAPI, *, token: str, port: int) -> FastAPI:
     @app.get("/api/accounts/{aid}/external-sources/{sid}/disclosure")
     def external_disclosure(aid: int, sid: int):
         return source_analysis.disclosure(aid, sid)
+
+    @app.get("/api/accounts/{aid}/external-sources/{sid}/login-check")
+    def external_login_check(aid: int, sid: int):
+        return login_detection.get(aid, sid)
+
+    @app.post("/api/accounts/{aid}/external-sources/{sid}/login-check")
+    def external_login_check_start(aid: int, sid: int):
+        return login_detection.start(aid, sid)
+
+    @app.get("/api/accounts/{aid}/external-sources/{sid}/site-connection")
+    def site_connection_status(aid: int, sid: int):
+        return site_connections.status(aid, sid)
+
+    @app.post("/api/accounts/{aid}/external-sources/{sid}/site-connection/offer")
+    async def site_connection_offer(aid: int, sid: int, request: Request):
+        b = await body(request)
+        return site_connections.offer(aid, sid, b.get('identity_origins', []))
+
+    @app.post("/api/accounts/{aid}/external-sources/{sid}/site-connection/start")
+    async def site_connection_start(aid: int, sid: int, request: Request):
+        b = await body(request)
+        return site_connections.start(aid, sid, b.get('token'), b.get('consent'))
+
+    @app.post("/api/accounts/{aid}/external-sources/{sid}/site-connection/{action}")
+    async def site_connection_action(aid: int, sid: int, action: str, request: Request):
+        b = await body(request)
+        if action == 'analysis_snapshot':
+            raise InvalidInput('Use the connected source review flow')
+        return await run_in_threadpool(lambda: site_connections.action(aid, sid, action, b.get('request')))
+
+    @app.post("/api/accounts/{aid}/external-sources/{sid}/connected-disclosure")
+    def connected_disclosure(aid: int, sid: int):
+        return source_analysis.connected_disclosure(aid, sid, site_connections)
+
+    @app.post("/api/accounts/{aid}/external-sources/{sid}/analyze-connected")
+    async def analyze_connected(aid: int, sid: int, request: Request):
+        b = await body(request)
+        return source_analysis.start(aid, sid, b.get('token'), consent=b.get('consent') is True,
+                                     reanalyze=True, connected=True)
 
     @app.post("/api/accounts/{aid}/external-sources/{sid}/analyze")
     async def external_analyze(aid: int, sid: int, request: Request):
