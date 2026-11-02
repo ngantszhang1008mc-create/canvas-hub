@@ -131,6 +131,7 @@ class AssistantService:
         self._lock = threading.RLock()
         self._cfg_lock = threading.RLock()     # serialises read-modify-write of the settings file
         self._threads: dict[int, threading.Thread] = {}
+        self._pending_states: dict[int, tuple[str, str | None]] = {}
         try:
             self._max_runs = int(os.environ.get("CANVAS_HUB_ASSISTANT_CONCURRENCY", "4"))
             if not 1 <= self._max_runs <= 16:
@@ -399,15 +400,27 @@ class AssistantService:
     # ---- conversations ---------------------------------------------------------
     def list_conversations(self, account_id: int) -> list[dict]:
         self.hub.identity.require_account(account_id)
+        self._flush_pending_states()
         return [dict(r) for r in self.hub.db.query(
             "SELECT id, title, run_state, run_error, created_at, updated_at, scope_course_id, scope_item_id FROM assistant_conversations "
             "WHERE account_id=? ORDER BY updated_at DESC LIMIT 100", (account_id,))]
 
     def _conv(self, account_id: int, cid: int) -> dict:
+        self._flush_pending_states(cid)
         row = self.hub.db.one("SELECT * FROM assistant_conversations WHERE id=? AND account_id=?", (int(cid), account_id))
         if not row:
             raise NotFound("conversation not found", code="conversation_not_found")
         return dict(row)
+
+    def _flush_pending_states(self, cid=None):
+        # The worker can run out of descriptors before recording its final
+        # state. A later request with a usable DB connection completes it.
+        with self._lock:
+            for key, (state, error) in list(self._pending_states.items()):
+                if cid is not None and key != cid:
+                    continue
+                self._set_state(key, state, error)
+                self._pending_states.pop(key, None)
 
     def _transcript(self, cid: int) -> list[dict]:
         out = []
@@ -420,6 +433,8 @@ class AssistantService:
 
     def get_conversation(self, account_id: int, cid: int, after: int = 0) -> dict:
         conv = self._conv(account_id, cid)
+        if conv['run_state'] == 'error':
+            self._persist_partial(cid)
         with self._live_lock:
             transcript, draft = self._transcript(cid), self._live.get(cid)
         msgs = []
@@ -443,6 +458,13 @@ class AssistantService:
         if draft:
             out["draft"] = {"text": draft}
         return out
+
+    def _persist_partial(self, cid):
+        with self._live_lock:
+            partial = self._live.get(cid)
+            if partial:
+                self._append(cid, "assistant", {"text": partial, "stop": "end", "tool_calls": [], "raw": {"provider": "canvas_hub"}})
+                self._live.pop(cid, None)
 
     @staticmethod
     def _visible_display(display, archived_ids):
@@ -493,6 +515,13 @@ class AssistantService:
         with self.hub.db.tx() as c:
             c.execute("UPDATE assistant_conversations SET run_state=?, run_error=?, updated_at=? WHERE id=?",
                       (state, error, now_iso(), cid))
+
+    def _record_final_state(self, cid, state, error):
+        try:
+            self._set_state(cid, state, error)
+        except Exception:  # Resource exhaustion can also prevent this final write.
+            self._pending_states[cid] = (state, error)
+            log.warning("Could not save assistant final state; the next request will retry")
 
     def _message_config(self, profile_id=None, reasoning=None, model=None):
         """Resolve and validate the exact setup used by disclosure and dispatch."""
@@ -578,7 +607,7 @@ class AssistantService:
                 th.start()
             except Exception:
                 self._threads.pop(cid, None)
-                self._set_state(cid, "error", "The assistant could not start. Try again.")
+                self._record_final_state(cid, "error", "The assistant could not start. Try again.")
         return {"conversation_id": cid}
 
     def wait(self, cid: int, timeout: float | None = None) -> None:
@@ -594,6 +623,10 @@ class AssistantService:
         with self._lock:
             if len(self._threads) >= self._max_runs:
                 raise InvalidInput("The assistant is busy; wait and try again.", code="assistant_busy")
+            conv = self._conv(account_id, cid)
+            if conv['run_state'] != 'error':
+                raise InvalidInput("Only a stopped turn can be retried.", code="assistant_busy")
+            self._persist_partial(cid)
             with self.hub.db.tx() as c:
                 conv = self._conv(account_id, cid)
                 if conv['run_state'] != 'error':
@@ -611,7 +644,7 @@ class AssistantService:
                 thread.start()
             except Exception:
                 self._threads.pop(cid, None)
-                self._set_state(cid, 'error', 'The assistant could not start. Try again.')
+                self._record_final_state(cid, 'error', 'The assistant could not start. Try again.')
         return {'conversation_id': cid}
 
     # ---- the agent loop ----------------------------------------------------------
@@ -737,5 +770,7 @@ class AssistantService:
                         self._live[cid] = partial
             self._cancel.discard(cid)
             with self._lock:
-                self._set_state(cid, final_state, final_error)
-                self._threads.pop(cid, None)
+                try:
+                    self._record_final_state(cid, final_state, final_error)
+                finally:
+                    self._threads.pop(cid, None)

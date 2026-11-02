@@ -241,6 +241,56 @@ def test_retry_never_executes_unexpected_tools(hub, account, monkeypatch):
     assert result['messages'][-1]['results'][0]['is_error']
 
 
+def test_final_state_recovers_after_transient_write_failure(hub, account, monkeypatch):
+    class Provider:
+        def complete(self, system, transcript, tools, on_text):
+            raise ProviderError('Temporary failure')
+        def close(self):
+            pass
+    svc = AssistantService(hub, HubAPI(hub))
+    svc.update_config({'preset': 'codex'})
+    monkeypatch.setattr('canvas_hub.assistant.make_provider', lambda cfg: Provider())
+    original = svc._set_state
+    failed = []
+    def transient(cid, state, error=None):
+        if state == 'error' and not failed:
+            failed.append(True)
+            raise OSError(errno.EMFILE, 'too many files')
+        return original(cid, state, error)
+    monkeypatch.setattr(svc, '_set_state', transient)
+    cid = svc.send(account['id'], 'Question')['conversation_id']
+    svc.wait(cid, 5)
+    assert cid not in svc._threads
+    assert svc.get_conversation(account['id'], cid)['conversation']['run_state'] == 'error'
+    assert cid not in svc._pending_states
+
+
+def test_partial_answer_is_saved_when_resources_return(hub, account, monkeypatch):
+    class Provider:
+        def complete(self, system, transcript, tools, on_text):
+            on_text('Partial answer')
+            raise ProviderError('Temporary failure')
+        def close(self):
+            pass
+    svc = AssistantService(hub, HubAPI(hub))
+    svc.update_config({'preset': 'codex'})
+    monkeypatch.setattr('canvas_hub.assistant.make_provider', lambda cfg: Provider())
+    original = svc._append
+    failed = []
+    def transient(cid, role, content):
+        if role == 'assistant' and not failed:
+            failed.append(True)
+            raise OSError(errno.EMFILE, 'too many files')
+        return original(cid, role, content)
+    monkeypatch.setattr(svc, '_append', transient)
+    cid = svc.send(account['id'], 'Question')['conversation_id']
+    svc.wait(cid, 5)
+    result = svc.get_conversation(account['id'], cid)
+    assert result['conversation']['run_state'] == 'error'
+    assert result['messages'][-1]['text'] == 'Partial answer'
+    assert cid not in svc._live
+
+
 def test_provider_transcripts_accept_retry_continuation():
     transcript = [
         {'role': 'user', 'sent_text': 'Original question'},
