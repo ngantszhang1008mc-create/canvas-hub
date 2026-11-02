@@ -142,6 +142,10 @@ class ContextService:
             try:
                 transcript = self._compact_context(cid, account_id, cfg, transcript, make_provider)
             except ProviderError as e:
+                # A quota/auth/ambiguous gateway outcome never authorizes a
+                # second reservation for the original request.
+                if cfg.get('provider') == 'allowance_gateway' or getattr(e, 'abort_run', False):
+                    raise
                 with self.hub.db.tx() as c:
                     c.execute("UPDATE assistant_conversations SET context_notice=? WHERE id=?", (str(e), cid))
             report = policy.measure(cfg, system, transcript, tools)

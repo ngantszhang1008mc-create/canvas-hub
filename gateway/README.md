@@ -9,7 +9,8 @@ The production adapter implements OpenAI Responses for the approved `gpt-6-luna`
 model. Development uses an explicit offline mock mode. Production defaults have
 zero allowance and require server-side configuration and secrets before serving
 requests. No live model call or deployment was performed to validate this change.
-The local app's provider integration remains a separate task.
+The local app includes an opt-in **Allowance gateway** provider with invitation
+redemption, allowance display, and the same local tool permissions as other setups.
 
 ## What is implemented
 
@@ -36,7 +37,7 @@ floors, which operators must review before enabling paid traffic.
 - [Operator guide](docs/operations.md): local commands, configuration,
   administrative controls, and the deployment path.
 - [Client contract](docs/client-contract.md): transport, streaming, retries,
-  quota handling, and the future Python adapter seam.
+  quota handling, and the Python adapter seam.
 - [Minimal integration handoff](docs/integration-handoff.md): the exact local
   provider mapping and explicit mock setup for the combined test version.
 - [OpenAI adapter](docs/openai-provider.md): supported requests, authoritative

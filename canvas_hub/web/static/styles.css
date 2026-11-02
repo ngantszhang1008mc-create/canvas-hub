@@ -460,6 +460,7 @@ details.raw summary { cursor: pointer; color: var(--text-3); font-size: 12.5px; 
 .chat-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; padding: 0 20px 12px; flex: none; }
 .tab-count { margin-left: 6px; font-size: 11px; color: var(--text-3); }
 .settings-layout { display: grid; grid-template-columns: 260px minmax(0, 1fr); gap: 20px; align-items: start; }
+.settings-layout > *, .settings-layout .field { min-width: 0; }
 .setup-list .card-head { gap: 8px; }
 .setup-row { display: flex; align-items: center; gap: 8px; padding: 8px 10px; margin: 0 -10px; border-left: 2px solid transparent; border-radius: 0 4px 4px 0; }
 .setup-row.on { border-left-color: var(--mark); background: var(--surface-2); }

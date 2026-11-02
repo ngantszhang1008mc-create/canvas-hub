@@ -1,7 +1,7 @@
 # Minimal local-app integration
 
 Keep the hosted gateway separate from the local app. The integration only needs
-one additional provider adapter in `canvas_hub/assistant/providers.py`; collection,
+the adapter in `canvas_hub/assistant/gateway.py`; collection,
 local database access, tool execution, and BYOK credential handling stay local.
 
 ## Setup
@@ -22,7 +22,9 @@ are snapshots; the gateway still decides whether each request can be admitted.
 
 ## One request per model/tool round
 
-Send `POST /v1/responses` with JSON and a fresh UUID `Idempotency-Key`:
+Send `POST /v1/responses` with JSON, a fresh UUID `Idempotency-Key`, and
+`X-Gateway-Mode` matching the reviewed setup. Require the allowance capability
+`mode_header: "X-Gateway-Mode"`; every reservation rechecks that mode:
 
 ```json
 {
@@ -69,7 +71,14 @@ select another paid setup automatically. Offer BYOK only as an explicit user
 choice. Disclose that selected messages and course excerpts transit the gateway
 and, in production mode, OpenAI.
 
-For the combined offline check, use an explicitly funded mock policy with
-synthetic data and the `demo_read_only` tool. No OpenAI key or outbound provider
-traffic is required. See [the full wire contract](client-contract.md) for exact
-fields, error behavior, and session recovery.
+The integrated Python client never retries a generation automatically. It saves
+the UUID/body in owner-only `runtime/gateway-attempts/` before dispatch, keeps
+unknown/cancelled attempts for diagnosis, and discards bodies after completion.
+These files can contain conversation excerpts; treat the data home as private.
+
+For a combined offline check, use the [local mock instructions](../../docs/INTEGRATION_CANVAS_NEXT.md).
+The generated policy enables the app's real `list_components` tool, so a mock
+response can exercise local dispatch and its next model round. It requires no
+OpenAI key or outbound provider traffic. The committed example policies retain
+zero budgets. See [the full wire contract](client-contract.md) for exact fields,
+error behavior, and session recovery.

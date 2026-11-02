@@ -313,7 +313,7 @@ export class Ledger {
     const monthlyReset = Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 1);
     const window = (limit: number, spent: bigint, resetsAt: number) => ({ limit_microusd: String(limit), spent_microusd: String(spent), held_microusd: String(userHeld), remaining_microusd: String(nonnegative(BigInt(limit) - spent - userHeld)), resets_at: resetsAt });
     const c = this.control();
-    return { user_id: u.id, mode: policy.mode, tools: Object.keys(policy.tools), capabilities: { protocol_version: 1, max_tools: MAX_TOOLS, max_tool_calls_per_response: MAX_TOOL_CALLS, max_messages: 128, max_body_bytes: policy.max_body_bytes }, reset_timezone: "UTC", daily: window(u.daily_limit, daySpent, dailyReset), monthly: window(u.monthly_limit, monthSpent, monthlyReset),
+    return { user_id: u.id, mode: policy.mode, tools: Object.keys(policy.tools), capabilities: { protocol_version: 1, mode_header: "X-Gateway-Mode", max_tools: MAX_TOOLS, max_tool_calls_per_response: MAX_TOOL_CALLS, max_messages: 128, max_body_bytes: policy.max_body_bytes }, reset_timezone: "UTC", daily: window(u.daily_limit, daySpent, dailyReset), monthly: window(u.monthly_limit, monthSpent, monthlyReset),
       gateway_paused: Boolean(c.paused || c.breached), models: Object.entries(policy.models).map(([id, m]) => ({ id, min_output_tokens: m.provider === "openai_responses" ? 16 : 1, max_output_tokens: m.max_output_tokens })) };
   }
 

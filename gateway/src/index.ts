@@ -165,6 +165,9 @@ export class AllowanceGateway extends DurableObject<Env> {
   }
 
   private async respond(request: Request, session: SessionRow): Promise<Response> {
+    // Bind consent on EVERY round, including after a deployment/mode change.
+    // This happens before any reservation or provider dispatch.
+    if (request.headers.get("X-Gateway-Mode") !== this.policy.mode) throw new GatewayError(409, "mode_mismatch");
     const key = idempotencyKey(request);
     const body = await readJson(request, this.policy.max_body_bytes);
     const { input, model } = generation(body, this.policy);

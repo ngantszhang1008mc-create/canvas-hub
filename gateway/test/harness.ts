@@ -24,7 +24,7 @@ export async function fixture(patch: Partial<Policy> = {}) {
 }
 
 export function api(stub: DurableObjectStub, path: string, body?: unknown, token = ADMIN, headers: Record<string, string> = {}) {
-  return stub.fetch(`https://gateway.test${path}`, { method: body === undefined ? "GET" : "POST", headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}), ...(body === undefined ? {} : { "Content-Type": "application/json" }), ...headers }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+  return stub.fetch(`https://gateway.test${path}`, { method: body === undefined ? "GET" : "POST", headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}), ...(body === undefined ? {} : { "Content-Type": "application/json" }), "X-Gateway-Mode": "mock", ...headers }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
 }
 
 // Deliberately untyped JSON only in tests, to keep contract assertions readable.
@@ -43,8 +43,8 @@ export async function enroll(stub: DurableObjectStub, userId?: string) {
   return doc(response);
 }
 
-export function respond(stub: DurableObjectStub, token: string, key = crypto.randomUUID(), body: unknown = INPUT) {
-  return api(stub, "/v1/responses", body, token, { "Idempotency-Key": key });
+export function respond(stub: DurableObjectStub, token: string, key = crypto.randomUUID(), body: unknown = INPUT, mode = "mock") {
+  return api(stub, "/v1/responses", body, token, { "Idempotency-Key": key, "X-Gateway-Mode": mode });
 }
 
 export async function events(response: Response): Promise<any[]> {

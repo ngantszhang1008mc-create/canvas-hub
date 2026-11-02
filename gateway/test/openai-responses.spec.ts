@@ -3,11 +3,13 @@ import productionExample from "../policy.production.example.json";
 import { assertConfigured, parsePolicy, type Policy } from "../src/config";
 import { OpenAIResponsesAdapter } from "../src/openai-responses";
 import { generation } from "../src/validation";
-import { allowance, bindings, doc, enroll, events, fixture, inside, respond, status } from "./harness";
+import { allowance, bindings, doc, enroll, events, fixture, inside, respond as gatewayRespond, status } from "./harness";
 
 const KEY = "test_only_never_valid_openai_credential_00000000000";
 const INPUT = { model: "luna", messages: [{ role: "user", content: "Synthetic text only." }], max_output_tokens: 128, tools: [] as string[] };
 const RESERVE = "525096"; // Full context at worst 12h long rate + 128 output.
+const respond = (stub: DurableObjectStub, token: string, key = crypto.randomUUID(), body: unknown = INPUT) =>
+  gatewayRespond(stub, token, key, body, "production");
 
 beforeEach(() => {
   // Any forgotten fixture is a hard test failure, never a live API request.

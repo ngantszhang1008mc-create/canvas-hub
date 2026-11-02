@@ -51,14 +51,17 @@ class SourceAnalysis:
             raise InvalidInput('Set up a provider in Assistant settings.', code='assistant_not_configured')
         with assistant._cfg_lock:
             cfg, _, _ = assistant._message_config()
-        if cfg['provider'] not in ('anthropic', 'openai_compatible', 'codex'):
+        if cfg['provider'] not in ('anthropic', 'openai_compatible', 'codex', 'allowance_gateway'):
             raise InvalidInput('Choose an API setup in Assistant settings, or use a connected MCP Agent.', code='assistant_not_configured')
         return cfg
 
     def _fingerprint(self, aid, s, cfg):
         # Hash only non-secret disclosure fields; never expose a key-derived digest.
-        return sha256_text(canonical_json([aid, s['id'], s['course_id'], s['url'],
-            s['analysis_request_id'], s['decision'], s['proposed_revision'], cfg.get('id'), cfg['provider'], cfg.get('base_url'), cfg.get('model'), cfg.get('extra_params')]))
+        fields = [aid, s['id'], s['course_id'], s['url'],
+            s['analysis_request_id'], s['decision'], s['proposed_revision'], cfg.get('id'), cfg['provider'], cfg.get('base_url'), cfg.get('model'), cfg.get('extra_params')]
+        if cfg['provider'] == 'allowance_gateway':
+            fields += [cfg.get('gateway_mode'), cfg.get('gateway_session_id')]
+        return sha256_text(canonical_json(fields))
 
     @staticmethod
     def _endpoint(cfg):
@@ -85,6 +88,10 @@ class SourceAnalysis:
                       (token, aid, sid, self._fingerprint(aid, s, cfg), now_iso()))
         return {'available': True, 'token': token, 'urls': [s['url']], 'provider': cfg['provider'],
                 'setup': cfg.get('name'), 'endpoint': self._endpoint(cfg),
+                'usage_note': (('This uses gateway allowance; selected text passes through the gateway to OpenAI.'
+                                if cfg.get('gateway_mode') == 'production' else
+                                'This uses the mock gateway; no paid model is contacted.')
+                               if cfg['provider'] == 'allowance_gateway' else None),
                 'model': cfg.get('model') or (ANTHROPIC_DEFAULT_MODEL if cfg['provider'] == 'anthropic' else 'Provider default')}
 
     def connected_disclosure(self, aid, sid, connections):
@@ -240,7 +247,7 @@ class SourceAnalysis:
             # No streaming fallback and no automatic SDK retries for paid analysis.
             # Codex polls this callback while waiting on its private app-server.
             # Cancellation closes that process in finally; never retry the turn.
-            options = {'on_text': lambda _text: self._active(aid, sid, rid, token)} if cfg['provider'] == 'codex' else {}
+            options = {'on_text': lambda _text: self._active(aid, sid, rid, token)} if cfg['provider'] in ('codex', 'allowance_gateway') else {}
             instructions = SYSTEM if connected_content is None else SYSTEM + '\nThis is a user-reviewed connected-site snapshot. Do not propose an adapter_spec.'
             model_url = s['url'] if connected_content is None else urlunsplit((*urlsplit(s['url'])[:2], '', '', ''))
             turn = provider.complete(instructions, [{'role':'user','sent_text':canonical_json({

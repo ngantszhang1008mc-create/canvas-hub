@@ -1,8 +1,8 @@
 # Local client contract
 
-The gateway is a separate service. The existing Canvas Hub app is unchanged by
-this directory. A Python provider adapter can call this API from the
-local companion process and leave collection, storage, and tool dispatch local.
+The gateway is a separate service. Canvas Hub's optional **Allowance gateway**
+provider calls it from the local Python process; collection, storage, and tool
+dispatch remain local.
 
 ## Transport and identity
 
@@ -45,12 +45,12 @@ successful server reservation authorizes another call.
 The same response advertises the versioned wire limits:
 
 ```json
-{"capabilities":{"protocol_version":1,"max_tools":128,"max_tool_calls_per_response":32,"max_messages":128,"max_body_bytes":65536}}
+{"capabilities":{"protocol_version":1,"mode_header":"X-Gateway-Mode","max_tools":128,"max_tool_calls_per_response":32,"max_messages":128,"max_body_bytes":65536}}
 ```
 
 `max_body_bytes` reflects deployment policy; the other limits above are this
 protocol version's bounds. Up to 128 approved definitions can be enabled for a
-turn, covering the current app's 61–78 tools. This does not raise the separate
+turn. This does not raise the separate
 32-call limit in one response. Check the version and limits explicitly; do not
 silently truncate tools, messages, or user context to fit them.
 
@@ -81,6 +81,12 @@ provider URL, owner API key, reported cost/usage, a claimed user identity, arbit
 provider options, or provider-hosted tools. The gateway owns the model catalog,
 accepted sizes, prices, quotas, and dispatch policy. The example policy is a
 synthetic development policy, not a settled free dollar entitlement.
+
+Every generation request must include `X-Gateway-Mode: mock` or `production`,
+matching the user's explicit local setup. The gateway rejects missing or
+mismatched modes before reserving allowance or contacting a provider. Clients
+must require the advertised `mode_header` capability: an old server that ignores
+this header cannot safely preserve mock-only consent across configuration changes.
 
 Each tool round is a separate model request and separate reservation. Send only
 the minimal context needed for that round. If a request cannot fit its worst-case
@@ -166,6 +172,7 @@ POST /v1/responses
 Authorization: Bearer <session-token>
 Content-Type: application/json
 Idempotency-Key: 89c222fb-6ce1-4c13-9daa-18ef8cc58f9d
+X-Gateway-Mode: mock
 
 {
   "model": "mock-text",
