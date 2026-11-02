@@ -27,16 +27,15 @@ The shared Assistant changes are limited to:
   recalculated against the actual remaining messages. Original history is not
   rewritten or masked by this change.
 
-Keep these keyword arguments when merging the tool-selection and usage work.
+These keyword arguments are retained alongside tool selection and usage tracking.
 Gateway configuration, reviewed tool allowlists, normalized usage, private
 attempts, failure handling, and source/provider consent remain on the existing
 integration paths. A local mock gateway test covers both a Workspace request and
 source classification.
 
-The integration checkpoint still defaults `auto_compact` to `true` in
-`assistant/context.py`. That inherited setting is outside this source-only patch;
-the context owner must disable automatic compaction for the agreed low-impact
-rollout. No source change enables compaction, adds a step limit, or switches models.
+The combined version defaults `auto_compact` to `false`. Manual compaction remains
+available; historical tool outputs are not automatically masked. No source change
+enables compaction, adds a step limit, or switches models.
 
 ## Reading coverage
 
@@ -56,6 +55,8 @@ For each version, temporary context records ranges present in retained tool
 results and ranges supplied inline. Overlapping ranges merge for coverage, and
 already-present small-source ranges are not repeated. Errors, truncated JSON,
 short text for a claimed range, and stale versions establish no coverage.
+Codex-dispatched reads use their recorded `executed_tool` name for the same coverage
+checks, so an indirect read does not duplicate the inline source body.
 Intentional rereads still work. Shared attachments retain all selected item
 origins while their body is supplied once.
 

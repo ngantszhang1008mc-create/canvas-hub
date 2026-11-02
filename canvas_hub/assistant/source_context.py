@@ -55,7 +55,8 @@ def _history_ranges(transcript):
         if message["role"] != "tool":
             continue
         for result in message.get("results", []):
-            if result.get("is_error") or result.get("name") not in ("read_context_source", "search_context_sources"):
+            name = result.get("executed_tool") or result.get("name")
+            if result.get("is_error") or name not in ("read_context_source", "search_context_sources"):
                 continue
             try:
                 payload = json.loads(result["content"])
@@ -63,7 +64,7 @@ def _history_ranges(transcript):
                 continue  # a truncated/failed response never establishes coverage
             if not isinstance(payload, dict):
                 continue
-            chunks = payload.get("chunks", []) if result["name"] == "search_context_sources" else [payload]
+            chunks = payload.get("chunks", []) if name == "search_context_sources" else [payload]
             if not isinstance(chunks, list):
                 continue
             for chunk in chunks:

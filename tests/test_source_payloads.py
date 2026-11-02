@@ -66,6 +66,16 @@ def test_small_source_once_per_request_history_unchanged_and_deliberate_reread_a
     supplied = next(s for s in last['sources'] if s['resource_id'] == rid)
     assert supplied['complete_read'] and supplied['ranges_in_history'] == [[0, len(body)]]
     assert supplied['supplied_ranges'] == []
+    # Codex uses the fixed native dispatcher for newly discovered tools. Its
+    # actual execution name must preserve the same source coverage/deduplication.
+    dispatched = deepcopy(w['assistant']._transcript(cid))
+    for message in dispatched:
+        for result in message.get('results', []):
+            if result.get('name') == 'read_context_source':
+                result.update(name='call_discovered_tool', executed_tool='read_context_source')
+    bridged = temporary(with_source_context(dispatched, prepared['context']['request_context']))
+    observed = next(s for s in bridged['sources'] if s['resource_id'] == rid)
+    assert observed['complete_read'] and observed['supplied_ranges'] == []
     # A later user request never replays body text in all previous user messages.
     result = start(w)
     w['assistant'].wait(cid, 5)

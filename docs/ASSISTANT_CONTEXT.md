@@ -6,10 +6,11 @@ complete turns using the selected setup. Provider settings offer automatic
 compaction (default off) and an optional verified context capacity. Both actions
 consume model quota. Summary usage is stored separately and included in the
 conversation's recorded-response totals, including cache counters when supplied.
-Unknown summary usage after errors, cancellation or restart is labelled unknown.
-Ordinary answer attempts that fail or stop before saving a response are not
-tracked in these totals and may have used quota; the UI states that limitation.
-These figures are not a complete billing ledger.
+Unknown usage after errors, cancellation or restart is labelled unknown. New
+answer attempts are recorded before dispatch, including failures and cancellation;
+historical failed attempts cannot be reconstructed. Input/output totals already
+include any reported cache/reasoning subsets. These figures are not a complete
+billing ledger; see [the usage contract](PROVIDER_USAGE.md).
 
 Compaction retains the latest two user turns and all their assistant/tool groups.
 The checkpoint includes goals, decisions, unresolved questions, source/tracker
@@ -44,8 +45,9 @@ include provider-native reasoning, schemas, message framing and non-ASCII text;
 used. Explicit extra-provider output limits increase the reserve. Anthropic and
 compatible calls set an output bound; Codex's app-server retains control of its
 native output limit, so its reserve is a planning allowance. Actual provider usage
-may differ from estimates. The existing normal-chat provider retry behavior is
-unchanged; the new single-attempt rule applies to compaction.
+may differ from estimates. Direct SDK retries are disabled; the narrow pre-acceptance
+compatibility fallback is documented in [the usage contract](PROVIDER_USAGE.md).
+Compaction always uses a single attempt without capability negotiation.
 
 ## Tool selection and discovery
 
@@ -65,7 +67,7 @@ The server validates it before storing a message. A small default set plus
 `discover_tools` remains available even with no explicit selection. Discovery can
 search/page tool metadata and use `select` to replace discovered choices while
 retaining manual choices for the current run. Tool order follows fixed groups and
-names, independent of discovery order. Each advertised set is capped at 32 schemas
+names, independent of discovery order. Each discoverable set is capped at 32 schemas
 and 8,000 estimated schema tokens; excessive selections fail visibly and
 atomically. These are schema bounds, not a new step limit. Discovery can switch
 tools later, so absent schemas do not mean a capability is unavailable.
@@ -86,8 +88,11 @@ filters to that setup's approved names (`profile_id` selects the catalog); chang
 setups clears chips and reloads the list before another send. No chips preserves
 the reviewed list, and chips narrow it to the selected tools plus permitted
 defaults. Local discovery/dispatch names are not advertised to this fixed-registry
-provider. Additional gateway tools require the existing setup review. No gateway
-consent, request journaling, usage normalization or accounting is changed.
+provider. Its fixed catalog supports up to 128 reviewed names, subject to context
+and advertised gateway request limits; the local discovery-only 32-schema limit
+does not truncate it. Additional gateway tools require the existing setup review.
+Withdrawing gateway consent/session or changing its reviewed policy stops further
+requests and local tools; already dispatched requests may have used allowance.
 
 The picker supports keyboard navigation, removable chips, Escape, outside click,
 focus restoration, viewport clamping and route cleanup. It uses a leftward circular
@@ -134,16 +139,17 @@ instructions. Account ownership is checked on every retrieval.
 ## Integration and limits
 
 Migration `0017_assistant_context.sql` adds checkpoint/usage tables, a conversation
-notice field and derived source/chunk/FTS tables. Coordinate its number with other
-unmerged migrations. No API keys or credentials enter these tables. Existing
+notice field and derived source/chunk/FTS tables. Migration `0018` distinguishes
+ordinary chat attempts from summary usage. No API keys or credentials enter these tables. Existing
 backups include checkpoints; portable source imports rebuild the derived index.
 
 Integration surfaces: Assistant runner/config/provider adapters, the new compact
 route, the shared tool registry, component state services, search/extraction hooks,
-and Assistant-only sections of `web/static/app.js`. No tracker layout, external
-login or allowance backend code changes. A quota backend can later consume
-`assistant_context_usage` (provider/model/status/raw usage/estimated input) and the
-conversation usage response; this branch does not assume that backend is merged.
+and Assistant-only sections of `web/static/app.js`. The combined branch also
+integrates tracker layout, external login and the optional allowance provider.
+The gateway is independently authoritative for reservations and settlement;
+local telemetry cannot authorize quota. Source bodies use the separate
+[request-local source contract](SOURCE_CONTEXT_PAYLOADS.md).
 
 Invalidation is conservative and account-wide: source versions, imported revisions,
 resource extraction, tracker versions and local note/to-do changes invalidate the
@@ -158,5 +164,5 @@ local fake Anthropic/OpenAI endpoints, a local Codex protocol peer and Chromium.
 No real account, API credits, hosted deployment or live model call is used. Focused
 checks cover budgets, group integrity, failure/cancel/concurrency, persistence,
 isolation/invalidation, guarded tracker patches, bounded retrieval/traversal and
-the compaction/history/usage browser flow. Combined integration validation belongs
-to the coordinating task; the full repository suite was not rerun here.
+the compaction/history/usage browser flow. See [combined validation and startup](INTEGRATION_CANVAS_NEXT.md);
+the full repository suite was not rerun for this integration.

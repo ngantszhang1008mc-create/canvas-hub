@@ -178,7 +178,14 @@ def allowance(cfg):
             'gateway_paused': data.get('gateway_paused') is True, 'reset_timezone': 'UTC'}
 
 
+def authorize(cfg):
+    check = cfg.get('_gateway_authorize')
+    if check is not None:
+        check()
+
+
 def prepare_config(cfg):
+    authorize(cfg)
     if cfg.get('gateway_consent') is not True:
         raise GatewayError('Accept the gateway disclosure in Assistant settings first.')
     if cfg.get('api_key') or cfg.get('extra_params') or cfg.get('thinking') or cfg.get('effort'):
@@ -271,6 +278,7 @@ class AllowanceGatewayProvider:
             temporary.unlink(missing_ok=True)
 
     def complete(self, system, transcript, tools, on_text=None):
+        authorize(self.cfg)
         names = [tool['name'] for tool in tools]
         caps = self.info['capabilities']
         allowed = set(self.cfg.get('gateway_tools') or [])
@@ -327,6 +335,7 @@ class AllowanceGatewayProvider:
                        'X-Gateway-Mode': self.cfg['gateway_mode']}
             timeout = httpx.Timeout(60, connect=10, write=10, pool=10)
             async with httpx.AsyncClient(timeout=timeout, follow_redirects=False, trust_env=False) as client:
+                authorize(self.cfg)
                 async with client.stream('POST', base_url(self.cfg['base_url'], self.cfg['gateway_mode']) + '/v1/responses',
                                          content=body, headers=headers) as response:
                     record['request_id'] = _request_id(response.headers.get('X-Request-ID'))
@@ -412,6 +421,7 @@ class AllowanceGatewayProvider:
             while not task.done():
                 if self.closed:
                     raise Stopped()
+                authorize(self.cfg)
                 if on_text:
                     on_text(text)
                 await asyncio.wait({task}, timeout=.2)

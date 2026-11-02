@@ -33,6 +33,7 @@ def test_gateway_opt_in_context_and_source_flow(hub, account, source, gateway, w
             page.goto(f'{base}/?token={token}')
             page.goto(f'{base}/#/assistant/settings?p={pid}')
             card = page.locator('.card').filter(has=page.get_by_role('heading', name='Offline allowance', exact=True))
+            expect(card.get_by_label('Automatically compact older turns', exact=False)).not_to_be_checked()
             expect(card.get_by_role('button', name='Connect with invitation')).to_be_disabled()
             card.get_by_label('I allow selected conversation and course excerpts', exact=False).check()
             card.get_by_label('Invitation', exact=True).fill(INVITE)

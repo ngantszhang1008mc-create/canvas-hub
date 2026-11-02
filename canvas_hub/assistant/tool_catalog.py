@@ -30,6 +30,7 @@ GROUP_NAMES = {g[0] for g in GROUPS}
 DEFAULTS = {"list_courses", "search", "get_item", "get_deadlines", "get_component_context", "create_note", "start_collection"}
 MAX_ADVERTISED = 32
 MAX_SCHEMA_TOKENS = 8000
+MAX_GATEWAY_TOOLS = 128  # Fixed registry protocol; full context is budgeted by Policy.
 COMMAND = re.compile(r"^/([a-z][a-z0-9_-]*)(?=\s|$)")
 
 
@@ -119,15 +120,18 @@ class ToolCatalog:
         result = [definition(t) for n, t in self.tools.items() if n in names]
         if self.discovery:
             result += [definition(DISCOVER), definition(DISPATCH)]
-        if len(result) > MAX_ADVERTISED or estimate(result) + 32 * len(result) > MAX_SCHEMA_TOKENS:
+        if self.discovery and (len(result) > MAX_ADVERTISED or estimate(result) + 32 * len(result) > MAX_SCHEMA_TOKENS):
             raise InvalidInput("Selected tool schemas exceed the request budget. Choose fewer groups or individual tools from the picker.", code="tool_selection_too_large")
+        if not self.discovery and len(result) > MAX_GATEWAY_TOOLS:
+            raise InvalidInput("The reviewed tool catalog exceeds the gateway protocol limit.", code="tool_selection_too_large")
         return result
 
     def public(self):
         return {"groups": self.groups, "tools": [{"name": n, "group": group_for(n), "description": t.description,
                  "schema_tokens": estimate(definition(t)) + 32} for n, t in self.tools.items()],
                 "default_tools": [n for n in self.tools if n in DEFAULTS], "discovery_available": self.discovery,
-                "limits": {"max_advertised": MAX_ADVERTISED, "schema_tokens": MAX_SCHEMA_TOKENS},
+                "limits": {"max_advertised": MAX_ADVERTISED if self.discovery else MAX_GATEWAY_TOOLS,
+                           "schema_tokens": MAX_SCHEMA_TOKENS if self.discovery else None},
                 "selection_semantics": "For the next message only; adds tools to the defaults. Does not execute tools or change permissions."}
 
     def parse_message(self, text, selection):

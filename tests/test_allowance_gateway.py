@@ -175,7 +175,9 @@ def test_real_assistant_guarded_tracker_tool_rounds_and_history(hub, account, ga
         return gateway.events(request, '已更新 tracker。')
 
     gateway.action = answer
-    cid = service.send(aid, 'Finish the Read step without changing Write.')['conversation_id']
+    chosen = ['get_component_context', 'patch_component_state']
+    cid = service.send(aid, 'Finish the Read step without changing Write.',
+                       tool_selection=['tool:' + name for name in chosen])['conversation_id']
     service.wait(cid, 10)
     result = service.get_conversation(aid, cid)
     assert result['conversation']['run_state'] == 'idle', result
@@ -184,7 +186,7 @@ def test_real_assistant_guarded_tracker_tool_rounds_and_history(hub, account, ga
     for request in gateway.requests:
         assert set(request['body']) == {'model', 'messages', 'max_output_tokens', 'tools'}
         assert request['body']['max_output_tokens'] == 1024
-        assert set(request['body']['tools']) == set(gateway.tools)
+        assert set(request['body']['tools']) == set(chosen)
         assert SESSION not in json.dumps(request['body'])
         assert request['headers']['Authorization'] == 'Bearer ' + SESSION
         assert request['headers']['X-Gateway-Mode'] == 'mock'
@@ -193,6 +195,75 @@ def test_real_assistant_guarded_tracker_tool_rounds_and_history(hub, account, ga
     assert all(json.loads(p.read_text())['state'] == 'completed' and 'body' not in json.loads(p.read_text()) for p in journal)
     assert result['context']['total_usage']['input_tokens'] == 300
     assert result['context']['total_usage']['cache_read_input_tokens'] == 30
+
+
+@pytest.mark.parametrize('change', ['consent', 'session', 'tools', 'delete'])
+def test_saved_gateway_revocation_blocks_an_existing_provider(hub, gateway, change):
+    service, pid = setup(HubAPI(hub), gateway)
+    provider = AllowanceGatewayProvider(service._load(pid))
+    if change == 'delete':
+        service.delete_profile(pid)
+    else:
+        changes = {'consent': {'gateway_consent': False}, 'session': {'clear_gateway_session': True},
+                   'tools': {'gateway_tools': []}}
+        service.update_config({'profile_id': pid, **changes[change]})
+    with pytest.raises(GatewayError, match='authorization changed'):
+        provider.complete('Synthetic', [{'role': 'user', 'sent_text': 'Read'}], [])
+    assert not gateway.requests
+    assert not list((hub.paths.runtime / 'gateway-attempts').glob('*.json'))
+
+
+def test_gateway_revocation_interrupts_a_silent_inflight_request(hub, gateway):
+    service, pid = setup(HubAPI(hub), gateway)
+    provider = AllowanceGatewayProvider(service._load(pid))
+    gateway.action = lambda req: [gateway.events(req)[0], 'wait']
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pending = pool.submit(provider.complete, 'Synthetic', [{'role': 'user', 'sent_text': 'Wait'}], [])
+        assert gateway.entered.wait(2)
+        # Metadata checks may hold this lock during network I/O. A generation
+        # must still observe the saved revocation without blocking its loop.
+        with service._cfg_lock:
+            service.update_config({'profile_id': pid, 'gateway_consent': False})
+            with pytest.raises(GatewayError, match='authorization changed'):
+                pending.result(timeout=2)
+    assert len(gateway.requests) == 1
+    record = json.loads(next((hub.paths.runtime / 'gateway-attempts').glob('*.json')).read_text())
+    assert record['state'] == 'uncertain' and record['request_id'] and record['body']
+
+
+@pytest.mark.parametrize('boundary', ['before_tool', 'after_tool'])
+def test_gateway_revocation_between_completed_rounds(hub, account, gateway, monkeypatch, boundary):
+    import canvas_hub.assistant as runner
+    service, pid = setup(HubAPI(hub), gateway)
+    gateway.action = lambda req: gateway.events(req, '', [('list_components', {})])
+    executed = []
+    original_run, original_append = runner.run_tool_display, service._append
+
+    def append(cid, role, data):
+        result = original_append(cid, role, data)
+        if boundary == 'before_tool' and role == 'assistant' and data.get('tool_calls'):
+            service.update_config({'profile_id': pid, 'gateway_tools': []})
+        return result
+
+    def run(*args):
+        executed.append(args[1])
+        result = original_run(*args)
+        if boundary == 'after_tool':
+            service.delete_profile(pid)
+        return result
+
+    monkeypatch.setattr(service, '_append', append)
+    monkeypatch.setattr(runner, 'run_tool_display', run)
+    cid = service.send(account['id'], 'List my trackers.', tool_selection=['tool:list_components'])['conversation_id']
+    service.wait(cid, 5)
+    result = service.get_conversation(account['id'], cid)
+    assert result['conversation']['run_state'] == 'error'
+    assert 'authorization changed' in result['conversation']['run_error']
+    assert len(gateway.requests) == 1
+    assert executed == ([] if boundary == 'before_tool' else ['list_components'])
+    transcript = service._transcript(cid)
+    assert [m['role'] for m in transcript] == ['user', 'assistant', 'tool']
+    assert transcript[-1]['results'][0]['is_error'] == (boundary == 'before_tool')
 
 
 @pytest.mark.parametrize('failure', ['quota', 'replay', 'incomplete', 'truncated', 'oversized', 'wrong_tool', 'wrong_mode', 'bad_usage'])
@@ -268,6 +339,7 @@ def test_metadata_and_generation_have_absolute_deadlines(hub, gateway, monkeypat
 def test_retry_history_and_compaction_error_do_not_expand_dispatch(hub, account, gateway):
     from .test_assistant_context import conversation
     from canvas_hub.assistant.context import Policy
+    _, cid = conversation(hub, account)
     service, pid = setup(HubAPI(hub), gateway)
     cfg = service._load(pid)
     provider = AllowanceGatewayProvider(cfg)
@@ -278,7 +350,6 @@ def test_retry_history_and_compaction_error_do_not_expand_dispatch(hub, account,
     provider.complete('Synthetic', history, [])
     assert gateway.requests[-1]['body']['tools'] == []
     assert gateway.requests[-1]['body']['messages'][2]['tool_calls'][0]['id'] == 'old_call'
-    _, cid = conversation(hub, account)
     cfg = {**provider.cfg, 'context': {'auto_compact': True, 'auto_threshold_percent': 50}}
     transcript = service._transcript(cid)
     # Set only the near-limit decision; actual summary request/provider stays real.

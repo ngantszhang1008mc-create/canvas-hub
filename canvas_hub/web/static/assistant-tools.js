@@ -37,7 +37,8 @@ export function makeAssistantToolPicker({h, input, catalog}) {
     }
     // Backend performs the authoritative serialized-schema budget check.
     const tokens = catalog.tools.filter(t=>names.has(t.name)).reduce((n,t)=>n+t.schema_tokens, 0) + (catalog.discovery_available === false ? 0 : 700);
-    return names.size + (catalog.discovery_available === false ? 0 : 2) <= catalog.limits.max_advertised && tokens <= catalog.limits.schema_tokens;
+    return names.size + (catalog.discovery_available === false ? 0 : 2) <= catalog.limits.max_advertised
+      && (catalog.limits.schema_tokens == null || tokens <= catalog.limits.schema_tokens);
   }
   function renderChips() {
     chips.replaceChildren(...[...selected].map(value => h('button', {type:'button', class:'assistant-tool-chip',

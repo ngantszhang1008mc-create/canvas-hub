@@ -1,5 +1,7 @@
 """Focused tool-discovery/selection checks, using synthetic local providers."""
 import json
+import os
+from pathlib import Path
 
 import pytest
 
@@ -62,6 +64,12 @@ def test_reviewed_gateway_catalog_never_adds_local_discovery_or_unapproved_tools
         session.discover({"select": ["tool:show_artifact"]})
     with pytest.raises(InvalidInput, match="does not enable"):
         session.dispatch({"name": "read_document", "arguments": {}})
+    # A gateway's reviewed registry is not subject to the smaller local
+    # discovery advertisement limit. Context/wire budgets still apply later.
+    full = ToolCatalog({"read", "ui"})
+    large = ToolCatalog({"read", "ui"}, allowed_names=set(full.tools), discovery=False)
+    assert len(large.advertised([])) == len(full.tools) > 32
+    assert large.public()['limits'] == {'max_advertised': 128, 'schema_tokens': None}
 
 
 @pytest.mark.parametrize("preset", ["anthropic", "custom"])
@@ -150,7 +158,7 @@ def test_codex_discovery_dispatch_keeps_one_native_turn(hub, account, fake_codex
 
 
 @pytest.mark.browser
-@pytest.mark.parametrize("width", [390, 1180])
+@pytest.mark.parametrize("width", [380, 1180])
 def test_tool_picker_slash_keyboard_chips_and_mobile_bounds(hub, account, monkeypatch, tmp_path, width):
     from playwright.sync_api import expect, sync_playwright
     from .test_components_ui import serve
@@ -207,7 +215,9 @@ def test_tool_picker_slash_keyboard_chips_and_mobile_bounds(hub, account, monkey
         toggle.click()
         bounds = dialog.bounding_box()
         assert bounds["x"] >= 0 and bounds["x"]+bounds["width"] <= width and bounds["y"] >= 0
-        page.screenshot(path=f"/tmp/assistant-tools-{width}.png")
+        artifacts = Path(os.environ.get('CANVAS_HUB_NEXT_SCREENSHOTS', str(tmp_path)))
+        artifacts.mkdir(parents=True, exist_ok=True)
+        page.screenshot(path=str(artifacts / f'assistant-tools-{width}.png'))
         field.click()
         expect(dialog).to_be_hidden()
         field.fill("Explain this tracker")

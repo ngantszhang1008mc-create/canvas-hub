@@ -2,7 +2,10 @@
 
 This test branch combines external-site connections, tracker/layout controls,
 Assistant context and guarded tracker updates, and the optional allowance
-gateway. It is not a deployment or a live free-AI service. Existing BYOK and Codex
+gateway. It also includes `/tracker` and the searchable tool picker, transient
+source context, and normalized usage/cache counters. Automatic compaction is
+off by default; manual compaction and original history remain available.
+It is not a deployment or a live free-AI service. Existing BYOK and Codex
 setups remain available. Real Oxygen/Zinc login compatibility is unverified.
 
 ## Offline app and gateway
@@ -39,7 +42,8 @@ Settings**, add an **Allowance gateway** setup with URL `http://127.0.0.1:8799`,
 mode **Mock**, and model `mock-text`. Review the disclosure, paste the one-time
 invitation from the file printed by the helper, then choose **Connect with
 invitation** and activate this setup. **Check allowance** makes no model request.
-Ask the Assistant to list trackers. The local mock calls `list_components` and
+Choose `/list_components` in the composer, add a question asking to list trackers,
+and send. Selecting a tool alone runs nothing. The local mock calls `list_components` and
 then returns a fixed answer after receiving its result.
 
 The mock is a protocol fixture, not an intelligent model: it cannot classify real
@@ -65,6 +69,10 @@ a new synthetic user; production account recovery belongs to the operator.
   reservation; cancellation or a lost terminal response may leave a hold. There
   is no automatic model retry or paid fallback. The operator must separately
   configure and fund a production service; this branch does not provide one.
+- Removing a gateway setup/session, withdrawing consent, or changing its reviewed
+  tools stops an active run before further dispatch or local tool execution. A
+  request already in flight may still have consumed allowance. Changing the
+  active setup alone does not redirect an existing run to a different provider.
 - Manual context compaction uses the selected provider and consumes its quota.
   Original history is retained. New chat attempts are recorded even after
   cancellation/failure; absent provider counts stay unknown. Historical failed
@@ -77,24 +85,42 @@ stop the app and back up the
 whole private data home consistently before startup. Restore the matching backup
 for rollback; do not run older code against a newly migrated database.
 
-## Integration checkpoint validation
+## Combined validation
 
-The gateway client/settings/context/source flow passed 15 focused Python tests,
-including real Chromium at 1280px and 380px (19.17 seconds). A separate upgrade
-case passed from schema 16 to 17, preserving manual tracker state and original
-chat messages; fresh test homes also start at 17. TypeScript checking and seven
-focused gateway tests passed (6.12 seconds), using mocked OpenAI HTTP only.
-The initial narrow-screen settings overflow was fixed and rechecked.
+All requested inputs are included on `codex/integration-canvas-next`, based on
+main `846a1a690f93a77a6747b34972f34705352e08eb`:
 
-A real local Wrangler/SQLite runtime also completed invitation enrollment,
-allowance reads, an Assistant `list_components` tool round and the next response:
-two settled mock requests, no remaining hold. The synthetic preview launcher
-started successfully. No full suite or real model/login test was run at this
-checkpoint. Provider usage/cache head `58638db` is now integrated; its worker
-reported 44 focused checks on the gateway checkpoint. Three integration checks
-passed in 0.45 seconds: schema 16→18, 17→18 (retaining old summaries as
-`purpose=summary`), and a gateway tracker conversation whose recorded usage is
-counted once across three model/tool rounds.
-The next tool-picker/context-default and source-deduplication inputs are still
-pending; final combined validation and the user test invitation wait for those
-exact heads.
+| Input | Published source commit |
+| --- | --- |
+| External-site connection and safe redirects (PR34) | `2a4634299f476a01b3eecb330cdbb56d10b2681c` |
+| Tracker/layout controls | `644cefacf8433b02c9ab13eee6f4ae32d381275c` |
+| Allowance gateway (PR35) | `38844a79cb4ec9aadb00d260889902557a8f4f96` |
+| Context and tool picker (PR36) | `c114cde67858256a601f97bfbdf21bee6cd45eb9` |
+| Usage/cache normalization | `58638db62089a886b0607f197747ee0479b06d30` |
+| Source payloads | `de189a2cc866e0b3b08d184e5c019259e63e488b` |
+
+The combined run passed **42 focused Python/browser checks in 84.02 seconds**:
+tool selection and discovery, defaults off, source context/usage, guarded tracker
+updates, retry/cancellation, connected-content consent, redirect/DNS boundaries,
+and desktop/narrow layout. Chromium covered the picker at 1180px/380px, gateway
+flows at 1280px/380px, and tracker/source/action layouts at 1440px/390px/320px.
+Screenshots were inspected. JavaScript syntax checks passed. Earlier TypeScript
+checking and seven focused gateway mode/Responses-adapter checks passed in 6.12
+seconds; that backend was unchanged by subsequent integration.
+
+The final authorization fix adds seven focused cases: consent/session/tool/setup
+revocation before dispatch, during a silent stream, and between terminal tool
+responses and execution. Valid tracker, summary-failure and source/usage paths
+were rechecked. These checks use local fixtures, without model usage.
+
+Migration checks cover fresh schema 18, schema 16→18 and schema 17→18, plus
+idempotent reopen. They preserve manual tracker state and original chat messages;
+pre-existing usage rows remain `purpose=summary`.
+
+A real local Wrangler/SQLite runtime completed invitation enrollment and a
+Workspace source request with explicitly selected `list_components`: two settled
+mock model rounds, each with one source-body copy, no source body in permanent
+history, no automatic summary, usage counted twice (once per request), preserved
+manual tracker state and no remaining quota hold. The synthetic preview launcher
+also started successfully. No full suite, live login, real provider call,
+production deployment or main-branch merge was performed.

@@ -45,6 +45,26 @@ def apply_gateway(cfg, data, previous):
 
 
 class GatewaySettings:
+    def _gateway_authorizer(self, cfg):
+        # Pin the reviewed setup, but never keep using it after its authority is
+        # withdrawn. Do not log or serialize this private request-local guard.
+        fields = ('provider', 'base_url', 'model', 'gateway_mode', 'gateway_consent',
+                  'gateway_token', 'gateway_session_id')
+        expected = {key: cfg.get(key) for key in fields}
+        tools = frozenset(cfg.get('gateway_tools') or [])
+        profile_id = cfg.get('id')
+
+        def check():
+            # Settings writes use atomic replacement. Do not wait for the writer
+            # lock here: metadata checks can hold it during network I/O, while
+            # this guard also runs in the generation/cancellation event loop.
+            current = next((p for p in self._load_store()['profiles'] if p['id'] == profile_id), None)
+            if (current is None or current.get('gateway_consent') is not True
+                    or any(current.get(key) != value for key, value in expected.items())
+                    or frozenset(current.get('gateway_tools') or []) != tools):
+                raise GatewayError('Gateway setup authorization changed. This run stopped; review settings before sending again. An in-flight request may already have used allowance.')
+        return check
+
     @staticmethod
     def _gateway_public(cfg):
         return {'gateway_mode': cfg.get('gateway_mode', 'mock'), 'gateway_consent': cfg.get('gateway_consent') is True,

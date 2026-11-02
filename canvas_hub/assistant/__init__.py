@@ -221,6 +221,7 @@ class AssistantService(ContextService, GatewaySettings):
         cfg["permissions"] = store["permissions"]
         if cfg.get('provider') == 'allowance_gateway':
             cfg['_gateway_journal'] = str(self.hub.paths.runtime / 'gateway-attempts')
+            cfg['_gateway_authorize'] = self._gateway_authorizer(cfg)
         return cfg
 
     def _save_store(self, store: dict) -> None:
@@ -776,6 +777,7 @@ class AssistantService(ContextService, GatewaySettings):
 
     def _run(self, cid: int, account_id: int, cfg: dict, acct: dict, allow_tools=True, compact_only=False,
              request_context=None) -> None:
+        from .gateway import GatewayError, authorize
         provider = None
         final_state, final_error = "idle", None
         try:
@@ -844,6 +846,7 @@ class AssistantService(ContextService, GatewaySettings):
                         allow_compact=not compact_attempted, provider_pending=bool(getattr(provider, "pending", None)),
                         request_context=request_context)
                     compact_attempted = compact_attempted or attempted
+                    authorize(cfg)
                     turn, usage_request_id = self._complete_with_usage(cid, cfg, provider, system, transcript, tools, on_text)
                 except Stopped:
                     with self._live_lock:       # keep what was already written, as the answer so far
@@ -862,6 +865,7 @@ class AssistantService(ContextService, GatewaySettings):
                 if turn.stop == "refusal" or not turn.tool_calls:
                     break
                 results = []
+                authorization_error = None
                 for c in turn.tool_calls:
                     executed_tool = None
                     if not allow_tools:
@@ -875,6 +879,9 @@ class AssistantService(ContextService, GatewaySettings):
                         live_perms = self._live_tool_permissions(account_id, perms)
                         tool_session.refresh(live_perms)
                         try:
+                            if authorization_error:
+                                raise authorization_error
+                            authorize(cfg)
                             if c.name == "discover_tools":
                                 content, is_err, display = tool_session.discover(c.input, include_schemas=cfg["provider"] == "codex"), False, None
                             else:
@@ -886,6 +893,9 @@ class AssistantService(ContextService, GatewaySettings):
                                 # The shared registry validates current calls and permissions,
                                 # independently of which schemas occur in historical messages.
                                 content, is_err, display = run_tool_display(ctx, name, args, live_perms)
+                        except GatewayError as e:
+                            authorization_error = e
+                            content, is_err, display = json.dumps({'error': 'gateway_authorization_changed', 'message': str(e)}), True, None
                         except HubError as e:
                             content, is_err, display = json.dumps(e.to_dict(), ensure_ascii=False), True, None
                     entry = {"id": c.id, "name": c.name, "content": content, "is_error": is_err}
@@ -901,6 +911,8 @@ class AssistantService(ContextService, GatewaySettings):
                         entry["content"] = json.dumps({"shown_to_user": True, **rest}, ensure_ascii=False)
                     results.append(entry)
                 self._append(cid, "tool", {"results": results})
+                if authorization_error:
+                    raise authorization_error
                 if not allow_tools:
                     final_state, final_error = "error", "Retry needs tools. Send a new message after reviewing previous tool results."
                     break

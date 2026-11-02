@@ -73,9 +73,10 @@ metadata or timestamps into that prefix. Existing provider caching settings are
 preserved. Stable bytes improve reuse eligibility; they cannot guarantee a hit,
 which also depends on model, routing, minimum prefix length and cache lifetime.
 
-No automatic compaction policy, history folding, step limit, model selection,
-source consent, tool-selection UI, gateway settlement or deployment is added here.
-The separate context/tool task owns disabling automatic compaction in integration.
+The combined version defaults automatic compaction off and retains original
+history. Tool selection and transient source context are integrated separately
+from accounting; neither changes gateway settlement or authorizes extra requests.
+See [combined validation and startup](INTEGRATION_CANVAS_NEXT.md).
 
 ## Official references
 
