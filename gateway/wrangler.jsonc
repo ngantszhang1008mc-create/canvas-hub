@@ -1,0 +1,131 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "canvas-hub-allowance-gateway",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-01",
+  "workers_dev": false,
+  "preview_urls": false,
+  "observability": {
+    "enabled": false
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "GATEWAY",
+        "class_name": "AllowanceGateway"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [
+        "AllowanceGateway"
+      ]
+    }
+  ],
+  "vars": {
+    "POLICY": {
+      "version": 1,
+      "mode": "production",
+      "user_daily_microusd": 0,
+      "user_monthly_microusd": 0,
+      "global_monthly_microusd": 0,
+      "global_lifetime_microusd": 0,
+      "session_ttl_seconds": 2592000,
+      "invite_ttl_max_seconds": 86400,
+      "request_timeout_ms": 30000,
+      "max_body_bytes": 65536,
+      "max_stream_bytes": 262144,
+      "user_concurrency": 2,
+      "global_concurrency": 8,
+      "user_requests_per_minute": 60,
+      "ingress_per_minute": 120,
+      "global_ingress_per_minute": 600,
+      "auth_attempts_per_minute": 10,
+      "admin_attempts_per_minute": 30,
+      "max_users": 100,
+      "models": {
+        "luna": {
+          "provider": "openai_responses",
+          "native_model": "gpt-6-luna",
+          "max_input_tokens": 1050000,
+          "max_output_tokens": 1024,
+          "pricing": {
+            "unit": "microusd_per_million_tokens",
+            "long_context_threshold_tokens": 272000,
+            "short": {
+              "input": 100000,
+              "cached_input": 10000,
+              "cache_write_30m": 125000,
+              "cache_write_12h": 250000,
+              "output": 500000
+            },
+            "long": {
+              "input": 200000,
+              "cached_input": 20000,
+              "cache_write_30m": 250000,
+              "cache_write_12h": 500000,
+              "output": 750000
+            }
+          }
+        }
+      },
+      "tools": {}
+    }
+  },
+  "env": {
+    "mock": {
+      "durable_objects": {
+        "bindings": [
+          {
+            "name": "GATEWAY",
+            "class_name": "AllowanceGateway"
+          }
+        ]
+      },
+      "vars": {
+        "POLICY": {
+          "version": 1,
+          "mode": "mock",
+          "user_daily_microusd": 0,
+          "user_monthly_microusd": 0,
+          "global_monthly_microusd": 0,
+          "global_lifetime_microusd": 0,
+          "session_ttl_seconds": 2592000,
+          "invite_ttl_max_seconds": 86400,
+          "request_timeout_ms": 30000,
+          "max_body_bytes": 65536,
+          "max_stream_bytes": 262144,
+          "user_concurrency": 2,
+          "global_concurrency": 8,
+          "user_requests_per_minute": 60,
+          "ingress_per_minute": 120,
+          "global_ingress_per_minute": 600,
+          "auth_attempts_per_minute": 10,
+          "admin_attempts_per_minute": 30,
+          "max_users": 100,
+          "models": {
+            "mock-text": {
+              "provider": "mock",
+              "max_input_tokens": 8192,
+              "max_output_tokens": 1024,
+              "input_microusd_per_million_tokens": 1000000,
+              "output_microusd_per_million_tokens": 2000000
+            }
+          },
+          "tools": {
+            "demo_read_only": {
+              "description": "Offline demonstration function; execution is the local caller's responsibility.",
+              "parameters": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
