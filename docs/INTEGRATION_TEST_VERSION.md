@@ -98,3 +98,37 @@ Migration tests use the actual SQL files to upgrade stores from schema 8
 the largest version: 0013 can be applied after 0014. Existing component JSON,
 version/undo history, tracker pins, source registrations and hidden placements
 survive. No bulk component imports, resets or account remapping occur.
+
+
+## Built-in source analysis follow-up
+
+`codex/builtin-source-analysis` is stacked on this integration branch at
+`eff9eb578869fc475722215c17651486a9cef096`. It adds schema 15 for single-use source
+analysis approvals and scoped batches. The original integration branch and feature
+PRs remain unchanged. See `EXTERNAL_SOURCES.md` for the updated workflow.
+
+Use a fresh checkout so existing local edits and data are untouched:
+
+```sh
+git clone --branch codex/builtin-source-analysis --single-branch https://github.com/ngantszhang1008mc-create/canvas-hub.git canvas-hub-source-analysis-test
+cd canvas-hub-source-analysis-test
+uv sync --locked --python 3.13
+uv run playwright install chromium
+uv run pytest -q tests/test_source_analysis.py tests/test_external_sources_ui.py
+uv run python scripts/preview-source-analysis.py --port 8735 --metadata /tmp/canvas-source-analysis-preview.json
+```
+
+The preview creates a new temporary home, public-page fixtures and local fake API
+provider. Read the private launch URL from the metadata file locally; do not share
+its token. No real API key or Canvas session is needed. Open the sample course,
+try the reminder and **Analyse all**, review the exact URL/provider disclosure,
+then approve. Close the preview with Ctrl-C. All model/network activity in this
+preview stays in local test fixtures.
+
+For an existing *isolated* test checkout, `git status --short` must be empty before
+updating with `git fetch origin codex/builtin-source-analysis` and
+`git merge --ff-only origin/codex/builtin-source-analysis`. Stop the preview before
+updating its code. If the fast-forward is refused, retain that checkout and clone
+a fresh one; do not reset, clean, force-push or overwrite a user home. To try real
+content later, select your existing Assistant API setup and approve the displayed
+usage yourself; the automated verification never makes paid requests.

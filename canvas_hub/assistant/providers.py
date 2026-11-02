@@ -69,7 +69,8 @@ class AnthropicProvider:
         self.model = cfg.get("model") or ANTHROPIC_DEFAULT_MODEL
         self.effort = cfg.get("effort") or None
         self.base_url = (cfg.get("base_url") or "").strip() or None
-        kw = {"max_retries": 2, "timeout": 600.0}
+        self.single_attempt = cfg.get("_single_attempt", False)
+        kw = {"max_retries": 0 if self.single_attempt else 2, "timeout": 120.0 if self.single_attempt else 600.0}
         if cfg.get("api_key"):
             kw["api_key"] = cfg["api_key"]
         if self.base_url:
@@ -114,9 +115,9 @@ class AnthropicProvider:
             kwargs["tools"] = tool_defs
         if self.effort:
             kwargs["output_config"] = {"effort": self.effort}
-        use_fallback = official and self.model in _FALLBACK_MODELS
+        use_fallback = not self.single_attempt and official and self.model in _FALLBACK_MODELS
         msg = None
-        for attempt in range(2):
+        for attempt in range(1 if self.single_attempt else 2):
             try:
                 if use_fallback:
                     opener = self.client.beta.messages.stream(betas=["server-side-fallback-2026-07-01"], fallbacks="default",
@@ -147,7 +148,7 @@ class AnthropicProvider:
                 raise ProviderError("Could not reach the Anthropic API. Check your internet connection.", retryable=True) from e
             except ValueError:
                 # A streamed tool input that could not be parsed at all: re-issue once.
-                if attempt:
+                if attempt or self.single_attempt:
                     raise ProviderError("The model produced an unreadable tool call twice.")
         data = msg.to_dict()
         content = data.get("content") or []
@@ -177,7 +178,8 @@ class OpenAICompatibleProvider:
             raise ProviderError("Enter the model name for this provider in Assistant settings.")
         key = cfg.get("api_key") or os.environ.get("OPENAI_API_KEY") or "not-needed"
         self.client = openai.OpenAI(api_key=key, base_url=(cfg.get("base_url") or "").strip() or None,
-                                    timeout=600.0, max_retries=2)
+                                    timeout=120.0 if cfg.get("_single_attempt") else 600.0,
+                                    max_retries=0 if cfg.get("_single_attempt") else 2)
         # Extra request settings are the setup's defaults; a reasoning level
         # picked in the chat for this message takes precedence.
         self.extra_body = dict(cfg.get("extra_params") or {})

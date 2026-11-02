@@ -178,3 +178,13 @@ button.workspace-attention-link:hover { color: var(--accent); background: transp
 .external-agent:not(.workspace-context .external-agent) { margin-top:20px; }
 .workspace-context.external-open .workspace-content .cols-2 { grid-template-columns:minmax(0,1fr); }
 .external-proposal li { overflow-wrap:anywhere; }
+
+.external-source-heading { display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; }
+.external-analyse-all { min-height:44px; }
+.external-batch { overflow-wrap:anywhere; }
+.external-batch:empty { display:none; }
+.external-source-nudge { position:fixed; z-index:35; right:20px; bottom:20px; width:min(350px,calc(100vw - 90px)); padding:16px; border:1px solid var(--border-strong); border-radius:12px; background:var(--paper); box-shadow:var(--shadow); }
+.external-source-nudge > .workspace-icon-button { float:right; }
+.external-source-nudge .row { display:flex; flex-wrap:wrap; gap:8px; }
+.external-source-nudge button { min-height:44px; }
+main:has(.external-source-nudge) { padding-bottom:230px; }
