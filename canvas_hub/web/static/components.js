@@ -137,10 +137,10 @@ footer{margin-top:24px;font-size:12px;color:#8b8170}</style></head><body><h1>${h
   }
 
   // ---------- live countdowns ----------
-  let tickQueued = false;
   function countdown(iso) {
-    if (!tickQueued) { tickQueued = true; requestAnimationFrame(() => { tickQueued = false; tickCountdowns(); }); }
-    return h("span", { class: "countdown", "data-due": iso, role: "timer", "aria-live": "off" }, cdText(iso));
+    const el = h("span", { class: "countdown", "data-due": iso, role: "timer", "aria-live": "off" });
+    updateCountdown(el);
+    return el;
   }
   function cdText(iso) {
     const ms = new Date(iso) - Date.now();
@@ -149,15 +149,14 @@ footer{margin-top:24px;font-size:12px;color:#8b8170}</style></head><body><h1>${h
     const s = d >= 2 ? `${d} d ${hh % 24} h` : hh >= 1 ? `${hh} h ${m % 60} m` : `${m} m`;
     return ms < 0 ? `overdue ${s}` : `in ${s}`;
   }
-  function tickCountdowns() {
-    for (const el of document.querySelectorAll(".countdown[data-due]")) {
-      const ms = new Date(el.dataset.due) - Date.now();
-      el.textContent = cdText(el.dataset.due);
-      el.classList.toggle("overdue", ms < 0);
-      el.classList.toggle("urgent", ms >= 0 && ms < 24 * 3600e3);
-      el.classList.toggle("soon", ms >= 24 * 3600e3 && ms < 72 * 3600e3);
-    }
+  function updateCountdown(el) {
+    const ms = new Date(el.dataset.due) - Date.now();
+    el.textContent = cdText(el.dataset.due);
+    el.classList.toggle("overdue", ms < 0);
+    el.classList.toggle("urgent", ms >= 0 && ms < 24 * 3600e3);
+    el.classList.toggle("soon", ms >= 24 * 3600e3 && ms < 72 * 3600e3);
   }
+  function tickCountdowns() { document.querySelectorAll(".countdown[data-due]").forEach(updateCountdown); }
   setInterval(tickCountdowns, 30000);
   const afterRender = () => requestAnimationFrame(tickCountdowns);
 
@@ -567,15 +566,79 @@ footer{margin-top:24px;font-size:12px;color:#8b8170}</style></head><body><h1>${h
     let userEdits = 0;                     // changes the user made (undo replies are not counted here)
     const el = h("div", { class: "saved-cmp" });
     const status = h("span", { class: "tiny muted save-state", "aria-live": "polite" });
+    // Height is a local presentation preference, separate from the saved scores/checks.
+    const heightKey = `trackerHeight.${A(`/components/${view.id}`)}`;
+    let height = Number(store.get(heightKey)) || null, sizeObserver = null;
+    function resizable(frame) {
+      const body = frame.children[1];
+      frame.classList.add("cmp-resizable");
+      body.classList.add("cmp-resizable-content");
+      let minimum = 180, maximum = 10000;
+      const handle = h("div", { class: "cmp-resize-handle", role: "separator", tabindex: "0", "aria-orientation": "horizontal",
+        "aria-label": `Resize ${v.title} tracker`, "aria-valuemin": minimum, "aria-valuemax": maximum,
+        title: "Drag to resize. Use Up or Down to adjust; Home to fit content." }, h("span", { "aria-hidden": "true" }));
+      const reset = h("button", { class: "sm ghost cmp-fit-content", "aria-label": `Fit ${v.title} to content`, onclick: () => setHeight(null) }, "Fit content");
+      const syncSize = () => {
+        if (!body.isConnected) return;
+        const side = body.querySelector(":scope > .sl-side");
+        const columns = getComputedStyle(body).gridTemplateColumns.split(" ");
+        minimum = side ? Math.max(180, Math.ceil(side.getBoundingClientRect().height) + (columns.length === 1 ? 180 + 16 : 0)) : 180;
+        body.style.setProperty("--tracker-min-height", `${minimum}px`);
+        const actual = Math.round(body.getBoundingClientRect().height);
+        maximum = Math.max(maximum, minimum, actual);
+        handle.setAttribute("aria-valuemin", String(minimum));
+        handle.setAttribute("aria-valuemax", String(maximum));
+        handle.setAttribute("aria-valuenow", String(actual));
+        handle.setAttribute("aria-valuetext", height ? `${actual} pixels` : "Fits full content");
+        reset.disabled = height === null;
+      };
+      function setHeight(value) {
+        height = value === null ? null : Math.min(maximum, Math.max(minimum, Math.round(value)));
+        frame.classList.toggle("cmp-height-set", height !== null);
+        if (height === null) body.style.removeProperty("--tracker-height");
+        else body.style.setProperty("--tracker-height", `${height}px`);
+        store.set(heightKey, height ?? "");
+        syncSize();
+      }
+      if (height) { frame.classList.add("cmp-height-set"); body.style.setProperty("--tracker-height", `${height}px`); }
+      handle.addEventListener("keydown", (e) => {
+        if (!["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home"].includes(e.key)) return;
+        e.preventDefault();
+        if (e.key === "Home") setHeight(null);
+        else setHeight(body.getBoundingClientRect().height + ({ ArrowUp: -40, ArrowDown: 40, PageUp: -200, PageDown: 200 }[e.key]));
+      });
+      let drag = null;
+      handle.addEventListener("pointerdown", (e) => {
+        if (e.button !== 0) return;
+        e.preventDefault(); syncSize(); handle.focus({ preventScroll: true });
+        drag = { y: e.clientY, height: body.getBoundingClientRect().height };
+        handle.setPointerCapture(e.pointerId);
+      });
+      handle.addEventListener("pointermove", (e) => { if (drag) setHeight(drag.height + e.clientY - drag.y); });
+      handle.addEventListener("pointerup", () => { drag = null; });
+      handle.addEventListener("pointercancel", () => { drag = null; });
+      handle.addEventListener("dblclick", () => setHeight(null));
+      frame.append(h("div", { class: "cmp-resize-controls" }, handle, reset));
+      sizeObserver = new ResizeObserver(syncSize);
+      sizeObserver.observe(body);
+      const side = body.querySelector(":scope > .sl-side");
+      if (side) sizeObserver.observe(side);
+      requestAnimationFrame(syncSize);
+      return frame;
+    }
     const redraw = () => {
       const focused = document.activeElement;
-      const selector = 'input,select,textarea,button,summary,a[href]';
+      const selector = 'input,select,textarea,button,summary,a[href],[tabindex]';
       const controls = [...el.querySelectorAll(selector)];
       const at = controls.indexOf(focused);
       const key = n => n.getAttribute('aria-label') || (n.tagName + ':' + (n.closest('label')?.textContent || n.textContent));
       const identity = at >= 0 ? key(focused) : null;
       const selection = at >= 0 && typeof focused.selectionStart === 'number' ? [focused.selectionStart,focused.selectionEnd] : null;
-      mount(el, render(v, api_));
+      const scrollSelector = '.cmp-resizable-content,.sl-main';
+      const positions = [...el.querySelectorAll(scrollSelector)].map(n => [n.scrollTop, n.scrollLeft]);
+      sizeObserver?.disconnect();
+      mount(el, resizable(render(v, api_)));
+      [...el.querySelectorAll(scrollSelector)].forEach((n, i) => { if (positions[i]) [n.scrollTop, n.scrollLeft] = positions[i]; });
       if (identity !== null) {
         const next = [...el.querySelectorAll(selector)].find(n=>key(n)===identity);
         if (next && !next.disabled) { next.focus({preventScroll:true}); if(selection)next.setSelectionRange(...selection); }
