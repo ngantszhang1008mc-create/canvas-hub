@@ -15,14 +15,17 @@ import socket
 import threading
 import time
 from concurrent.futures import Future
+from dataclasses import dataclass
 from http.cookies import SimpleCookie
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import quote, urljoin, urlsplit, urlunsplit
 
 from ..external_urls import clean_url, public_address, MUTATION
 from ..util import Conflict, InvalidInput
 from .external_reader import _PinnedHTTPS, _DNS, MAX_BYTES
 
 MAX_REQUEST = 200_000
+MAX_REDIRECTS = 5
+REDIRECT_SECONDS = 20
 POST_PATH = re.compile(r'/(?:login|log-in|signin|sign-in|auth|authorize|oauth|saml|session|token|mfa|verify|challenge|adfs)(?:/|$)', re.I)
 
 
@@ -39,6 +42,30 @@ def request_origin(raw):
     if p.scheme != 'https' or not p.hostname or p.username or p.password or p.port not in (None, 443):
         raise InvalidInput('Only approved HTTPS origins are allowed')
     return 'https://' + p.hostname.lower().rstrip('.')
+
+
+def _navigation_url(raw, base=None):
+    """Validate a redirect without stripping its in-memory SSO query values."""
+    if not isinstance(raw, str) or not raw or len(raw) > 2000 or '\\' in raw or any(ord(c) < 33 for c in raw):
+        raise InvalidInput('Invalid redirect target')
+    try:
+        raw = urljoin(base, raw) if base else raw
+        safe, _ = clean_url(raw)
+        p, canonical = urlsplit(raw), urlsplit(safe)
+        request_origin(safe)  # HTTPS only, no user info or nonstandard port.
+        # Match Chromium's URL representation, but keep signed query bytes intact.
+        return urlunsplit(('https', canonical.netloc,
+                          quote(p.path or '/', safe="/%:@!$&'()*+,;=-._~"),
+                          quote(p.query, safe="%/?@!$&()*+,;=:-._~[]"), ''))
+    except (ValueError, UnicodeError) as exc:
+        raise InvalidInput('Invalid redirect target') from exc
+
+
+@dataclass(frozen=True)
+class _Navigation:
+    url: str
+    seen: tuple[str, ...]
+    deadline: float
 
 
 def _public_ip(host):
@@ -118,7 +145,8 @@ class BrowserConnection:
         self.transport, self.headless = transport, headless
         self.events = queue.Queue()
         self.lock = threading.Lock()
-        self.state = {'state': 'opening', 'blocked_origins': [], 'pending_post': None, 'blocked_submission_origin':None}
+        self.state = {'state': 'opening', 'blocked_origins': [], 'pending_post': None,
+                      'blocked_submission_origin':None, 'redirect_blocked':False, 'redirect_reason':None}
         self._post_approval = None
         self._post_pending = None
         self._request_count = 0
@@ -127,6 +155,10 @@ class BrowserConnection:
         self._review_deadline = 0
         self._verified_digest = None
         self._confirmed_digest = None
+        self._page = None
+        self._redirect_next = None
+        self._redirect_expected = None
+        self._cancel_requested = threading.Event()
         self.thread = threading.Thread(target=self._run, daemon=True, name='external-site-login')
         self.thread.start()
 
@@ -139,6 +171,8 @@ class BrowserConnection:
             self.state.update(fields)
 
     def call(self, action, arg=None, timeout=35):
+        if action == 'cancel':
+            self._cancel_requested.set()
         future = Future()
         self.events.put((action, arg, future))
         try:
@@ -146,19 +180,83 @@ class BrowserConnection:
         except TimeoutError:
             raise Conflict('The site browser did not respond; try again')
 
+    def _allowed_origin(self, host):
+        if host in self.domains:
+            return True
+        # Only disclose an origin, never a path, query, or authentication value.
+        with self.lock:
+            blocked = set(self.state['blocked_origins'])
+            if len(blocked) < 10:
+                blocked.add(host)
+            self.state['blocked_origins'] = sorted(blocked)
+        return False
+
+    def _block_redirect(self, reason):
+        self.update(redirect_blocked=True, redirect_reason=reason)
+
+    def _queue_redirect(self, request, status, location, navigation):
+        """Schedule a fresh GET; never give an HTTP redirect to Chromium.
+
+        Playwright routes only the first request of an HTTP redirect chain.
+        Fulfilling a 3xx would therefore bypass this module's checks. Fetching
+        the chain ourselves and fulfilling its last body would instead give
+        that document the *wrong origin*. Abort and navigate to each checked
+        URL so Chromium gives it its real origin and destination-scoped cookies.
+        """
+        if self._verify_mode:
+            self._block_redirect('verification'); return False
+        if request.resource_type != 'document':
+            self._block_redirect('subresource'); return False
+        if status not in (301, 302, 303, 307, 308):
+            self._block_redirect('unsupported'); return False
+        if request.method.upper() == 'POST' and status in (307, 308):
+            # An approval covers one exact POST only, even on the same origin.
+            self._block_redirect('post_replay'); return False
+        try:
+            current = _navigation_url(request.url)
+            target = _navigation_url(location, current)
+        except InvalidInput:
+            self._block_redirect('unsafe_target'); return False
+        if not self._allowed_origin(request_origin(target)):
+            self._block_redirect('unapproved_origin'); return False
+        chain = navigation or _Navigation(current, (current,), time.monotonic() + REDIRECT_SECONDS)
+        if time.monotonic() >= chain.deadline:
+            self._block_redirect('timeout'); return False
+        if target in chain.seen:
+            self._block_redirect('loop'); return False
+        if len(chain.seen) > MAX_REDIRECTS:
+            self._block_redirect('limit'); return False
+        self._redirect_next = _Navigation(target, (*chain.seen, target), chain.deadline)
+        return True
+
+    def _navigate(self, page, url=None):
+        if url is not None:
+            url = _navigation_url(url)
+            self._redirect_next = _Navigation(url, (url,), time.monotonic() + REDIRECT_SECONDS)
+        while self._redirect_next and not self._cancel_requested.is_set():
+            navigation, self._redirect_next = self._redirect_next, None
+            remaining = navigation.deadline - time.monotonic()
+            if remaining <= 0:
+                self._block_redirect('timeout'); break
+            self._redirect_expected = navigation
+            try:
+                # No copied POST body, authorization, CSRF or source headers.
+                # Every new GET re-enters _route and pinned_request, including
+                # fresh DNS validation before any destination connection.
+                page.goto(navigation.url, wait_until='domcontentloaded', timeout=min(15000, max(1, int(remaining * 1000))))
+            except Exception:
+                pass  # An intercepted redirect is intentionally aborted.
+            finally:
+                self._redirect_expected = None
+
     def _route(self, route, context):
         request = route.request
+        navigation = None
         try:
             host = request_origin(request.url)
             if self._verify_mode and (request.method != 'GET' or request.url != self.target or request.resource_type != 'document'):
                 route.abort(); return
-            if host not in self.domains:
-                # Only disclose a hostname, never path, token or query.
-                with self.lock:
-                    blocked = set(self.state['blocked_origins'])
-                    if len(blocked) < 10:
-                        blocked.add(host)
-                    self.state['blocked_origins'] = sorted(blocked)
+            if not self._allowed_origin(host):
                 route.abort(); return
             # Approved identity origins can receive their own documents and
             # assets, but a page cannot use fetch/scripts/images to send data
@@ -166,6 +264,8 @@ class BrowserConnection:
             # remains necessary for explicit SSO, with POSTs approved separately.
             if request.resource_type == 'document' and request.frame.parent_frame is not None:
                 route.abort(); return
+            if request.resource_type == 'document' and getattr(self, '_page', None) is not None and request.frame.page != self._page:
+                route.abort(); return  # Popups cannot redirect the owned window.
             if request.resource_type != 'document' and request_origin(request.frame.url) != host:
                 route.abort(); return
             p = urlsplit(request.url)
@@ -176,6 +276,17 @@ class BrowserConnection:
             method = request.method.upper()
             if method not in ('GET', 'POST'):
                 route.abort(); return
+            if request.resource_type == 'document':
+                expected = getattr(self, '_redirect_expected', None)
+                self._redirect_expected = None
+                if expected:
+                    if method != 'GET' or _navigation_url(request.url) != expected.url:
+                        # A changed navigation must not silently start a new
+                        # chain and escape the hop/deadline limits.
+                        self._block_redirect('navigation_changed'); route.abort(); return
+                    navigation = expected
+                    if time.monotonic() >= navigation.deadline:
+                        self._block_redirect('timeout'); route.abort(); return
             if method == 'POST':
                 identity = (host, p.path)
                 with self.lock:
@@ -193,6 +304,11 @@ class BrowserConnection:
                 if not allowed:
                     route.abort(); return
             headers = request.all_headers()
+            if navigation and len(navigation.seen) > 1:
+                # These are the NEW destination request's cookies, selected by
+                # Chromium. Never copy credentials/headers from the prior hop.
+                headers = {k: v for k, v in headers.items() if k.lower() in
+                           ('accept', 'accept-language', 'user-agent', 'cookie')}
             if method == 'POST':
                 content_type = headers.get('content-type', '').split(';', 1)[0].lower()
                 if content_type not in ('application/x-www-form-urlencoded', 'application/json'):
@@ -204,9 +320,17 @@ class BrowserConnection:
             if data and len(data) > MAX_REQUEST:
                 route.abort(); return
             status, headers, cookies, body = self.transport(request.url, method, headers, data)
+            if navigation and time.monotonic() >= navigation.deadline:
+                self._block_redirect('timeout'); route.abort(); return
+            if 300 <= status < 400:
+                if self._queue_redirect(request, status, headers.get('location'), navigation):
+                    _set_cookies(context, request.url, cookies)
+                route.abort(); return
             _set_cookies(context, request.url, cookies)
             route.fulfill(status=status, headers=headers, body=body)
         except Exception:
+            if navigation and len(navigation.seen) > 1:
+                self._block_redirect('request_failed')
             try: route.abort()
             except Exception: pass
 
@@ -232,19 +356,21 @@ class BrowserConnection:
                     Object.defineProperty(Document.prototype,'cookie',{configurable:false,get:d.get,
                       set:function(v){if(!/;\\s*domain\\s*=/i.test(String(v)))d.set.call(this,v)}});""")
                 context.route('**/*', lambda route: self._route(route, context))
+                page = context.pages[0] if context.pages else context.new_page()
+                self._page = page
                 # A restored profile cannot send traffic before interception exists.
                 context.set_offline(False)
-                page = context.pages[0] if context.pages else context.new_page()
-                try:
-                    page.goto(self.target, wait_until='domcontentloaded', timeout=15000)
-                except Exception:
-                    pass
+                self._navigate(page, self.target)
                 self.update(state='login_open')
                 while True:
                     try:
                         action, arg, future = self.events.get_nowait()
                     except queue.Empty:
-                        try: page.wait_for_timeout(200)
+                        try:
+                            if self._redirect_next:
+                                self._navigate(page)
+                            else:
+                                page.wait_for_timeout(200)
                         except Exception: break
                         continue
                     try:
@@ -263,9 +389,8 @@ class BrowserConnection:
                         elif action == 'retry_login':
                             self._review_token = None
                             self._confirmed_digest = None
-                            self.update(state='login_open')
-                            try: page.goto(self.target, wait_until='domcontentloaded', timeout=15000)
-                            except Exception: pass
+                            self.update(state='login_open', redirect_blocked=False, redirect_reason=None)
+                            self._navigate(page, self.target)
                             future.set_result({'state':'login_open'})
                         elif action == 'confirm_content':
                             if not self._review_token or time.monotonic() > self._review_deadline or arg != self._review_token or page.url != self.target or self.snapshot()['state'] != 'content_visible':
@@ -304,6 +429,7 @@ class BrowserConnection:
         try:
             # Verification is a single GET to the already approved source. No
             # page scripts, subresources, redirects or form submissions run.
+            self._redirect_next = self._redirect_expected = None
             self._verify_mode = True
             cdp = page.context.new_cdp_session(page)
             cdp.send('Emulation.setScriptExecutionDisabled', {'value':True})
