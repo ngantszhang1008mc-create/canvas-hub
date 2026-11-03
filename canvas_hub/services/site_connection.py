@@ -21,6 +21,7 @@ from http.cookies import SimpleCookie
 from urllib.parse import quote, urljoin, urlsplit, urlunsplit
 
 from ..external_urls import clean_url, public_address, MUTATION
+from .. import external_inspection
 from ..util import Conflict, InvalidInput
 from .external_reader import _PinnedHTTPS, _DNS, MAX_BYTES
 
@@ -263,6 +264,9 @@ class BrowserConnection:
                 self._redirect_expected = None
 
     def _route(self, route, context):
+        if not external_inspection.ENABLED:
+            route.abort()
+            return
         request = route.request
         navigation = None
         try:
@@ -383,6 +387,7 @@ class BrowserConnection:
     def _run(self):
         launched = False
         try:
+            external_inspection.require_enabled()
             from playwright.sync_api import sync_playwright
             # Never follow a substituted account/site profile symlink into a
             # personal browser profile or another account's session.
@@ -435,6 +440,8 @@ class BrowserConnection:
                     try:
                         if not future.set_running_or_notify_cancel():
                             continue
+                        if action != 'cancel':
+                            external_inspection.require_enabled()
                         if action == 'cancel':
                             future.set_result({'state':'closed'}); break
                         if action == 'approve_post':
@@ -626,6 +633,7 @@ class SiteConnections:
         return hashlib.sha256((account['origin'] + '\0' + account['canvas_user_id']).encode()).hexdigest()
 
     def https_source(self, aid, sid, consent):
+        external_inspection.require_enabled()
         source = self._source(aid, sid)
         p = urlsplit(source['url'])
         if consent is not True or p.scheme != 'http' or source['access_needed']:
@@ -640,6 +648,7 @@ class SiteConnections:
         return service.get(aid, new_sid)
 
     def offer(self, aid, sid, extra_origins, *, method='browser'):
+        external_inspection.require_enabled()
         source = self._source(aid, sid)
         target, secret = clean_url(source['url'])
         if secret or source['access_needed'] or urlsplit(target).scheme != 'https':
@@ -662,6 +671,7 @@ class SiteConnections:
         return {'token':token, 'site':site, 'origins':domains, 'method':method, 'expires_in_seconds':300}
 
     def start(self, aid, sid, token, consent):
+        external_inspection.require_enabled()
         source = self._source(aid, sid)
         if consent is not True:
             raise InvalidInput('Explicit consent is required before creating a profile')
@@ -710,6 +720,8 @@ class SiteConnections:
                 'origins':sorted(session.domains)} if session else {'state':'not_connected'}
 
     def action(self, aid, sid, action, arg=None):
+        if action != 'cancel':
+            external_inspection.require_enabled()
         session = self._session(aid, sid)
         if session is None or session.snapshot()['state'] in ('closed', 'error'):
             raise Conflict('Open the site connection first')

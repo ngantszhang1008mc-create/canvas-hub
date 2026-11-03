@@ -13,7 +13,7 @@ from .test_workspace import workspace, start
 
 
 @pytest.fixture
-def integrated(hub, fixture_pkg):
+def integrated(hub, fixture_pkg, external_inspection_enabled):
     return seed_integration_examples(hub, fixture_pkg)
 
 

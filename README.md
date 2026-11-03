@@ -302,9 +302,11 @@ No system-wide settings are changed.
 
 Assistant runs default to four concurrent conversations; set
 `CANVAS_HUB_ASSISTANT_CONCURRENCY` to 1–16 to change this per process. Requests
-above the limit receive a busy response before a message is saved. Source
-analysis admits at most eight active or waiting analyses and four batches;
-at most two analyses call providers simultaneously.
+above the limit receive a busy response before a message is saved.
+
+External-link inspection and site sign-in are temporarily paused, including
+Analyse all and adapter refreshes. Saved links and source content remain available;
+normal Canvas collection continues. See [external-source status](docs/EXTERNAL_SOURCES.md).
 
 When storage is temporarily unavailable, completed-turn recovery information
 is kept in bounded memory and retried on access or normal shutdown. If storage

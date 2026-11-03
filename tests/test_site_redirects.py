@@ -10,6 +10,9 @@ from urllib.parse import urlsplit
 
 import pytest
 
+# Exercise dormant connection logic explicitly; shipping default stays frozen.
+pytestmark = pytest.mark.usefixtures("external_inspection_enabled")
+
 from canvas_hub.services import site_connection as sc
 from canvas_hub.services.site_connection import BrowserConnection
 from .test_site_connection import wait

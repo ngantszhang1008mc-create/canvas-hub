@@ -46,6 +46,15 @@ export function makeExternalSources(env) {
       const proposal=source.adapters.find(a=>a.revision===source.proposed_revision);
       const status=h('p',{role:'status'},source.status.replaceAll('_',' '));
       mount(content,h('h3',null,source.title),h('a',{href:source.url,target:'_blank',rel:'noopener noreferrer'},source.url));
+      if(source.inspection?.enabled===false) {
+        target.querySelector('.workspace-agent-heading h2').textContent='Saved source';
+        content.append(...[h('p',{role:'status'},source.inspection.message),
+          c?h('section',null,h('h3',null,'Saved classification'),note(c.roles.join(' · ')),h('p',null,c.summary||'')):null,
+          source.last_success_at?note(`Last saved read: ${source.last_success_at}`):null,
+          source.records.length?h('section',null,h('h3',null,'Saved observations'),h('ul',null,source.records.map(r=>h('li',null,h('a',{href:`#/item/${r.id}`},r.title))))):null,
+          source.reads.length?h('details',null,h('summary',null,'Saved source text'),source.reads.map(r=>h('div',null,note(r.read_at),r.evidence.map(p=>h('pre',{class:'text'},p.content||''))))):null].filter(Boolean));
+        return;
+      }
       if(mode==='login'&&!source.analysis_running&&!['open','claimed'].includes(req?.status)) {
         const box=h('section',{class:'site-login','aria-label':'Site connection'});
         content.append(box,h('button',{class:'site-login-back',onclick:()=>show(main,source)},'Back to source review'));
@@ -142,6 +151,18 @@ export function makeExternalSources(env) {
     const valid=()=>main.isConnected&&bindings.get(main)===refresh&&location.hash===route&&A('/external-sources')===accountPath;
     const result=await api(accountPath+'?'+query);
     if(!valid()||!result.sources.length)return;
+    if(result.inspection?.enabled===false) {
+      const list=h('details',{class:'workspace-evidence external-source-list',open:true},
+        h('summary',{class:'external-source-heading'},'External sources'),
+        h('p',{class:'external-inspection-paused',role:'status'},result.inspection.message));
+      for(const source of result.sources)list.append(h('div',{class:'external-source-row'},
+        h('div',{class:'external-source-info'},h('a',{href:source.url,target:'_blank',rel:'noopener noreferrer'},source.title),
+          note(source.classification?'Saved · '+source.classification.roles.join(', '):'Saved link')),
+        h('button',{onclick:()=>show(main,source)},'View saved source')));
+      const host=main.querySelector('.workspace-content')||main;
+      host.querySelector('.external-source-list')?.remove();main.querySelector('.external-source-nudge')?.remove();host.append(list);
+      return;
+    }
     const seenURLs=new Set();
     const eligible=result.sources.filter(s=>{
       const failed=s.request?.status==='declined';

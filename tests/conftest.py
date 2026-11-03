@@ -13,6 +13,17 @@ from canvas_hub.services import Hub  # noqa: E402
 FIXTURE = Path(__file__).parent / "fixtures" / "observation_package_v1.json"
 
 
+@pytest.fixture
+def external_inspection_enabled(monkeypatch):
+    """Explicit opt-in for maintaining dormant inspection code using fakes only.
+
+    Freeze acceptance tests do NOT use this fixture. No runtime setting enables
+    the feature, and ordinary collector/Assistant tests retain the shipped default.
+    """
+    from canvas_hub import external_inspection
+    monkeypatch.setattr(external_inspection, 'ENABLED', True)
+
+
 @pytest.fixture(autouse=True)
 def anonymous_probe_is_synthetic(monkeypatch):
     # Analysis failures now schedule a probe. Existing fixture-based tests must

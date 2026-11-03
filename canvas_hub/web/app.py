@@ -406,6 +406,7 @@ def create_app(api: HubAPI, *, token: str, port: int) -> FastAPI:
 
     @app.get("/api/accounts/{aid}/external-sources")
     def external_list(aid: int, course_id: str | None = None, item_id: int | None = None):
+        from ..external_inspection import status
         service = external(aid)
         service.backfill(aid)
         sources = service.list(aid, course_id, item_id)
@@ -414,7 +415,7 @@ def create_app(api: HubAPI, *, token: str, port: int) -> FastAPI:
                 source_analysis.check_failed_source(aid, source['id'])
             source['login_check'] = source_analysis.login_status(aid, source)
             source['connection_state'] = site_connections.status(aid, source['id'])['state']
-        return {"sources": sources}
+        return {"sources": sources, "inspection": status()}
 
     @app.get("/api/accounts/{aid}/external-analysis/disclosure")
     def batch_disclosure(aid: int, course_id: str | None = None, item_id: int | None = None):
@@ -439,9 +440,11 @@ def create_app(api: HubAPI, *, token: str, port: int) -> FastAPI:
 
     @app.get("/api/accounts/{aid}/external-sources/{sid}")
     def external_get(aid: int, sid: int):
+        from ..external_inspection import status
         source_analysis.check_failed_source(aid, sid)
         source = external(aid).get(aid, sid)
         source['login_check'] = source_analysis.login_status(aid, source)
+        source['inspection'] = status()
         return source
 
     @app.get("/api/accounts/{aid}/external-sources/{sid}/disclosure")

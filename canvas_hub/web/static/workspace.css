@@ -202,6 +202,7 @@ button.workspace-attention-link:hover { color: var(--accent); background: transp
 .external-agent-content { display:grid; gap:12px; }
 .external-agent-content pre { white-space:pre-wrap; overflow-wrap:anywhere; max-height:360px; overflow:auto; }
 .external-agent-content .row { flex-wrap:wrap; }
+.external-inspection-paused { padding:0 var(--source-padding); color:var(--muted); }
 .site-login { display:grid; gap:12px; min-width:0; }
 .site-login h3,.site-login p { margin:0; }
 .site-login-form { display:grid; gap:14px; }

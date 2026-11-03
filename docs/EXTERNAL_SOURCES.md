@@ -1,5 +1,17 @@
 # External course sources
 
+**Temporarily paused in this release.** Analyse/inspect (including batches),
+external-site sign-in, anonymous login checks, MCP external read requests and
+adapter network refreshes are disabled. The backend rejects new work before a
+site read or model call, including previously offered requests and queued batches.
+The UI retains links and **View saved source**, with an unavailable notice.
+Existing classifications, source text, profiles, tracker state and account data
+are retained. Canvas collection and Canvas-page requests continue normally.
+
+This is a code-level release freeze, with no settings/environment bypass. The
+implementation below is retained for later review. Dormant-feature tests opt in
+explicitly; freeze acceptance tests exercise the shipped disabled default.
+
 Canvas collection records external links without calling an AI provider. **> →
 Analyse link** opens the Source Agent panel with the exact public URL, active
 Assistant setup, endpoint, model, and API quota disclosure. **Approve and analyse**

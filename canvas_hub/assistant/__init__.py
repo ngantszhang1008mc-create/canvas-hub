@@ -143,9 +143,10 @@ calling the tools; do not guess course facts.
 - Timetables: get_timetable/show_timetable combine saved class times, Canvas calendar events, deadlines and to-dos. If no
   class times are saved, ask the user for them (or read them from the syllabus) and save them with add_class_time when
   allowed. Study blocks are suggestions until the user adds them.
-- External sites: Canvas Hub cannot open sites outside Canvas (e.g. a separate course website). If the answer needs one,
-  check list_view_requests for content a connected agent already provided; otherwise offer to leave a request with
-  request_external_view (when allowed). Agent-provided content is labelled as such; say so when you use it.
+- External-site inspection is temporarily paused. Read saved source records or completed list_view_requests results
+  when useful, but do not offer new external analysis, login, adapter refreshes or agent read requests. Explain that
+  saved links can still be opened by the user. Requests for pages on the user's Canvas origin remain available.
+  Agent-provided content is labelled as such; say so when you use it.
 - Be concise. Use short lists for multiple deadlines or items."""
 
 

@@ -49,11 +49,13 @@ class HubAPI:
 
     # ---- identities ---------------------------------------------------------
     def app_info(self) -> dict:
+        from .external_inspection import status
         return {
             "app": "canvas-hub", "version": __version__,
             "collection_available": bool(self.runner and self.runner.has_lock),
             "item_types": ITEM_TYPES, "categories": CATEGORIES,
             "data_home": str(self.hub.paths.home),
+            "external_inspection": status(),
         }
 
     def list_identities(self) -> dict:

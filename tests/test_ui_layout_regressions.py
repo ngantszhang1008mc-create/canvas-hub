@@ -16,7 +16,7 @@ pytestmark = pytest.mark.browser
 
 
 @pytest.fixture
-def layout_examples(hub, account, fixture_pkg):
+def layout_examples(hub, account, fixture_pkg, external_inspection_enabled):
     package = copy.deepcopy(fixture_pkg)
     now = datetime.now(timezone.utc)
     assignment = next(i for i in package["items"] if i["type"] == "assignment")

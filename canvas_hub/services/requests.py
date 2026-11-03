@@ -14,8 +14,10 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlsplit
 
 from .. import __version__
+from .. import external_inspection
 from ..db import Database
 from ..urls import canonical_url
 from ..util import InvalidInput, NotFound, now_iso, parse_iso
@@ -51,8 +53,24 @@ class RequestService:
             raise NotFound("request not found", code="request_not_found")
         return dict(row)
 
+    def _is_external(self, account_id, url, source_id=None):
+        account = self.identity.get_account(account_id)
+        def origin(p):
+            return (p.scheme.lower(), p.hostname, p.port or (443 if p.scheme == 'https' else 80))
+        try:
+            target, canvas = urlsplit(url), urlsplit(account['origin'])
+            return bool(source_id or target.username or target.password or origin(target) != origin(canvas))
+        except ValueError:
+            return True
+
+    def _check_inspection(self, account_id, url, source_id=None):
+        if self._is_external(account_id, url, source_id):
+            external_inspection.require_enabled()
+
     def view(self, account_id: int, request_id: int) -> dict:
         r = self._get(account_id, request_id)
+        if not external_inspection.ENABLED and self._is_external(account_id, r['url'], r.get('external_source_id')):
+            r['inspection_paused'] = True
         if r["result_item_id"]:
             item = self.db.one("SELECT title, last_observed_at FROM items WHERE id=?", (r["result_item_id"],))
             r["result_title"] = item["title"] if item else None
@@ -61,6 +79,7 @@ class RequestService:
     def create(self, account_id: int, *, url: str, title: str | None = None, note: str | None = None,
                course_id: str | None = None, requested_by: str = "user", external_source_id: int | None = None) -> dict:
         u = _check_url(url)
+        self._check_inspection(account_id, u, external_source_id)
         if requested_by not in ("user", "assistant"):
             raise InvalidInput("requested_by must be user or assistant")
         if len(note or "") > 2000 or len(title or "") > 300:
@@ -113,6 +132,7 @@ class RequestService:
             if agent == 'Canvas Hub built-in Assistant':
                 raise InvalidInput('Reserved built-in agent identity')
             r = self._get(account_id, request_id)
+            self._check_inspection(account_id, r['url'], r.get('external_source_id'))
             if r['claimed_by'] == 'Canvas Hub built-in Assistant':
                 raise InvalidInput('Cancel built-in analysis before using MCP', code='request_claimed')
             stale = False
@@ -144,6 +164,9 @@ class RequestService:
         the agent; it is stored as untrusted, agent-provided data."""
         agent = _check_agent(agent_name)
         r = self._get(account_id, request_id)
+        self._check_inspection(account_id, r['url'], r.get('external_source_id'))
+        if source_url:
+            self._check_inspection(account_id, source_url)
         if r["status"] not in ("open", "claimed"):
             raise InvalidInput(f"request is {r['status']}", code="request_closed")
         if r["status"] == "claimed" and r["claimed_by"] != agent:

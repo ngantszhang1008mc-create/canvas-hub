@@ -2,6 +2,7 @@
 import threading
 
 from ..util import Conflict
+from .. import external_inspection
 from .login_detector import inspect
 
 
@@ -16,11 +17,14 @@ class LoginDetection:
     def get(self, aid, sid):
         account = self.hub.identity.get_account(aid)
         source = self.hub.external_sources._source(aid, sid)
+        if not external_inspection.ENABLED:
+            return {'state':'paused', **external_inspection.status()}
         key = (aid, sid, account['origin'], account['canvas_user_id'], source['url'])
         with self._lock:
             return dict(self._states.get(key, {'state': 'not_checked'}))
 
     def start(self, aid, sid, *, failure_id=None):
+        external_inspection.require_enabled()
         account = self.hub.identity.get_account(aid)
         source = self.hub.external_sources._source(aid, sid)
         key = (aid, sid, account['origin'], account['canvas_user_id'], source['url'])
@@ -50,6 +54,7 @@ class LoginDetection:
             self._states[key] = state
         def run():
             try:
+                external_inspection.require_enabled()
                 result = self.detector(source['url'])
                 # Do not return screenshots, raw URLs, page text or exceptions to UI.
                 allowed = ('initial_host', 'final_host', 'http_status', 'outcome', 'evidence', 'course_access', 'auth_scheme')

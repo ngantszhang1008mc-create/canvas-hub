@@ -512,7 +512,7 @@ def h_remove_class(ctx, a):
 
 def _req_view(r):
     return {k: r.get(k) for k in ("id", "url", "title", "note", "course_canvas_id", "status", "requested_by", "claimed_by",
-                                  "claimed_at", "result_item_id", "result_note", "created_at", "completed_at", "external_source_id")}
+                                  "claimed_at", "result_item_id", "result_note", "created_at", "completed_at", "external_source_id", "inspection_paused")}
 
 
 def h_request_view(ctx, a):
@@ -531,8 +531,9 @@ def h_source_analysis(ctx, a):
 
 
 def h_external_sources(ctx, a):
+    from .external_inspection import status
     aid = _account(ctx, a)
-    return {"sources": ctx.api.hub.external_sources.list(aid, a.get("course_id"))}
+    return {"sources": ctx.api.hub.external_sources.list(aid, a.get("course_id")), "inspection":status()}
 
 
 def h_claim_request(ctx, a):
@@ -1266,7 +1267,7 @@ def h_wait_requests(ctx, a):
     aid = _account(ctx, a)
     deadline = time.monotonic() + max(5, min(a.get("timeout_seconds") or 120, 300))
     while True:
-        open_ = ctx.api.hub.requests.list(aid, "open")
+        open_ = [r for r in ctx.api.hub.requests.list(aid, "open") if not r.get('inspection_paused')]
         if open_ or time.monotonic() >= deadline:
             return {"requests": [{"request_id": r["id"], "url": r["url"], "title": r["title"], "note": r["note"],
                                   "course_id": r["course_canvas_id"], "created_at": r["created_at"]} for r in open_],

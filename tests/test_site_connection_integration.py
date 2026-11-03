@@ -4,6 +4,9 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
+
+# Exercise dormant connection logic explicitly; shipping default stays frozen.
+pytestmark = pytest.mark.usefixtures("external_inspection_enabled")
 from fastapi.testclient import TestClient
 
 from canvas_hub.boundary import HubAPI

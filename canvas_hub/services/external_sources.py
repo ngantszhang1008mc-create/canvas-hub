@@ -5,6 +5,8 @@ Approval and publication are revision/hash checked under SQLite transactions.
 """
 from __future__ import annotations
 
+from .. import external_inspection
+
 import json
 import html
 import threading
@@ -167,6 +169,7 @@ class ExternalSources:
                 WHERE s.account_id=? AND i.account_id=s.account_id AND COALESCE(i.course_canvas_id,'')=s.course_id''', (aid,))
 
     def analyze(self, aid, sid, *, reanalyze=False):
+        external_inspection.require_enabled()
         with self._lock, self.db.tx():
             s = self._source(aid, sid)
             if self.db.one("SELECT 1 FROM source_analysis_attempts WHERE source_id=? AND state='running'", (sid,)):
@@ -195,6 +198,7 @@ class ExternalSources:
         return self.get(aid, sid)
 
     def submit_analysis(self, aid, request_id, agent_name, result, *, _builtin=False, _attempt_token=None, _reader_failure=None, _connected=False, _classification_coverage=None):
+        external_inspection.require_enabled()
         if _check_agent(agent_name) == 'Canvas Hub built-in Assistant' and not _builtin:
             raise Conflict('Built-in analysis cannot be submitted by a connected Agent')
         if _reader_failure is not None and (not _builtin or _reader_failure not in ('needs_login', 'needs_attention', 'stale')):
@@ -288,6 +292,8 @@ class ExternalSources:
         return self.get(aid, sid)
 
     def decide(self, aid, sid, revision, spec_hash, *, approve=False):
+        if approve:
+            external_inspection.require_enabled()
         source = self._decide(aid, sid, revision, spec_hash, approve=approve)
         if not approve:
             self.hub.components.sync_sources(aid)
@@ -323,6 +329,7 @@ class ExternalSources:
         return self.get(aid,sid)
 
     def refresh(self, aid, sid):
+        external_inspection.require_enabled()
         s = self._source(aid,sid)
         if not s['enabled_revision'] or s['decision'] != 'approved' or s['status'] in ('needs_attention','needs_login'):
             raise Conflict('Source needs an enabled public adapter; reanalyse access/template failures explicitly')
@@ -341,6 +348,7 @@ class ExternalSources:
                 self._reading.discard(sid)
 
     def _execute(self, aid, sid, revision, spec_hash, approving):
+        external_inspection.require_enabled()
         # Release the database transaction during network I/O so a user can decline.
         a = self.db.one('SELECT * FROM external_adapters WHERE source_id=? AND revision=?',(sid,revision))
         spec = validate_spec(json.loads(a['spec_json']))
@@ -352,6 +360,7 @@ class ExternalSources:
             pages = []
             status = (e.code if e.code in ('needs_login','needs_attention','stale') else 'needs_attention') if isinstance(e, InvalidInput) else 'stale'
             error = f'Public read failed ({status}); previous data retained. Reanalyse or check site access.'
+        external_inspection.require_enabled()
         with self._lock, self.db.tx() as c:
             s = self._source(aid,sid)
             current = c.execute('SELECT * FROM external_adapters WHERE source_id=? AND revision=?',(sid,revision)).fetchone()
@@ -410,6 +419,8 @@ class ExternalSources:
             self.db.conn.execute('INSERT INTO external_records VALUES (?,?,?,?) ON CONFLICT(source_id,record_key) DO UPDATE SET last_seen_at=excluded.last_seen_at',(s['id'],it['source_key'],iid,when))
 
     def refresh_registered(self, aid, *, course_ids=None, should_stop=lambda:False):
+        if not external_inspection.ENABLED:
+            return []
         sql = "SELECT id,course_id FROM external_sources WHERE account_id=? AND decision='approved' AND enabled_revision IS NOT NULL AND status IN ('enabled','stale')"
         args = [aid]
         if course_ids is not None:

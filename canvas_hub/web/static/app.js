@@ -2192,8 +2192,14 @@ VIEWS.requests = async (main) => {
   const course = h("select", null, h("option", { value: "" }, "Course (optional)"), accessible.map((c) => h("option", { value: c.course_id }, c.title)));
   const note = h("textarea", { rows: 2, placeholder: "Instructions for the agent, e.g. “Use Chrome profile ngan. Read the Schedule and Assignments pages.”" });
   const STATUS = { open: ["info", "Waiting for an agent"], claimed: ["warn", "Being read"], done: ["ok", "Done"], declined: ["bad", "Declined"], cancelled: ["muted", "Cancelled"] };
-  mount(main, pageHead("Agent requests", "Ask a connected agent to read sites Canvas Hub can't open itself, such as a course website outside Canvas."),
-    h("div", { class: "banner info" }, h("div", { class: "b-body small" },
+  const inspectionPaused=S.info?.external_inspection?.enabled===false;
+  if(inspectionPaused) {
+    url.placeholder=(S.account?.origin||'https://canvas.example.edu')+'/courses/…';
+    title.placeholder='Canvas page title';note.placeholder='Which Canvas page content should the agent read?';
+  }
+  mount(main, pageHead("Agent requests", inspectionPaused?"External-site inspection is temporarily unavailable. Saved results and Canvas-page requests remain available.":"Ask a connected agent to read sites Canvas Hub can't open itself, such as a course website outside Canvas."),
+    inspectionPaused?h('p',{role:'status'},'New requests must use your Canvas instance address while external inspection is paused.'):null,
+    inspectionPaused?null:h("div", { class: "banner info" }, h("div", { class: "b-body small" },
       "Canvas Hub never opens these sites or touches your other browser profiles. An agent you connect over MCP (for example Codex or Claude with your browser) can pick up a request, read the site with its own access, and send back the text. It is stored as ",
       h("strong", null, "agent-provided"), " content, separate from what Canvas reported, and becomes searchable. The agent needs ",
       h("code", null, "canvas-hub mcp --allow-fulfil"), ".")),
@@ -2206,7 +2212,7 @@ VIEWS.requests = async (main) => {
           if (r) { toast("Request left for connected agents"); route(); } } }, "Leave request")))),
     h("div", { class: "card" }, h("h2", { style: "margin-bottom:6px" }, "Requests"),
       reqs.requests.length ? h("ul", { class: "list" }, reqs.requests.map((r) => h("li", null,
-        h("div", { class: "spread" }, h("div", { class: "row" }, pill(STATUS[r.status][0], STATUS[r.status][1]), h("span", { class: "strong" }, r.title || r.url)),
+        h("div", { class: "spread" }, h("div", { class: "row" }, pill(r.inspection_paused&&['open','claimed'].includes(r.status)?'muted':STATUS[r.status][0], r.inspection_paused&&['open','claimed'].includes(r.status)?'Inspection paused':STATUS[r.status][1]), h("span", { class: "strong" }, r.title || r.url)),
           ["open", "claimed"].includes(r.status) ? h("button", { class: "ghost sm", onclick: async () => { await guard(() => api(A(`/requests/${r.id}/cancel`), { method: "POST" })); route(); } }, "Cancel") : null),
         h("div", { class: "li-meta" }, h("a", { href: r.url, target: "_blank", rel: "noopener noreferrer" }, r.url),
           r.claimed_by ? h("span", null, `agent: ${r.claimed_by}`) : null, h("span", null, `asked by ${r.requested_by} ${ago(r.created_at)}`)),

@@ -1,5 +1,10 @@
 # External site connection research
 
+**External inspection and sign-in are temporarily frozen.** The workflow below
+is retained code awaiting further review, not an available feature in this release.
+Saved links, source snapshots and profiles are retained; no new connections or
+automatic login probes start. See [the release freeze](EXTERNAL_SOURCES.md).
+
 External-site connections require user review before use on real sites. They do
 not import a personal browser profile, send
 cookies or credentials to an Assistant, or run automatic authenticated
