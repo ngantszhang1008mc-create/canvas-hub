@@ -262,7 +262,10 @@ def test_existing_component_history_is_unchanged_by_upgrade(tmp_path,monkeypatch
     old.importer.after_changed_import=None
     instance=old.identity.add_instance(fixture_pkg['identity']['origin'])
     aid=old.identity.upsert_verified_account(instance['id'],{'canvas_user_id':'100001','time_zone':'Asia/Hong_Kong'})['id']
-    old.importer.import_package(fixture_pkg)
+    # The schema-12 fixture represents the pre-context-index application.
+    with monkeypatch.context() as legacy:
+        legacy.setattr('canvas_hub.services.context_sources.index_source', lambda *args: None)
+        old.importer.import_package(fixture_pkg)
     comp=old.components.create(aid,'checklist',{'rows':[{'id':'a','label':'Keep this progress'}]})
     old.components.set_state(aid,comp['id'],{'done':{'a':True}})
     old.components.pin(aid,comp['id'],True)

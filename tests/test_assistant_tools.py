@@ -259,7 +259,7 @@ def test_tool_picker_slash_keyboard_chips_and_mobile_bounds(hub, account, monkey
         page.screenshot(path=str(artifacts / f'assistant-tools-{width}.png'))
         field.click()
         expect(dialog).to_be_hidden()
-        field.fill("/list_context_sources /read_context_source /search_context_sources /get_coverage /wait_for_job /show_artifact Explain this tracker")
+        field.fill("/list_context_sources /read_context_source /search_context_sources /get_coverage /show_artifact Explain this tracker")
         page.get_by_role("button", name="Send", exact=True).click()
         expect(page.get_by_text("Ready", exact=True)).to_be_visible()
         assert "patch_component_state" in {t["name"] for t in requests[0]}

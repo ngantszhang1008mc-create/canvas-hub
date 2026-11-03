@@ -138,7 +138,7 @@ def test_assistant_components_and_planner_tools(hub, account, fixture_pkg):
     try:
         svc = AssistantService(hub, HubAPI(hub))
         svc.update_config({"preset": "custom", "base_url": fake.url + "/v1", "model": "m", "api_key": "sk-x-123456789"})
-        r = svc.send(account["id"], "Plan my week")
+        r = svc.send(account["id"], "Plan my week", tool_selection=["group:planner", "tool:show_choices", "tool:show_deadlines", "tool:show_chart"])
         svc.wait(r["conversation_id"], 30)
         msgs = svc.get_conversation(account["id"], r["conversation_id"])["messages"]
         displays = [res["display"] for m in msgs if m["role"] == "tool" for res in m["results"] if res.get("display")]

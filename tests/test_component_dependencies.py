@@ -170,10 +170,10 @@ def test_migration_backfills_and_accepts_gap_then_late_0015(monkeypatch):
                         VALUES (1,1,'checklist','Saved','{}','{}',?,'now','now')""", (json.dumps(sources),))
         with monkeypatch.context() as m:
             m.setattr(database, "_migration_files", lambda: [f for f in files if f[0] != 15])
-            assert database.migrate(conn) == [16]
+            assert database.migrate(conn) == [f[0] for f in files if f[0] >= 16]
         assert {(r["dependency_kind"],r["dependency_key"]) for r in conn.execute("SELECT * FROM component_source_dependencies")} == {
             ("item", "123"), ("item", "234"), ("collection", "4242")}
-        # A later independently integrated migration must still run despite MAX=16.
+        # An independently integrated migration must still run below the current MAX.
         assert database.migrate(conn) == [15]
         assert database.migrate(conn) == []
         assert conn.execute("SELECT 1 FROM sqlite_master WHERE name='source_analysis_attempts'").fetchone()

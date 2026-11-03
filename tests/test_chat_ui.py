@@ -333,9 +333,11 @@ def test_wide_screens_use_the_width(hub, account):
         expect(pg.locator(".composer textarea")).to_be_visible()
         col = pg.locator(".main-col").bounding_box()
         chat, box = pg.locator(".chat").bounding_box(), pg.locator(".composer textarea").bounding_box()
+        row = pg.locator(".assistant-input-row").bounding_box()
         assert chat["x"] + chat["width"] > col["x"] + col["width"] - 60          # reaches the right edge
         assert box["width"] <= 930                                              # the composer stays readable
-        assert abs((box["x"] - chat["x"]) - (chat["x"] + chat["width"] - box["x"] - box["width"])) < 4   # centred
+        # The textarea and its tool picker share one centred input row.
+        assert abs((row["x"] - chat["x"]) - (chat["x"] + chat["width"] - row["x"] - row["width"])) < 4
         pg.goto(f"{base}/#/overview")
         expect(pg.locator(".main .page-head")).to_be_visible()
         main = pg.locator("#main").bounding_box()

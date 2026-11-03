@@ -15,21 +15,31 @@ def test_table_links_follow_title_rows_through_sort_filter_details_and_reload(hu
     items = table_items[:6]
     rows = [{"cells": ["Group " + ("B" if i % 2 else "A"), item["title"], i + 1],
              "item_id": item["id"], "detail": item["title"] + " detail"} for i, item in reversed(list(enumerate(items)))]
-    _, error, display = show(hub, account, rows=rows, group_by="Course", title="Bound rows", totals=["Due"],
-                             column_types=["text", "text", "number"])
+    new_args = {"columns": ["Course", "Item", "Due"], "rows": rows, "group_by": "Course",
+                "title": "Bound rows", "totals": ["Due"], "column_types": ["text", "text", "number"]}
+    _, error, display = show(hub, account, **new_args)
     assert not error
     alpha, beta = items[:2]
-    legacy = {"component": "table", "title": "Legacy rows", "columns": ["Course", "Item"],
-              "rows": [["Group", beta["title"]], ["Group", alpha["title"]]],
-              "item_ids": [alpha["id"], alpha["id"]], "details": ["Beta legacy detail", "Alpha legacy detail"]}
+    legacy_args = {"title": "Legacy rows", "columns": ["Course", "Item"],
+                   "rows": [["Group", beta["title"]], ["Group", alpha["title"]]],
+                   "item_ids": [alpha["id"], alpha["id"]], "details": ["Beta legacy detail", "Alpha legacy detail"]}
+    legacy = {"component": "table", **legacy_args}
     with serve(hub, []) as (base, token, api), sync_playwright() as playwright:
         with hub.db.tx() as conn:
             cid = conn.execute("INSERT INTO assistant_conversations(account_id,title,created_at,updated_at) VALUES (?,?,?,?)",
                                (account["id"], "Table links", "2026-11-01T00:00:00Z", "2026-11-01T00:00:00Z")).lastrowid
+        # Displays belong to the assistant calls that requested them, rather
+        # than standalone tool-result messages.
+        api.assistant._append(cid, "assistant", {"tool_calls": [
+            {"id": "new", "name": "show_table", "input": new_args},
+            {"id": "old", "name": "show_table", "input": legacy_args}]})
         api.assistant._append(cid, "tool", {"results": [
             {"id": "new", "name": "show_table", "content": "{}", "display": display},
             {"id": "old", "name": "show_table", "content": "{}", "display": legacy}]})
-        stored_before = hub.db.one("SELECT content_json FROM assistant_messages WHERE conversation_id=?", (cid,))["content_json"]
+        def stored_messages():
+            return [(row["role"], json.loads(row["content_json"])) for row in hub.db.query(
+                "SELECT role,content_json FROM assistant_messages WHERE conversation_id=? ORDER BY id", (cid,))]
+        stored_before = stored_messages()
         browser = playwright.chromium.launch()
         context = browser.new_context(viewport={"width": 1280, "height": 960})
         context.grant_permissions(["clipboard-read", "clipboard-write"], origin=base)
@@ -87,5 +97,4 @@ def test_table_links_follow_title_rows_through_sort_filter_details_and_reload(hu
         assert all(request.method == "GET" for request in requests), [(request.method, request.url) for request in requests if request.method != "GET"]
         assert not errors, errors
         browser.close()
-        stored_after = hub.db.one("SELECT content_json FROM assistant_messages WHERE conversation_id=?", (cid,))["content_json"]
-        assert json.loads(stored_after) == json.loads(stored_before)
+        assert stored_messages() == stored_before
