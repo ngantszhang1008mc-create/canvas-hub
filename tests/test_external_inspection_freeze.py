@@ -57,6 +57,7 @@ def test_http_entrypoints_refuse_before_work_and_preserve_saved_data(hub, saved,
     path=f'{root}/external-sources/{saved["sid"]}'
     posts=[('/analyze',{'consent':True,'token':'old-offer'}),('/analyze',{'executor':'mcp'}),
            ('/analyze-connected',{'consent':True,'token':'old-offer'}),('/connected-disclosure',{}),
+           ('/login-inspection',{'consent':True,'token':'old-offer'}),
            ('/login-check',{}),('/site-connection/offer',{}),('/site-connection/start',{'consent':True,'token':'old-offer'}),
            ('/site-connection/http_auth',{'request':{'username':'synthetic','password':'synthetic-secret'}}),
            ('/site-connection/verify',{}),('/site-connection/retry_login',{}),('/site-connection/approve_post',{}),
@@ -71,6 +72,7 @@ def test_http_entrypoints_refuse_before_work_and_preserve_saved_data(hub, saved,
         assert client.post(root+'/external-analysis/old-batch/start',json={'consent':True}).json()['error']=='external_inspection_paused'
         assert client.post(root+'/requests',json={'url':saved['url']}).json()['error']=='external_inspection_paused'
         assert not client.get(path+'/disclosure').json()['available']
+        assert client.get(path+'/login-inspection').json()['error']=='external_inspection_paused'
         assert not client.get(root+'/external-analysis/disclosure?course_id=4242').json()['available']
         assert client.get(path+'/login-check').json()['state']=='paused'
         assert client.get(path).json()['classification']==saved['source']['classification']

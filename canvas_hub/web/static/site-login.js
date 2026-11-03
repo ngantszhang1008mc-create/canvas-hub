@@ -1,13 +1,16 @@
 // One contextual sign-in step at a time. Opening this UI never signs in or calls a model.
 export async function showSiteLogin(env) {
-  const {h, mount, api, root, path, source, current, analyse, reopen} = env;
+  const {h, mount, api, root, path, source, current, analyse, inspected, reopen} = env;
   const cp=path+'/site-connection', site=new URL(source.url).origin;
   const note=text=>h('p',{class:'small muted'},text);
   let epoch=0, busy=false, approvedPost=false;
   const changed=()=>window.dispatchEvent(new Event('external-sources-updated'));
   const clearInputs=()=>root.querySelectorAll('input[type="password"],input[name="site-username"]').forEach(el=>{el.value='';});
   const title=text=>h('h3',{tabindex:'-1'},text);
-  function focusStep() { (root.querySelector('input[name="site-username"]')||root.querySelector('h3'))?.focus({preventScroll:true}); }
+  function focusStep() {
+    if(window.innerWidth<900)root.scrollIntoView({block:'start'});
+    (root.querySelector('input[name="site-username"]')||root.querySelector('h3'))?.focus({preventScroll:true});
+  }
   async function run(fn) {
     if(busy||!current())return;
     busy=true; epoch++; // Stop status polling while a user action or review is in progress.
@@ -87,40 +90,80 @@ export async function showSiteLogin(env) {
     focusStep();
   }
   async function basicForm(state,notice) {
+    const offer=await api(path+'/login-inspection');
+    if(!current())return;
+    if(!offer.available) {
+      mount(root,title('Set up the Assistant before inspecting'),note(offer.message),
+        h('a',{href:'#/assistant/settings'},'Open Assistant settings'),details(state));return;
+    }
     const username=h('input',{type:'text',name:'site-username',autocomplete:'off',autocapitalize:'none',spellcheck:'false',required:true,maxlength:1024,'aria-label':'Site username'});
     const password=h('input',{type:'password',name:'site-password',autocomplete:'off',required:true,maxlength:4096,'aria-label':'Site password'});
     const form=h('form',{class:'site-login-form',autocomplete:'off',onsubmit:e=>{e.preventDefault();run(async()=>{
       // Credentials exist only in these local variables until the guarded POST.
       const request={username:username.value,password:password.value};clearInputs();
+      let cancelled=false, finished=false;
+      const active=()=>current()&&!cancelled;
+      const progress=h('p',{role:'status','aria-live':'polite'},'Signing in…');
+      const cancel=h('button',{type:'button',onclick:()=>stop().catch(e=>{if(current())progress.textContent=e.message;})},'Cancel sign-in and inspection');
+      root.append(progress,cancel);
+      async function stop() {
+        if(cancelled||finished)return;
+        cancelled=true;request.username='';request.password='';clearInputs();cancel.disabled=true;
+        progress.textContent='Cancelling…';
+        // Cancel the durable attempt before closing its connection. Work already
+        // dispatched may have used quota; cancellation must not replay it.
+        try {await api(path+'/login-inspection/cancel',{method:'POST',body:{token:offer.token}});}
+        finally {
+          try {await api(cp+'/cancel',{method:'POST',body:{}});} catch {}
+          if(current()){await render(await api(cp),'Cancelled. Any inspection already sent may have used quota.');changed();}
+        }
+      }
+      // Leaving this account/course/panel cancels a pending continuation. Do not
+      // depend on the credential request finishing before noticing navigation.
+      const watch=setInterval(()=>{if(!current())stop().catch(()=>{});},200);
       try {
         let next=await api(cp);
-        if(!current())return;
+        if(!active())return;
         if(['not_connected','closed','error'].includes(next.state)) {
           const offer=await api(cp+'/offer',{method:'POST',body:{method:'basic',identity_origins:[]}});
-          if(!current())return;
+          if(!active())return;
           next=await api(cp+'/start',{method:'POST',body:{token:offer.token,consent:true}});
         }
-        for(let i=0;next.state==='opening'&&i<30&&current();i++) {
+        for(let i=0;next.state==='opening'&&i<30&&active();i++) {
           await new Promise(resolve=>setTimeout(resolve,500));
-          if(current())next=await api(cp);
+          if(active())next=await api(cp);
         }
-        if(!current())return;
+        if(!active())return;
         if(next.http_auth?.scheme!=='basic'||next.http_auth.origin!==site) {
           await render(next,'The requested page did not provide a Basic sign-in challenge. No credentials were sent. Review connection details before trying browser sign-in.');return;
         }
         request.challenge=next.http_auth;
-        next=await api(cp+'/http_auth',{method:'POST',body:{request}});
-        if(!current())return;
+        try {next=await api(cp+'/http_auth',{method:'POST',body:{request}});}
+        finally {request.username='';request.password='';}
+        if(!active())return;
         if(next.http_auth||next.failure_reason)await render(await api(cp),'Sign-in was not accepted. Check your site username, password and permissions, then try again.');
-        else await verify();
-      } finally {request.username='';request.password='';clearInputs();}
+        else {
+          progress.textContent='Checking access to the requested page…';
+          const result=await api(path+'/login-inspection',{method:'POST',body:{token:offer.token,consent:true}});
+          if(!active())return;
+          finished=true;
+          if(result.started)await inspected(result.source,'Sign-in succeeded. Inspection has started.');
+          else await render(await api(cp),result.state==='cancelled'?'Inspection was cancelled.':'Inspection did not start; another request may already be active. Return to source review to check it.');
+        }
+      } catch(e) {
+        if(active())await render(await api(cp),'Sign-in or inspection could not finish. '+e.message);
+      } finally {clearInterval(watch);request.username='';request.password='';clearInputs();cancel.remove();progress.remove();}
     });}},
       h('label',null,'Username',username),h('label',null,'Password',password),
-      h('button',{type:'submit',class:'primary'},'Sign in and check page'));
+      h('button',{type:'submit',class:'primary'},'Sign in and inspect'));
     mount(root,title('Sign in to '+new URL(source.url).hostname),
-      note('This page requires HTTP Basic authentication. Enter your site account username and password here.'),
-      notice?h('p',{role:'alert'},notice):null,form,
-      note('By signing in, you allow a separate local connection to this HTTPS page. Credentials stay in memory for this exact page until the connection closes; they are not saved or sent to the Assistant.'),details(state));
+      note('Enter your site account. Successful sign-in starts one inspection automatically.'),
+      notice?h('p',{role:'alert'},notice):null,
+      note(`Send this page’s text to ${offer.setup||offer.provider} (${offer.endpoint}), model ${offer.model}. ${offer.usage_note||'This uses your API or Codex quota.'}`),
+      note('Text may include private course information. Sign in and inspect approves sending and saving it without a second review.'),form,
+      note('Credentials stay in memory for this exact HTTPS page until you close the connection; they are not saved or sent to the Assistant.'),
+      h('details',{class:'site-login-details'},h('summary',null,'Inspection scope and storage'),
+        note(`Only ${offer.urls.join(', ')} is inspected. Linked pages are not opened. Filtered text and classification are saved locally and included in backups. Filtering cannot identify every secret.`)),details(state));
   }
   async function render(state,notice=null) {
     if(!current())return;
@@ -130,13 +173,29 @@ export async function showSiteLogin(env) {
       const secure=new URL(source.url);secure.protocol='https:';
       mount(root,title('Use a secure page to sign in'),note('Sign-in requires HTTPS. Review this separate address before continuing; its availability has not been verified.'),
         h('a',{href:secure.href,target:'_blank',rel:'noopener noreferrer'},secure.href),
-        button('Use HTTPS version',async()=>{const next=await api(path+'/https-source',{method:'POST',body:{consent:true}});if(current()){changed();await reopen(next);}},true));return;
+        button('Use HTTPS version',async()=>{
+          const next=await api(path+'/https-source',{method:'POST',body:{consent:true}});
+          if(!current())return;
+          const nextPath=path.replace(/external-sources\/\d+$/,`external-sources/${next.id}`);
+          mount(root,title('Checking the HTTPS page'),h('p',{role:'status'},'Checking whether this separate address requires sign-in…'));
+          let check=await api(nextPath+'/login-check',{method:'POST',body:{}});
+          for(let i=0;check.state==='running'&&i<45&&current();i++) {
+            await new Promise(resolve=>setTimeout(resolve,500));
+            if(current())check=await api(nextPath+'/login-check');
+          }
+          if(current()){changed();await reopen(await api(nextPath));}
+        },true));return;
     }
     const inactive=['not_connected','closed','error'].includes(state.state);
     const basic=state.http_auth?.scheme==='basic'||(inactive&&(state.method==='basic'||source.login_check?.auth_scheme==='basic'));
     if(basic)await basicForm(state,notice);
     else if(inactive) {
       await browserOffer();
+      if(source.login_check?.outcome!=='login_required') {
+        if(!current())return;
+        root.querySelector('h3').textContent='Sign-in requirement is unknown';
+        root.querySelector('h3').after(note('Could not confirm that login is required. Only try this manual sign-in window if you know the site needs it.'));
+      }
       if(current()&&(notice||state.failure_reason))root.prepend(h('p',{role:'alert'},notice||'The sign-in window could not open or has closed. Check your browser installation and try again.'));
       return;
     } else {

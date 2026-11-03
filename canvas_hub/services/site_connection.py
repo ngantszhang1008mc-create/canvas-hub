@@ -471,6 +471,17 @@ class BrowserConnection:
                             self._confirmed_digest = self._verified_digest
                             self.update(state='connected')
                             future.set_result({'state':'connected'})
+                        elif action == 'authorized_snapshot':
+                            if (getattr(self, '_login_method', None) != 'basic'
+                                    or self.target not in self._basic_auth):
+                                raise Conflict('Sign in to the exact Basic-authentication page first')
+                            result = self._verify(page)
+                            if result.get('state') != 'content_visible':
+                                raise Conflict('Sign-in did not make the requested page readable; inspection has not started')
+                            self._review_token = None
+                            self._confirmed_digest = self._verified_digest
+                            self.update(state='connected')
+                            future.set_result({'content':result['content']})
                         elif action == 'analysis_snapshot':
                             expected = self._confirmed_digest
                             if not expected or self.snapshot()['state'] != 'connected':
@@ -700,6 +711,7 @@ class SiteConnections:
             session = self.browser_factory(profile, offer['target'], offer['domains'], **options)
             session._owner_hash = offer['owner']
             session._login_method = offer['method']
+            session._connection_id = secrets.token_urlsafe(24)
             self.sessions[key] = session
             return session.snapshot()
 
@@ -725,11 +737,11 @@ class SiteConnections:
         session = self._session(aid, sid)
         if session is None or session.snapshot()['state'] in ('closed', 'error'):
             raise Conflict('Open the site connection first')
-        if action not in ('cancel', 'verify', 'http_auth', 'approve_post', 'retry_login', 'confirm_content', 'analysis_snapshot'):
+        if action not in ('cancel', 'verify', 'http_auth', 'approve_post', 'retry_login', 'confirm_content', 'analysis_snapshot', 'authorized_snapshot'):
             raise InvalidInput('Unknown connection action')
         result = session.call(action, arg)
-        if action == 'analysis_snapshot':
-            return {**result, 'url':session.target, 'owner':session._owner_hash}
+        if action in ('analysis_snapshot', 'authorized_snapshot'):
+            return {**result, 'url':session.target, 'owner':session._owner_hash, 'connection_id':session._connection_id}
         return result
 
     def close(self):

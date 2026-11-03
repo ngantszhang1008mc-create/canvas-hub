@@ -22,6 +22,7 @@ export function makeExternalSources(env) {
     const route = location.hash;
     const target = panelShell(main);
     let disclosure;
+    let inspectionNotice;
     let generation = 0;
     const version = {}; versions.set(target,version);
     const alive = () => target.isConnected && !target.hidden && versions.get(target)===version && location.hash===route && A(`/external-sources/${source.id}`)===aidPath;
@@ -59,10 +60,11 @@ export function makeExternalSources(env) {
         const box=h('section',{class:'site-login','aria-label':'Site connection'});
         content.append(box,h('button',{class:'site-login-back',onclick:()=>show(main,source)},'Back to source review'));
         await showSiteLogin({h,mount,api,root:box,path:aidPath,source,current,
-          analyse:token=>action('/analyze-connected',{token,consent:true}),reopen:next=>show(main,next,'login')});
+          analyse:token=>action('/analyze-connected',{token,consent:true}),reopen:next=>show(main,next,'login'),
+          inspected:async(next,notice)=>{if(!current())return;source=next;inspectionNotice=notice;mode='review';disclosure=null;await draw();window.dispatchEvent(new Event('external-sources-updated'));}});
         return;
       }
-      content.append(status,
+      content.append(inspectionNotice?h('p',{role:'status'},inspectionNotice):null,status,
         c ? h('div',null,note(`${c.roles.join(' · ')} · ${Math.round(c.confidence*100)}% confidence`),h('p',null,c.summary||'')) : null);
       if (source.analysis_running || (req && ['open','claimed'].includes(req.status))) {
         content.append(note(!req ? 'Finishing the previous attempt.' : req.claimed_by==='Canvas Hub built-in Assistant' ? `Request #${req.id} · Assistant is reading and analysing. Cancel discards the result; a model request already sent may still use API quota.` : `Request #${req.id} · ${req.status}. Connect an MCP Agent with --allow-fulfil and ask it to claim this request and submit_source_analysis.`),
@@ -226,10 +228,9 @@ export function makeExternalSources(env) {
     list.append(h('summary',{class:'external-source-heading'},h('span',null,'External sources'),all),batchArea);
     for(const source of result.sources) {
       const failed=source.request?.status==='declined';
-      const needsLogin=failed&&source.login_check?.outcome==='login_required';
+      const needsLogin=source.login_check?.outcome==='login_required'&&!source.analysis_running;
       const connected=source.connection_state==='connected';
-      const recovery=failed?(source.login_check?.state==='running'?'Checking sign-in requirement…':needsLogin?
-        (connected?'Course page confirmed — ready for analysis':'Needs login'):source.login_check?.outcome==='readable'?
+      const recovery=needsLogin?(connected?'Course page readable — ready for analysis':'Needs login'):failed?(source.login_check?.state==='running'?'Checking sign-in requirement…':source.login_check?.outcome==='readable'?
         'Analysis failed · public page is readable':'Analysis failed · could not determine login requirement'):null;
       list.append(h('div',{class:'external-source-row'},h('div',{class:'external-source-info'},h('a',{href:source.url,target:'_blank',rel:'noopener noreferrer'},source.title),
         h('p',{class:'small muted',role:failed?'status':null},recovery||`${source.status.replaceAll('_',' ')}${source.classification?' · '+source.classification.roles.join(', '):''}${source.last_success_at?' · read '+source.last_success_at:''}`)),

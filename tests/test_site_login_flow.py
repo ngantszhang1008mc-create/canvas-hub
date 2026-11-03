@@ -11,7 +11,7 @@ pytestmark = pytest.mark.browser
 
 
 @pytest.mark.parametrize('width', [1280, 380])
-def test_batch_failure_to_basic_form_then_reviewed_analysis(hub, account, source, monkeypatch, tmp_path, width):
+def test_batch_failure_to_basic_signin_then_automatic_inspection(hub, account, source, monkeypatch, tmp_path, width):
     from playwright.sync_api import expect, sync_playwright
     from canvas_hub.assistant.providers import Turn
     from canvas_hub.services.external_reader import PublicReader, Read
@@ -21,7 +21,7 @@ def test_batch_failure_to_basic_form_then_reviewed_analysis(hub, account, source
     sources, sid, _ = source
     target = sources.get(account['id'], sid)['url']
     public = sources.register(account['id'], 'https://public.example.edu/course', course_id='4242', title='Public course page')
-    probes, models, connections, sent = [], [], [], []
+    probes, models, connections, sessions, sent = [], [], [], [], []
     sources.reader = PublicReader(lambda u: Read(u, 401 if u == target else 200, 'text/html', b'' if u == target else HTML, auth_challenge=u == target))
     monkeypatch.setattr('canvas_hub.services.login_detection.inspect', lambda u: probes.append(u) or {
         'outcome':'login_required','auth_scheme':'basic','evidence':['http_authentication_challenge'],'course_access':'unknown'})
@@ -39,7 +39,9 @@ def test_batch_failure_to_basic_form_then_reviewed_analysis(hub, account, source
         return 401, {'www-authenticate':'Basic realm="fixture"','content-type':'text/html'}, [], b'Authentication failed'
     def connect(profile, url, domains, **options):
         connections.append(options)
-        return BrowserConnection(profile, url, domains, transport, **options)
+        session=BrowserConnection(profile, url, domains, transport, **options)
+        sessions.append(session)
+        return session
     monkeypatch.setattr('canvas_hub.services.site_connection.BrowserConnection', connect)
     with serve(hub, []) as (base, token, _), sync_playwright() as pw:
         browser=pw.chromium.launch(); page=browser.new_page(viewport={'width':width,'height':940})
@@ -64,7 +66,8 @@ def test_batch_failure_to_basic_form_then_reviewed_analysis(hub, account, source
             panel=page.get_by_role('complementary',name='Source Agent',exact=True)
             box=panel.get_by_role('region',name='Site connection')
             expect(box.get_by_label('Site username')).to_be_focused()
-            expect(box.get_by_role('button',name='Sign in and check page')).to_be_visible()
+            expect(box.get_by_role('button',name='Sign in and inspect')).to_be_visible()
+            expect(box).to_contain_text('without a second review')
             expect(box.get_by_role('button',name='Refresh connection status')).not_to_be_visible()
             expect(box.get_by_role('button',name='Agree and open sign-in window')).to_have_count(0)
             assert not connections and not sent
@@ -87,25 +90,29 @@ def test_batch_failure_to_basic_form_then_reviewed_analysis(hub, account, source
             page.wait_for_timeout(1100)  # Unchanged status must not wipe the form.
             expect(box.get_by_label('Site password')).to_have_value('fixture-password')
             box.get_by_label('Site password').press('Enter')
-            expect(box.get_by_role('button',name='Confirm this is the requested course page')).to_be_visible(timeout=10000)
+            expect(panel).to_contain_text('Sign-in succeeded. Inspection has started.',timeout=10000)
             assert connections==[{'headless':True}]
             assert all(url==target and method=='GET' for url,method,_ in sent)
             assert 'fixture-password' not in page.content()
             assert 'fixture-password' not in page.evaluate('JSON.stringify(localStorage)')
-            assert len(models)==1
-            box.get_by_role('button',name='Confirm this is the requested course page').click()
-            expect(row.get_by_role('button',name='Continue analysis',exact=True)).to_be_visible()
-            box.get_by_role('button',name='Review connected source analysis').click()
-            expect(box).to_contain_text('Exact text to send and save')
-            page.wait_for_timeout(1100)
-            assert len(models)==1 and 'fixture-password' not in box.inner_text()
-            box.get_by_role('button',name='Approve, analyse and save').click()
             expect(panel).to_contain_text('Stored observations',timeout=10000)
+            page.screenshot(path=str(tmp_path/f'inspection-started-{width}.png'),full_page=True)
             assert len(models)==2 and 'fixture-password' not in json.dumps(models)
-            assert sources.get(account['id'],sid)['classification']['access_mode']=='connected_local_reviewed'
+            assert sources.get(account['id'],sid)['classification']['access_mode']=='connected_local_authorized'
+            assert 'fixture-password' not in json.dumps(sources.get(account['id'],sid))
             expect(row.get_by_role('button',name='Needs login',exact=True)).to_have_count(0)
             assert not errors
-        finally: browser.close()
+        finally:
+            browser.close()
+            # serve() asks its daemon server to stop asynchronously. Finish the
+            # synthetic site browser now, before pytest closes the fixture DB
+            # or exits with a Playwright/greenlet thread still alive.
+            for session in sessions:
+                if session.snapshot()['state'] not in ('closed','error'):
+                    session.call('cancel')
+                session.thread.join(timeout=5)
+                assert not session.thread.is_alive()
+                assert not session._basic_auth and not session._credential_redactions
 
 
 def test_leaving_basic_step_while_opening_never_submits_credentials(hub, account, source, monkeypatch):
@@ -139,7 +146,7 @@ def test_leaving_basic_step_while_opening_never_submits_credentials(hub, account
             box=panel.get_by_role('region',name='Site connection')
             box.get_by_label('Site username').fill('fixture-user')
             box.get_by_label('Site password').fill('fixture-password')
-            box.get_by_role('button',name='Sign in and check page').click()
+            box.get_by_role('button',name='Sign in and inspect').click()
             assert entered.wait(2)
             panel.get_by_role('button',name='Close source Agent').click()
             released.set();page.wait_for_timeout(650)
@@ -147,3 +154,49 @@ def test_leaving_basic_step_while_opening_never_submits_credentials(hub, account
             expect(panel).not_to_be_visible()
             assert page.locator('input[type=password]').evaluate_all('(inputs)=>inputs.every(x=>!x.value)')
         finally: released.set();browser.close()
+
+
+def test_http_upgrade_rechecks_basic_and_generic_denial_stays_unknown(hub, account, source, monkeypatch):
+    from playwright.sync_api import expect, sync_playwright
+    svc, _, _ = source
+    aid = account['id']
+    http = svc.register(aid, 'http://course.example.edu/comp1023/', course_id='4242', title='Legacy course website')
+    denied = svc.register(aid, 'https://other.example.edu/course', course_id='4242', title='Unknown access')
+    probes=[]
+    for sid in (http, denied):
+        rid = svc.analyze(aid, sid)['analysis_request_id']
+        hub.requests._set(rid, status='declined')
+    def detect(url):
+        probes.append(url)
+        return {'outcome':'access_denied','course_access':'unknown'} if 'other.example.edu' in url else {
+            'outcome':'login_required','auth_scheme':'basic','evidence':['http_authentication_challenge'],'course_access':'unknown'}
+    monkeypatch.setattr('canvas_hub.services.login_detection.inspect', detect)
+    monkeypatch.setattr('canvas_hub.services.source_analysis.make_provider', lambda *args:pytest.fail('No provider before consent'))
+    monkeypatch.setattr('canvas_hub.services.site_connection.BrowserConnection', lambda *args,**kw:pytest.fail('No connection before sign-in'))
+    with serve(hub, []) as (base,token,_), sync_playwright() as pw:
+        browser=pw.chromium.launch();page=browser.new_page(viewport={'width':380,'height':900})
+        try:
+            page.goto(f'{base}/?token={token}');page.goto(f'{base}/#/course/4242')
+            listing=page.locator('.external-source-list')
+            row=listing.locator('.external-source-row').filter(has=page.get_by_role('link',name='Legacy course website',exact=True))
+            row.get_by_role('button',name='Needs login',exact=True).click()
+            panel=page.get_by_role('complementary',name='Source Agent',exact=True)
+            box=panel.get_by_role('region',name='Site connection')
+            expect(box).to_contain_text('Use a secure page to sign in')
+            box.get_by_role('button',name='Use HTTPS version',exact=True).click()
+            expect(box.get_by_label('Site username')).to_be_visible(timeout=10000)
+            expect(box.get_by_role('button',name='Sign in and inspect')).to_be_visible()
+            assert 'https://course.example.edu/comp1023/' in probes
+            assert svc.get(aid,http)['url']=='http://course.example.edu/comp1023/'
+            assert not svc.get(aid,http)['reads']
+            panel.get_by_role('button',name='Close source Agent').click()
+            row=listing.locator('.external-source-row').filter(has=page.get_by_role('link',name='Unknown access',exact=True))
+            expect(row).to_contain_text('could not determine login requirement')
+            expect(row.get_by_role('button',name='Needs login',exact=True)).to_have_count(0)
+            row.get_by_role('button',name='Review failure',exact=True).click()
+            panel.get_by_text('More options and diagnostics',exact=True).click()
+            panel.get_by_role('button',name='Connect manually',exact=True).click()
+            expect(box).to_contain_text('Sign-in requirement is unknown')
+            expect(box.get_by_label('Site password')).to_have_count(0)
+            assert page.evaluate('document.documentElement.scrollWidth <= innerWidth + 1')
+        finally: browser.close()

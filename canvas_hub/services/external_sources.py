@@ -205,6 +205,8 @@ class ExternalSources:
             raise InvalidInput('Invalid reader failure')
         if _connected and (not _builtin or not _attempt_token):
             raise InvalidInput('Connected snapshots require an active built-in attempt')
+        if _connected not in (False, True, 'authorized'):
+            raise InvalidInput('Unknown connected snapshot authorization')
         if _classification_coverage is not None and not _builtin:
             raise InvalidInput('Classification coverage requires a built-in attempt')
         source = self._submit_analysis(aid, request_id, agent_name, result, _attempt_token=_attempt_token,
@@ -264,7 +266,7 @@ class ExternalSources:
             if _classification_coverage is not None:
                 classification['evidence_coverage'] = _classification_coverage
             if _connected:
-                classification['access_mode'] = 'connected_local_reviewed'
+                classification['access_mode'] = 'connected_local_authorized' if _connected == 'authorized' else 'connected_local_reviewed'
             spec = validate_spec(result['adapter_spec']) if result.get('adapter_spec') else None
             if _connected and spec:
                 raise InvalidInput('Connected snapshots cannot create public adapters')
@@ -276,7 +278,7 @@ class ExternalSources:
             c.execute("UPDATE external_sources SET classification_json=?,status='analyzed',error=NULL WHERE id=?",
                       (canonical_json(classification), sid))
             c.execute('INSERT INTO external_reads(source_id,read_at,status,evidence_json,detail) VALUES (?,?,?,?,?)',
-                      (sid, result['read_at'], 'connected_read' if _connected else 'agent_read', canonical_json([{'url':evidence, 'content':result['content'], 'provided_by':agent, **({'classification_coverage':_classification_coverage} if _classification_coverage is not None else {}), **({'access_mode':'connected_local_reviewed'} if _connected else {})}]), None))
+                      (sid, result['read_at'], 'connected_read' if _connected else 'agent_read', canonical_json([{'url':evidence, 'content':result['content'], 'provided_by':agent, **({'classification_coverage':_classification_coverage} if _classification_coverage is not None else {}), **({'access_mode':classification['access_mode']} if _connected else {})}]), None))
             if _connected:
                 self._publish(aid, s, [{'url':evidence, 'content':result['content'], 'records':[]}], 0, result['read_at'], connected=True)
                 c.execute("UPDATE external_sources SET status='enabled',last_attempt_at=?,last_success_at=?,error=NULL WHERE id=?", (result['read_at'],result['read_at'],sid))
@@ -286,7 +288,8 @@ class ExternalSources:
                           (sid, rev, canonical_json(spec), sha256_text(canonical_json(spec)), now_iso()))
                 # Reanalysis pauses an enabled adapter pending review of the new proposal.
                 c.execute("UPDATE external_sources SET proposed_revision=?,enabled_revision=NULL,status='proposed',decision='undecided' WHERE id=?", (rev,sid))
-            note = ('Reviewed connected-site snapshot and classification saved.' if _connected else
+            note = ('Authorized sign-in inspection and classification saved.' if _connected == 'authorized' else
+                    'Reviewed connected-site snapshot and classification saved.' if _connected else
                     'Source classification saved; adapter requires user review' if spec else 'Source classification saved.')
             self.hub.requests._set(request_id, status='done', result_note=note, completed_at=now_iso())
         return self.get(aid, sid)
