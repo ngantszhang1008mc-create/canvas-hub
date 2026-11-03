@@ -155,17 +155,26 @@ class ContextSources:
                 "coverage": self.coverage(account_id, course_id, item_id), "untrusted_data": True,
                 "complete_read": False}
 
+    def _source_row(self, account_id, source_id, version):
+        row = self.db.one("SELECT s.*,d.item_id,d.resource_id,i.course_canvas_id,i.source_url,i.current_revision,i.presence "
+                          "FROM context_sources s JOIN search_docs d ON d.id=s.search_doc_id JOIN items i ON i.id=d.item_id "
+                          "WHERE d.account_id=? AND s.source_id=?", (account_id, source_id))
+        if not row:
+            raise NotFound("source not found for this account; list current sources", code="source_not_found")
+        if version is not None and version != row["version"]:
+            raise Conflict("Source changed; restart traversal using its current version.", code="source_version_conflict")
+        return row
+
+    def metadata(self, account_id, source_id, *, version=None):
+        """Validate a retained reference without injecting source text or reading coverage."""
+        with self.db.tx():
+            return self._metadata(self._source_row(account_id, source_id, version))
+
     def read(self, account_id, source_id, *, version=None, offset=0, limit=4000):
         # Backfill belongs to the catalog; source IDs come only from that catalog
         # or the chunk search. Unknown/cross-account IDs reveal nothing.
         with self.db.tx():
-            row = self.db.one("SELECT s.*,d.item_id,d.resource_id,i.course_canvas_id,i.source_url,i.current_revision,i.presence "
-                              "FROM context_sources s JOIN search_docs d ON d.id=s.search_doc_id JOIN items i ON i.id=d.item_id "
-                              "WHERE d.account_id=? AND s.source_id=?", (account_id, source_id))
-            if not row:
-                raise NotFound("source not found for this account; list current sources", code="source_not_found")
-            if version is not None and version != row["version"]:
-                raise Conflict("Source changed; restart traversal using its current version.", code="source_version_conflict")
+            row = self._source_row(account_id, source_id, version)
             offset, limit = max(0, int(offset)), max(1, min(8000, int(limit)))
             if offset > row["total_chars"]:
                 raise InvalidInput("offset is past the end of this source")

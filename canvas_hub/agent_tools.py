@@ -676,7 +676,7 @@ def _component_display(ctx, view: dict, verb: str) -> dict:
         head = (f"{verb} checklist #{view['id']} '{view['title']}': {t['done_count']}/{t['count']} done"
                 + (f", {t['done_points']:g}/{t['points']:g} points" if t["points"] else ""))
     result = {"display": {"component": view["kind"], "component_id": view["id"], "view": view},
-            "summary": head + ". The user can change it in place; read it back with get_component.",
+            "summary": head + ". Read current fields with get_component_context; state changes require patch_component_state with its fresh expected_version/state_token.",
             "component_id": view["id"], "pending_approval": bool(view.get("pending_spec"))}
     if view.get("pending_spec"):
         migration = view["pending_spec"].get("migration", {})
@@ -1784,7 +1784,7 @@ TOOLS.extend([
               {"query": {"type": "string"}, "course_id": {"type": "string"}, "item_id": {"type": "integer"}, "source_id": {"type": "string"},
                "offset": {"type": "integer", "minimum": 0}, "limit": {"type": "integer", "minimum": 1, "maximum": 4}},
               ["query"], lambda ctx, a: h_context_sources(ctx, a, "search")),
-    AgentTool("read_context_source", "Read an original extracted-text range by source_id and version. Follow next_offset to traverse the full source; a version conflict requires restarting coverage. No PDF page is invented when extraction lacks page markers.", "read",
+    AgentTool("read_context_source", "Read an original extracted-text range by source_id and version. Use relevant ranges for the question; follow next_offset when complete source coverage is needed. A version conflict requires restarting coverage. Missing image/formula text is a gap to report, never a rule to infer. No PDF page is invented when extraction lacks page markers.", "read",
               {"source_id": {"type": "string"}, "version": {"type": "string"}, "offset": {"type": "integer", "minimum": 0},
                "limit": {"type": "integer", "minimum": 1, "maximum": 8000}}, ["source_id", "version"], lambda ctx, a: h_context_sources(ctx, a, "read")),
 ])

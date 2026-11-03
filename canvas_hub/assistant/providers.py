@@ -43,6 +43,36 @@ class ProviderError(Exception):
         self.retryable = retryable
 
 
+def anthropic_output_tokens(cfg: dict) -> int:
+    """Resolve the actual wire cap without changing explicit output settings.
+
+    This adapter supports output_config.effort, not manual thinking budgets.
+    Effort is soft guidance; max_tokens includes both thinking and answer text:
+    https://platform.claude.com/docs/en/build-with-claude/thinking-steering-and-cost
+    """
+    settings = cfg.get("context") or {}
+    extra = cfg.get("extra_params") or {}
+    if cfg.get("thinking") not in (None, "") or {"thinking", "budget_tokens"} & extra.keys():
+        raise ProviderError("Anthropic thinking/budget_tokens settings are not supported by this adapter. "
+                            "Use the chat's reasoning effort and an explicit output limit instead; "
+                            "configured thinking was not changed and no request was sent.")
+    limits = [extra[k] for k in ("max_tokens", "max_completion_tokens") if k in extra]
+    configured = limits + [v for k, v in settings.items() if k == "response_tokens"]
+    if "_response_tokens" in cfg:
+        configured.append(cfg["_response_tokens"])
+    if any(type(v) is not int or v < 1 for v in configured):
+        raise ProviderError("Anthropic output limits must be positive integers; no request was sent.")
+    if len(limits) == 2 and limits[0] != limits[1]:
+        raise ProviderError("Anthropic max_tokens and max_completion_tokens conflict. "
+                            "Choose one explicit output limit; no request was sent.")
+    # max_completion_tokens is retained as the output-limit alias already
+    # recognized by context policy; only max_tokens is sent to Anthropic.
+    if limits:
+        return limits[0]
+    default = 6000 if settings.get("capacity", 64000) <= 64000 else MAX_TOKENS
+    return cfg.get("_response_tokens", settings.get("response_tokens", default))
+
+
 @dataclass
 class ToolCall:
     id: str
@@ -79,7 +109,7 @@ class AnthropicProvider:
         self.effort = cfg.get("effort") or None
         self.base_url = (cfg.get("base_url") or "").strip() or None
         self.single_attempt = cfg.get("_single_attempt", False)
-        self.response_tokens = cfg.get("_response_tokens", MAX_TOKENS)
+        self.response_tokens = anthropic_output_tokens(cfg)
         # A transport failure can occur after acceptance/billing. Recovery is
         # the existing explicit Retry action, never an invisible SDK replay.
         kw = {"max_retries": 0, "timeout": 120.0 if self.single_attempt else 600.0}
