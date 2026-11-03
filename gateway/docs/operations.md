@@ -136,12 +136,13 @@ HTTP client configuration or an in-memory script that reads the local secret.
 | Method and path | JSON body / purpose |
 | --- | --- |
 | `GET /admin/status` | No body; owner monthly/lifetime totals, pause/breach state, counts, latest 100 audit entries |
-| `POST /admin/invites` | `{"expires_in_seconds":3600}`; optional `user_id` issues a recovery invite for that existing account |
+| `POST /admin/invites` | `{"expires_in_seconds":3600}`; optional `user_id` for recovery, or `relay_key_ref` to prebind a new account in per-user mode; the two options are mutually exclusive |
 | `POST /admin/invites/:id/revoke` | `{}`; invalidate an unused invitation |
 | `POST /admin/users/:id/limits` | `{"daily_microusd":<integer>,"monthly_microusd":<integer>}` |
 | `POST /admin/users/:id/reset` | `{"daily":true,"monthly":false}`; both booleans required, at least one true |
 | `POST /admin/users/:id/revoke` | `{}`; permanently disable the account and revoke its sessions |
-| `POST /admin/users/:id/new-api` | `{"relay_key_ref":"opaque_reference"}`; bind a preconfigured per-user relay key reference, only in `per_user` mode |
+| `GET /admin/users/:id/new-api` | Inspect local identity mode, binding reference and configuration state; no upstream request |
+| `POST /admin/users/:id/new-api` | `{"relay_key_ref":"opaque_reference"}` to bind, or `{"relay_key_ref":null}` to unbind; only in `per_user` mode |
 | `POST /admin/sessions/:id/revoke` | `{}`; revoke one session |
 | `POST /admin/pause` | `{"paused":true}` or `{"paused":false}` |
 
@@ -156,7 +157,8 @@ code/operational recovery.
 New API identity is shared by default through the `NEW_API_RELAY_KEY` secret.
 For individual New API user quotas/reports, set
 `NEW_API_IDENTITY_MODE="per_user"`, keep a `NEW_API_RELAY_KEYS` JSON secret map,
-and bind each Canvas account through the route above. Omit the shared key in
+and prebind a new account through its invitation or bind an existing account
+through the route above. Omit the shared key in
 this mode. Missing or removed references cannot dispatch and never fall back.
 Accounts/tokens are preprovisioned manually; keep both New API account logins
 and relay tokens private to the operator. Canvas balances and invitations are
@@ -213,6 +215,8 @@ These additive migrations preserve existing
 accounts, holds, totals, and request keys; old requests retain their stored
 input/output rates. Keep the existing `v1` Durable Object class migration and
 singleton identity. No new namespace or manual SQL migration is needed.
+An additional nullable `new_api_key_ref` on invitations records preassigned
+bindings. Recovery invitations do not overwrite existing user bindings.
 
 Pause admissions before investigating accounting discrepancies, changing provider
 cost assumptions, or restoring data. A restore to an older ledger can forget

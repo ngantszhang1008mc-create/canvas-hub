@@ -200,7 +200,9 @@ export function newApiRelayKeys(env: Env): Record<string, string> {
   try {
     if (typeof env.NEW_API_RELAY_KEYS !== "string" || env.NEW_API_RELAY_KEYS.length > 524_288) throw new Error();
     const keys: unknown = JSON.parse(env.NEW_API_RELAY_KEYS);
-    if (!record(keys) || Object.keys(keys).length < 1 || Object.keys(keys).length > 1000
+    // An explicit empty map permits operator cleanup and allowance/status reads
+    // after the last credential is removed. It cannot authorize relay dispatch.
+    if (!record(keys) || Object.keys(keys).length > 1000
       || Object.entries(keys).some(([ref, key]) => !/^[A-Za-z0-9_-]{1,64}$/.test(ref) || !validProviderSecret(key))) throw new Error();
     return keys as Record<string, string>;
   } catch { throw new GatewayError(503, "configuration_error"); }

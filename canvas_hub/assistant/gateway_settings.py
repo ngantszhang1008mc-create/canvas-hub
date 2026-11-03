@@ -5,7 +5,7 @@ import time
 
 from ..agent_tools import TOOLS_BY_NAME
 from ..util import InvalidInput, NotFound
-from .gateway import GATEWAY_CONSENT_VERSION, GatewayError, allowance, base_url, enroll, gateway_consent_valid
+from .gateway import GATEWAY_CONSENT_VERSION, GatewayError, _request_id, allowance, base_url, enroll, gateway_consent_valid
 
 GATEWAY_FIELDS = {'gateway_mode', 'gateway_consent', 'gateway_consent_version', 'gateway_token', 'gateway_expires_at',
                   'gateway_session_id', 'gateway_user_id', 'gateway_tools', 'gateway_available_tools', 'gateway_models'}
@@ -73,6 +73,7 @@ class GatewaySettings:
     def _gateway_public(cfg):
         return {'gateway_mode': cfg.get('gateway_mode', 'mock'), 'gateway_consent': gateway_consent_valid(cfg),
                 'gateway_session_saved': bool(cfg.get('gateway_token')),
+                'gateway_user_id': _request_id(cfg.get('gateway_user_id')),
                 'gateway_expires_at': cfg.get('gateway_expires_at'),
                 'gateway_tools': cfg.get('gateway_tools') or [],
                 'gateway_available_tools': cfg.get('gateway_available_tools') or [],
@@ -90,8 +91,16 @@ class GatewaySettings:
     @staticmethod
     def _gateway_catalog(prof, info, *, initial=False):
         available = [name for name in info['tools'] if name in TOOLS_BY_NAME]
+        models = []
+        for model in info['models']:
+            saved = {k: model[k] for k in ('id', 'min_output_tokens', 'max_output_tokens', 'accounting', 'reservation') if k in model}
+            if 'new_api' in model:
+                # The binding can change remotely. Save only the identity mode;
+                # show its status exclusively from a fresh allowance response.
+                saved['new_api'] = {'identity_mode': model['new_api']['identity_mode']}
+            models.append(saved)
         prof.update(gateway_available_tools=available,
-                    gateway_models=[{k: m[k] for k in ('id', 'min_output_tokens', 'max_output_tokens')} for m in info['models']])
+                    gateway_models=models)
         if initial:
             prof['gateway_tools'] = available
 

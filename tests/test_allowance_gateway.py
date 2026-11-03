@@ -9,7 +9,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import pytest
 
 from canvas_hub.assistant import AssistantService
-from canvas_hub.assistant.gateway import AllowanceGatewayProvider, GatewayError, base_url
+from canvas_hub.assistant.gateway import AllowanceGatewayProvider, GatewayError, allowance, base_url
 from canvas_hub.assistant.providers import Stopped
 from canvas_hub.boundary import HubAPI
 from canvas_hub.util import InvalidInput
@@ -490,3 +490,57 @@ def test_legacy_production_consent_requires_renewal_without_losing_session(hub, 
     monkeypatch.setattr('canvas_hub.assistant.gateway.base_url', lambda *_: gateway.url)
     AllowanceGatewayProvider(renewed).complete('Synthetic', [{'role': 'user', 'sent_text': 'Hello'}], [])
     assert gateway.requests[-1]['headers']['X-Gateway-Consent-Version'] == '2'
+
+
+def new_api_allowance(gateway, user_id, *, status='bound'):
+    data = gateway.allowance()
+    data.update(allowance_source='canvas_gateway', user_id=user_id)
+    data['models'][0].update(accounting='full_reservation',
+                             reservation={'min_microusd': '600', 'max_microusd': '900'},
+                             new_api={'identity_mode': 'per_user', 'binding_status': status})
+    return data
+
+
+def test_new_api_allowance_metadata_is_sanitized_and_bound_to_saved_account(hub, gateway, monkeypatch):
+    service, pid = setup(HubAPI(hub), gateway)
+    cfg = service._load(pid)
+    data = new_api_allowance(gateway, cfg['gateway_user_id'])
+    data['models'][0]['new_api']['relay_key_ref'] = 'must-not-reach-ui'
+    data['models'][0]['reservation']['operator_note'] = 'must-not-reach-ui'
+    data['models'][0]['private_token'] = 'must-not-reach-ui'
+    monkeypatch.setattr(gateway, 'allowance', lambda: data)
+    checked = service.gateway_check(pid)
+    assert checked['ok'] and checked['allowance']['user_id'] == cfg['gateway_user_id']
+    assert checked['allowance']['allowance_source'] == 'canvas_gateway'
+    assert 'must-not-reach-ui' not in json.dumps(checked)
+    saved = service._load(pid)['gateway_models'][0]
+    assert saved['reservation'] == {'min_microusd': '600', 'max_microusd': '900'}
+    assert saved['new_api'] == {'identity_mode': 'per_user'} and saved['accounting'] == 'full_reservation'
+    public = service._gateway_public(service._load(pid))
+    assert public['gateway_user_id'] == cfg['gateway_user_id'] and 'gateway_session_id' not in public
+    data['user_id'] = str(uuid.uuid4())
+    with pytest.raises(GatewayError, match='account does not match'):
+        allowance(cfg)
+    data['user_id'] = cfg['gateway_user_id']
+    data['models'][0]['reservation']['min_microusd'] = '1000'
+    with pytest.raises(GatewayError, match='reservation bounds'):
+        allowance(cfg)
+    data['models'][0]['reservation']['min_microusd'] = '600'
+    data['models'][0]['new_api']['binding_status'] = 'healthy'
+    with pytest.raises(GatewayError, match='configuration metadata'):
+        allowance(cfg)
+    assert not gateway.requests
+
+
+def test_new_api_unlinked_or_missing_credential_stops_before_generation(hub, gateway, monkeypatch):
+    service, pid = setup(HubAPI(hub), gateway)
+    cfg = service._load(pid)
+    data = new_api_allowance(gateway, cfg['gateway_user_id'])
+    monkeypatch.setattr(gateway, 'allowance', lambda: data)
+    for status in ('unbound', 'credential_missing'):
+        data['models'][0]['new_api']['binding_status'] = status
+        with pytest.raises(GatewayError, match='Contact your gateway operator'):
+            AllowanceGatewayProvider(cfg)
+    data['models'][0]['new_api'] = {'identity_mode': 'shared', 'binding_status': 'shared'}
+    assert AllowanceGatewayProvider(cfg).model['new_api']['identity_mode'] == 'shared'
+    assert not gateway.requests and not list((hub.paths.runtime / 'gateway-attempts').glob('*.json'))

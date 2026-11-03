@@ -43,6 +43,21 @@ and administrative limits use bounded integer JSON numbers.
 `accounting:"full_reservation"`). This is a display snapshot; only a
 successful server reservation authorizes another call.
 
+Updated servers identify the single allowance ledger with
+`allowance_source:"canvas_gateway"` and include the session owner's `user_id`.
+The client validates this UUID against the account saved at enrollment. Older
+servers may omit these additive metadata fields.
+
+New API model metadata also includes
+`new_api:{identity_mode:"shared"|"per_user",binding_status:"shared"|"bound"|"unbound"|"credential_missing"}`
+and `reservation:{min_microusd:"...",max_microusd:"..."}` at the model's advertised
+minimum/maximum output token caps. A bound/shared state describes local
+configuration only; it does not certify upstream availability or remaining New
+API quota. No key reference, credential or New API account ID is returned.
+Missing bindings/credentials block the local client's next model submission;
+the gateway independently enforces the same boundary. Display binding status
+from a current allowance response, never as live status from a cached catalog.
+
 The same response advertises the versioned wire limits:
 
 ```json

@@ -14,6 +14,23 @@ channels and its own users/tokens. The Canvas ledger remains the source for the
 allowance shown in Canvas Hub. New API balances, currency units and usage reports
 are not copied into that ledger.
 
+## Which interface controls what
+
+The **Canvas gateway ledger is the sole authority for Canvas allowance**. Its
+daily/monthly balances, held amounts and owner ceilings are what the app uses
+to admit requests. A positive Canvas balance does not prove that New API has
+quota, an enabled channel or a usable upstream account.
+
+| Interface | Controls | Does not change |
+| --- | --- | --- |
+| New API operator console | DeepSeek channels/keys, New API accounts and relay-token restrictions, its own quota and usage reports | Canvas invitations, sessions, daily/monthly grants, global ceilings or held amounts |
+| Canvas gateway admin API | Invitations, per-user relay references, Canvas limits/resets, revocation and pause | New API accounts, upstream balances or provider invoices |
+| Canvas Hub Assistant settings | Invitation redemption, own account ID, current binding configuration, Canvas allowance and model reservation amounts | Administrative credentials, relay keys or either system's funding policy |
+
+The New API console is not embedded in Canvas Hub. Adjusting a quota there does
+not grant Canvas allowance, and resetting Canvas allowance does not top up New
+API. There is no automatic account or two-way balance synchronization.
+
 This implementation has been exercised with synthetic credentials and mocked
 upstream responses only. No New API service, account, channel, real key, funded
 invitation or public deployment was created by this change.
@@ -109,14 +126,25 @@ For per-user operation:
    each intended Canvas identity. Keep both its login credentials and its relay
    token under operator control. Use distinct accounts/tokens when individual
    New API quotas, revocations and reports are required.
-2. Add each token to `NEW_API_RELAY_KEYS` under its opaque reference. After the
-   Canvas invitation is redeemed, obtain the resulting Canvas `user_id` from
-   the operator's enrollment/recovery process.
-3. Authenticate to the Canvas gateway with its `ADMIN_SECRET` and call
+2. Add each token to `NEW_API_RELAY_KEYS` under its opaque reference. Authenticate
+   to the Canvas gateway with `ADMIN_SECRET`, then create a new-account invite
+   with `POST /admin/invites` and
+   `{"expires_in_seconds":3600,"relay_key_ref":"canvas_user_a"}`. The reference
+   is stored server-side. Redemption creates the Canvas user and assigns the
+   reference in the same transaction; the client receives only its Canvas
+   session and account ID. A credential removed after invite creation leaves
+   that user with a missing-credential state and cannot cause a relay dispatch.
+3. For an existing Canvas account, obtain its own `user_id` from Assistant
+   settings or the admin audit. Authenticate with `ADMIN_SECRET` and call
    `POST /admin/users/:user_id/new-api` with
    `{"relay_key_ref":"canvas_user_a"}`. This records only the reference and an
    audit entry, and returns `{"ok":true}`. It accepts neither token values nor
    a client-provided New API user ID.
+   `GET` on the same path reports the reference and its current local
+   configuration state to the administrator. `POST` with
+   `{"relay_key_ref":null}` removes the binding. Recovery invitations accept
+   `user_id` but reject `relay_key_ref`; recovery preserves the latest binding,
+   including any later explicit rebind or removal.
 4. Continue using Canvas's existing limit and invitation controls. New API's
    user/token disable and quota checks additionally apply when the bound token
    reaches the relay. A New API rejection occurs after gateway dispatch and
@@ -127,6 +155,19 @@ An unbound account, or a reference whose key has been removed, cannot dispatch a
 New API call. There is no fallback to a shared key. Binding changes affect future
 dispatch; work already sent may still incur cost. Revoke the gateway session/user
 or pause admissions when immediate prevention of new local admissions is needed.
+An explicitly empty per-user secret map (`{}`) keeps administrative inspection
+and allowance reads available while all per-user relay dispatch is unavailable.
+Missing or malformed secret bindings still fail configuration validation.
+
+Allowance metadata identifies its source as `canvas_gateway`. For New API models,
+it includes the shared/per-user identity mode, a configuration-only binding state,
+and reservation amounts at the model's minimum and maximum output caps. No relay
+reference, token or New API account identifier is returned to the app. These
+reads make no New API or DeepSeek request. A configured binding has not been
+tested for live account status or quota; a separate upstream rejection can still
+retain a conservative hold after dispatch. The app refreshes these states when
+checking allowance and before generation; saved catalog data is not a live
+binding check.
 
 No New API management credential is used by the runtime or sent to the client.
 No user provisioning, login, balance conversion, quota synchronization or SSO is

@@ -158,6 +158,12 @@ def allowance(cfg):
     caps = data.get('capabilities') or {}
     if data.get('mode') != cfg.get('gateway_mode'):
         raise GatewayError('Gateway mode differs from this setup. No model request was sent.')
+    if data.get('allowance_source', 'canvas_gateway') != 'canvas_gateway':
+        raise GatewayError('Gateway allowance source is unsupported.')
+    user_id = _request_id(data.get('user_id')) if 'user_id' in data else _request_id(cfg.get('gateway_user_id'))
+    if ('user_id' in data and not user_id) or (user_id and cfg.get('gateway_user_id')
+            and user_id != _request_id(cfg['gateway_user_id'])):
+        raise GatewayError('Gateway allowance account does not match this saved session.')
     limits = {'max_tools': 128, 'max_tool_calls_per_response': 32, 'max_messages': 128, 'max_body_bytes': 1048576}
     if (not isinstance(caps, dict) or caps.get('protocol_version') != 1 or caps.get('mode_header') != 'X-Gateway-Mode'
             or any(type(caps.get(k)) is not int or not 1 <= caps[k] <= maximum for k, maximum in limits.items())):
@@ -168,7 +174,7 @@ def allowance(cfg):
             or any(not isinstance(n, str) or not NAME.fullmatch(n) for n in tools) or len(set(tools)) != len(tools)
             or not isinstance(models, list) or not 1 <= len(models) <= 128):
         raise GatewayError('Gateway capabilities are invalid.')
-    seen = set()
+    seen, clean_models = set(), []
     for model in models:
         if (not isinstance(model, dict) or not isinstance(model.get('id'), str) or not MODEL.fullmatch(model['id'])
                 or model['id'] in seen or type(model.get('min_output_tokens')) is not int
@@ -176,6 +182,27 @@ def allowance(cfg):
                 or not 1 <= model['min_output_tokens'] <= model['max_output_tokens'] <= 128000):
             raise GatewayError('Gateway model capabilities are invalid.')
         seen.add(model['id'])
+        clean = {k: model[k] for k in ('id', 'min_output_tokens', 'max_output_tokens')}
+        if 'accounting' in model:
+            if model['accounting'] not in ('authoritative_usage', 'full_reservation'):
+                raise GatewayError('Gateway model accounting is unsupported.')
+            clean['accounting'] = model['accounting']
+        if 'reservation' in model:
+            reservation = model['reservation']
+            if (not isinstance(reservation, dict) or any(not isinstance(reservation.get(k), str)
+                    or not re.fullmatch(r'\d{1,24}', reservation[k]) for k in ('min_microusd', 'max_microusd'))
+                    or int(reservation['min_microusd']) > int(reservation['max_microusd'])):
+                raise GatewayError('Gateway model reservation bounds are invalid.')
+            clean['reservation'] = {k: reservation[k] for k in ('min_microusd', 'max_microusd')}
+        if 'new_api' in model:
+            relay = model['new_api']
+            states = {'shared': ('shared', 'credential_missing'), 'per_user': ('bound', 'unbound', 'credential_missing')}
+            if (not isinstance(relay, dict) or not isinstance(relay.get('identity_mode'), str)
+                    or relay['identity_mode'] not in states or relay.get('binding_status') not in states[relay['identity_mode']]
+                    or model.get('accounting') != 'full_reservation'):
+                raise GatewayError('Gateway relay configuration metadata is invalid.')
+            clean['new_api'] = {k: relay[k] for k in ('identity_mode', 'binding_status')}
+        clean_models.append(clean)
     windows = {}
     for kind in ('daily', 'monthly'):
         window = data.get(kind) or {}
@@ -183,7 +210,9 @@ def allowance(cfg):
                for k in ('limit_microusd', 'spent_microusd', 'held_microusd', 'remaining_microusd')) or type(window.get('resets_at')) is not int):
             raise GatewayError('Gateway allowance metadata is invalid.')
         windows[kind] = {k: window[k] for k in ('limit_microusd', 'spent_microusd', 'held_microusd', 'remaining_microusd', 'resets_at')}
-    return {**windows, 'mode': data['mode'], 'tools': tools, 'models': models, 'capabilities': caps,
+    return {**windows, 'mode': data['mode'], 'tools': tools, 'models': clean_models,
+            'capabilities': {k: caps[k] for k in ('protocol_version', 'mode_header', *limits)},
+            'allowance_source': 'canvas_gateway', **({'user_id': user_id} if user_id else {}),
             'gateway_paused': data.get('gateway_paused') is True, 'reset_timezone': 'UTC'}
 
 
@@ -203,6 +232,10 @@ def prepare_config(cfg):
     model = next((m for m in info['models'] if m['id'] == cfg.get('model')), None)
     if not model:
         raise GatewayError('Choose an advertised gateway model alias in Assistant settings.')
+    relay_status = model.get('new_api', {}).get('binding_status')
+    if relay_status in ('unbound', 'credential_missing'):
+        raise GatewayError('This model needs an operator-configured New API account link or relay credential. '
+                           'Contact your gateway operator with your Canvas gateway account ID; no model request was sent.')
     chosen = cfg.get('gateway_tools') or []
     if not isinstance(chosen, list) or any(n not in info['tools'] for n in chosen):
         raise GatewayError('Gateway tool policy changed. Check allowance and review the available tools before retrying.')

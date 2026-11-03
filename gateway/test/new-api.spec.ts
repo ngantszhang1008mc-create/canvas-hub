@@ -59,6 +59,22 @@ async function relayFixture(upstream: typeof fetch, patch: Partial<Policy> = {})
   return { stub, user: await enroll(stub) };
 }
 
+async function perUserFixture() {
+  const aliceKey = "test_only_never_valid_alice_relay_credential_00000000000";
+  const policy = parsePolicy(newApiExample);
+  const perUserEnv: Env = { ...bindings, NEW_API_BASE_URL: BASE_URL, NEW_API_RELAY_KEY: undefined,
+    NEW_API_IDENTITY_MODE: "per_user", NEW_API_RELAY_KEYS: JSON.stringify({ alice: aliceKey }) };
+  const stub = await fixture({ ...policy, user_daily_microusd: 2_000_000, user_monthly_microusd: 4_000_000,
+    global_monthly_microusd: 10_000_000, global_lifetime_microusd: 20_000_000 });
+  await inside(stub, i => { (i as unknown as { env: Env }).env = perUserEnv; });
+  const observed: string[] = [];
+  const upstream = vi.mocked(fetch).mockImplementation(async (_url, init) => {
+    observed.push(new Headers(init?.headers).get("Authorization") ?? "");
+    return sse(streamValues());
+  });
+  return { stub, policy, perUserEnv, aliceKey, observed, upstream };
+}
+
 describe("New API behind the existing allowance ledger, with network blocked", () => {
   it("fails closed for missing server configuration, unreviewed bounds/prices, and client overrides", () => {
     const policy = parsePolicy(newApiExample);
@@ -277,5 +293,75 @@ describe("New API behind the existing allowance ledger, with network blocked", (
     expect((await doc(removed)).error).toBe("provider_unavailable");
     expect((await status(stub)).lifetime.held_microusd).toBe("0");
     expect(upstream).toHaveBeenCalledTimes(2);
+  });
+
+  it("prebinds a new invitation atomically and preserves its binding through account recovery", async () => {
+    const { stub, aliceKey, observed, upstream } = await perUserFixture();
+    expect((await api(stub, "/admin/invites", { expires_in_seconds: 3600, relay_key_ref: "missing" })).status).toBe(400);
+    const invited = await api(stub, "/admin/invites", { expires_in_seconds: 3600, relay_key_ref: "alice" });
+    expect(invited.status).toBe(201);
+    const invitation = await doc(invited);
+    const enrollment = await api(stub, "/v1/enroll", { invite: invitation.invite }, "");
+    expect(enrollment.status).toBe(201);
+    const user = await doc(enrollment);
+    const binding = await doc(await api(stub, `/admin/users/${user.user_id}/new-api`));
+    expect(binding).toEqual({ user_id: user.user_id, identity_mode: "per_user", relay_key_ref: "alice", binding_status: "bound" });
+    expect((await events(await respond(stub, user.token))).at(-1).status).toBe("completed");
+    expect(observed).toEqual([`Bearer ${aliceKey}`]);
+
+    // Recovery only replaces the session. It cannot silently change whose
+    // New API key is charged or mint a fresh Canvas allowance account.
+    expect((await api(stub, "/admin/invites", { expires_in_seconds: 3600,
+      user_id: user.user_id, relay_key_ref: "alice" })).status).toBe(400);
+    const recovered = await enroll(stub, user.user_id);
+    expect(recovered.user_id).toBe(user.user_id);
+    expect((await respond(stub, user.token)).status).toBe(401);
+    expect((await allowance(stub, recovered.token)).daily.spent_microusd).toBe(RESERVE);
+    expect((await doc(await api(stub, `/admin/users/${recovered.user_id}/new-api`))).relay_key_ref).toBe("alice");
+    expect((await events(await respond(stub, recovered.token))).at(-1).status).toBe("completed");
+    expect(observed).toEqual([`Bearer ${aliceKey}`, `Bearer ${aliceKey}`]);
+    expect(upstream).toHaveBeenCalledTimes(2);
+  });
+
+  it("reports sanitized allowance and binding states while missing credentials or unbinding stop dispatch", async () => {
+    const { stub, policy, perUserEnv, aliceKey, upstream } = await perUserFixture();
+    const user = await enroll(stub);
+    const path = `/admin/users/${user.user_id}/new-api`;
+    expect((await api(stub, path, undefined, user.token)).status).toBe(401);
+    expect(await doc(await api(stub, path))).toEqual({ user_id: user.user_id, identity_mode: "per_user", relay_key_ref: null, binding_status: "unbound" });
+    const unbound = await allowance(stub, user.token);
+    expect(unbound).toMatchObject({ user_id: user.user_id, allowance_source: "canvas_gateway", models: [{ id: MODEL,
+      accounting: "full_reservation", reservation: { min_microusd: "314574", max_microusd: "315802" },
+      new_api: { identity_mode: "per_user", binding_status: "unbound" } }] });
+    expect((await api(stub, path, { relay_key_ref: "alice" })).status).toBe(200);
+    expect((await doc(await api(stub, path))).binding_status).toBe("bound");
+    const bound = await allowance(stub, user.token);
+    expect(bound.models[0].new_api).toEqual({ identity_mode: "per_user", binding_status: "bound" });
+    for (const response of [unbound, bound]) {
+      const publicData = JSON.stringify(response);
+      expect(publicData).not.toContain("relay_key_ref");
+      expect(publicData).not.toContain("alice");
+      expect(publicData).not.toContain(aliceKey);
+    }
+
+    // Removing the last relay key is a valid disabled-user state. Metadata
+    // remains readable, but the request cannot fall back to another account.
+    expect(() => assertConfigured(policy, { ...perUserEnv, NEW_API_RELAY_KEYS: "{}" })).not.toThrow();
+    expect(() => assertConfigured(policy, { ...perUserEnv, NEW_API_RELAY_KEYS: undefined })).toThrow("configuration_error");
+    expect(() => assertConfigured(policy, { ...perUserEnv, NEW_API_RELAY_KEYS: "malformed" })).toThrow("configuration_error");
+    await inside(stub, i => { (i as unknown as { env: Env }).env.NEW_API_RELAY_KEYS = "{}"; });
+    const missing = await doc(await api(stub, path));
+    expect(missing).toEqual({ user_id: user.user_id, identity_mode: "per_user", relay_key_ref: "alice", binding_status: "credential_missing" });
+    expect((await allowance(stub, user.token)).models[0].new_api.binding_status).toBe("credential_missing");
+    const denied = await respond(stub, user.token);
+    expect(denied.status).toBe(502);
+    expect((await doc(denied)).error).toBe("provider_unavailable");
+
+    expect((await api(stub, path, { relay_key_ref: null })).status).toBe(200);
+    expect(await doc(await api(stub, path))).toEqual({ user_id: user.user_id, identity_mode: "per_user", relay_key_ref: null, binding_status: "unbound" });
+    expect((await allowance(stub, user.token)).models[0].new_api.binding_status).toBe("unbound");
+    expect((await respond(stub, user.token)).status).toBe(502);
+    expect((await status(stub)).lifetime).toMatchObject({ spent_microusd: "0", held_microusd: "0" });
+    expect(upstream).not.toHaveBeenCalled();
   });
 });

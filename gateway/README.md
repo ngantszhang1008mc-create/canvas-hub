@@ -30,6 +30,9 @@ redemption, allowance display, and the same local tool permissions as other setu
   charges, shared or manually bound per-user relay credentials, and renewed
   client disclosure. New API can manage upstream channels and user/token quotas;
   Canvas retains its own allowance ledger and invitation flow.
+- Prebound new-account invitations, administrative binding inspection/removal,
+  and client display of the Canvas account ID, configuration status and per-round
+  reservation range. Configuration status does not imply live upstream quota.
 - Offline functional tests against the Workers runtime and its SQLite storage.
 
 Allowance defaults are zero and do not establish a monetary entitlement. Mock

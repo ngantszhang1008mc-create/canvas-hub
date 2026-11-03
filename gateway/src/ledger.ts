@@ -11,7 +11,7 @@ export interface UserRow {
   new_api_key_ref: string | null;
 }
 export interface SessionRow { id: string; user_id: string; token_hash: string; expires_at: number; revoked: number }
-interface InviteRow { id: string; token_hash: string; user_id: string | null; expires_at: number; revoked: number; used_at: number | null }
+interface InviteRow { id: string; token_hash: string; user_id: string | null; expires_at: number; revoked: number; used_at: number | null; new_api_key_ref: string | null }
 interface Control { held: string; lifetime_spent: string; paused: number; breached: number }
 export interface RequestRow {
   id: string; user_id: string; key_hash: string; body_hash: string; model: string;
@@ -85,6 +85,8 @@ export class Ledger {
       if (!columns.includes("accounting_mode")) this.exec("ALTER TABLE requests ADD COLUMN accounting_mode TEXT NOT NULL DEFAULT 'authoritative_usage'");
       const userColumns = this.all<{ name: string }>("PRAGMA table_info(users)").map(r => r.name);
       if (!userColumns.includes("new_api_key_ref")) this.exec("ALTER TABLE users ADD COLUMN new_api_key_ref TEXT");
+      const inviteColumns = this.all<{ name: string }>("PRAGMA table_info(invites)").map(r => r.name);
+      if (!inviteColumns.includes("new_api_key_ref")) this.exec("ALTER TABLE invites ADD COLUMN new_api_key_ref TEXT");
     });
   }
 
@@ -110,7 +112,8 @@ export class Ledger {
       scope, bucket, String(this.spent(scope, bucket) + amount));
   }
   private audit(now: number, action: string, target: string | null, values: Record<string, string | number | boolean | null> = {}): void {
-    // Callers supply only fixed action names, random IDs, booleans and amounts.
+    // Callers supply fixed action names, IDs, booleans, amounts and opaque
+    // relay-key references, never credentials or conversation data.
     this.exec("INSERT INTO audit(at,action,target_id,values_json) VALUES (?,?,?,?)", now, action, target, JSON.stringify(values));
   }
 
@@ -143,11 +146,15 @@ export class Ledger {
     return session;
   }
 
-  createInvite(id: string, hash: string, existingUser: string | null, expiresAt: number, now: number): void {
+  createInvite(id: string, hash: string, existingUser: string | null, expiresAt: number, now: number, relayKeyRef: string | null = null): void {
     this.tx(() => {
+      // Recovery changes session credentials only. A binding change requires
+      // the separate explicit administration route.
+      if (existingUser && relayKeyRef !== null) throw new GatewayError(400, "invalid_invite_options");
       if (existingUser && this.user(existingUser).disabled) throw new GatewayError(409, "user_disabled");
-      this.exec("INSERT INTO invites(id,token_hash,user_id,expires_at) VALUES (?,?,?,?)", id, hash, existingUser, expiresAt);
-      this.audit(now, "invite_created", id, { user_id: existingUser, expires_at: expiresAt });
+      this.exec("INSERT INTO invites(id,token_hash,user_id,expires_at,new_api_key_ref) VALUES (?,?,?,?,?)", id, hash, existingUser, expiresAt, relayKeyRef);
+      this.audit(now, "invite_created", id, { user_id: existingUser, expires_at: expiresAt,
+        ...(relayKeyRef !== null ? { relay_key_ref: relayKeyRef } : {}) });
     });
   }
 
@@ -161,7 +168,8 @@ export class Ledger {
       } else {
         const count = this.one<{ count: number }>("SELECT COUNT(*) AS count FROM users")!.count;
         if (count >= policy.max_users) throw new GatewayError(429, "enrollment_full");
-        this.exec("INSERT INTO users(id,created_at,daily_limit,monthly_limit) VALUES (?,?,?,?)", userId, now, policy.user_daily_microusd, policy.user_monthly_microusd);
+        this.exec("INSERT INTO users(id,created_at,daily_limit,monthly_limit,new_api_key_ref) VALUES (?,?,?,?,?)",
+          userId, now, policy.user_daily_microusd, policy.user_monthly_microusd, invite.new_api_key_ref);
       }
       const expiresAt = now + policy.session_ttl_seconds * 1000;
       this.exec("UPDATE invites SET used_at=? WHERE id=?", now, invite.id);
@@ -218,9 +226,9 @@ export class Ledger {
 
   relayKeyRef(userId: string): string | null { return this.user(userId).new_api_key_ref; }
 
-  bindRelayKey(userId: string, reference: string, now: number): void {
+  bindRelayKey(userId: string, reference: string | null, now: number): void {
     this.tx(() => {
-      if (this.user(userId).disabled) throw new GatewayError(409, "user_disabled");
+      if (this.user(userId).disabled && reference !== null) throw new GatewayError(409, "user_disabled");
       this.exec("UPDATE users SET new_api_key_ref=? WHERE id=?", reference, userId);
       this.audit(now, "new_api_binding_changed", userId, { relay_key_ref: reference });
     });
@@ -352,9 +360,10 @@ export class Ledger {
     const monthlyReset = Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 1);
     const window = (limit: number, spent: bigint, resetsAt: number) => ({ limit_microusd: String(limit), spent_microusd: String(spent), held_microusd: String(userHeld), remaining_microusd: String(nonnegative(BigInt(limit) - spent - userHeld)), resets_at: resetsAt });
     const c = this.control();
-    return { user_id: u.id, mode: policy.mode, tools: Object.keys(policy.tools), capabilities: { protocol_version: 1, mode_header: "X-Gateway-Mode", max_tools: MAX_TOOLS, max_tool_calls_per_response: MAX_TOOL_CALLS, max_messages: 128, max_body_bytes: policy.max_body_bytes }, reset_timezone: "UTC", daily: window(u.daily_limit, daySpent, dailyReset), monthly: window(u.monthly_limit, monthSpent, monthlyReset),
+    return { user_id: u.id, allowance_source: "canvas_gateway", mode: policy.mode, tools: Object.keys(policy.tools), capabilities: { protocol_version: 1, mode_header: "X-Gateway-Mode", max_tools: MAX_TOOLS, max_tool_calls_per_response: MAX_TOOL_CALLS, max_messages: 128, max_body_bytes: policy.max_body_bytes }, reset_timezone: "UTC", daily: window(u.daily_limit, daySpent, dailyReset), monthly: window(u.monthly_limit, monthSpent, monthlyReset),
       gateway_paused: Boolean(c.paused || c.breached), models: Object.entries(policy.models).map(([id, m]) => ({ id, min_output_tokens: m.provider === "openai_responses" ? 16 : 1, max_output_tokens: m.max_output_tokens,
-        ...(m.provider === "new_api" ? { accounting: "full_reservation" } : {}) })) };
+        ...(m.provider === "new_api" ? { accounting: "full_reservation",
+          reservation: { min_microusd: String(reservePrice(m, 1)), max_microusd: String(reservePrice(m, m.max_output_tokens)) } } : {}) })) };
   }
 
   status(policy: Policy, now: number) {

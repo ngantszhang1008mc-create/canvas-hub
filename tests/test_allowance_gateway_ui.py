@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from .test_allowance_gateway import gateway, setup, INVITE, SESSION, SUMMARY
+from .test_allowance_gateway import gateway, setup, new_api_allowance, INVITE, SESSION, SUMMARY
 from .test_components_ui import serve
 from .test_external_sources import source
 from .test_source_analysis import RESULT
@@ -56,7 +56,7 @@ def test_gateway_opt_in_context_and_source_flow(hub, account, source, gateway, w
             assert len(gateway.enrollments) == 1 and not gateway.requests
             gateway.tools = ['get_component_context', 'patch_component_state']
             check_allowance()
-            expect(card).to_contain_text('Reported allowance')
+            expect(card).to_contain_text('Canvas gateway allowance')
             card.get_by_text('3 enabled tools · model limits', exact=True).click()
             stale = card.get_by_label('list_components (unavailable; uncheck to remove)', exact=True)
             expect(stale).to_be_checked()
@@ -94,3 +94,38 @@ def test_gateway_opt_in_context_and_source_flow(hub, account, source, gateway, w
             assert not errors, errors
         finally:
             browser.close()
+
+
+def test_gateway_account_and_relay_configuration_display(hub, account, gateway, monkeypatch):
+    from playwright.sync_api import expect, sync_playwright
+    with serve(hub, []) as (base, token, api):
+        service, pid = setup(api, gateway)
+        uid = service._load(pid)['gateway_user_id']
+        metadata = new_api_allowance(gateway, uid)
+        monkeypatch.setattr(gateway, 'allowance', lambda: metadata)
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch()
+            try:
+                page = browser.new_page(viewport={'width': 380, 'height': 1000})
+                page.goto(f'{base}/?token={token}')
+                page.goto(f'{base}/#/assistant/settings?p={pid}')
+                card = page.locator('.card').filter(has=page.get_by_role('heading', name='Offline allowance', exact=True))
+                expect(card).to_contain_text(f'Canvas gateway account ID: {uid}')
+                card.get_by_role('button', name='Check allowance', exact=True).click()
+                expect(card).to_contain_text('Canvas gateway allowance')
+                expect(card).to_contain_text('account link configured')
+                expect(card).to_contain_text('upstream access and quota have not been checked')
+                expect(card).to_contain_text('balance is not synchronized here')
+                card.get_by_text('3 enabled tools · model limits', exact=True).click()
+                expect(card).to_contain_text('maximum output cap (1024 tokens), the full conservative charge is 900 micro-USD')
+                assert SESSION not in page.content() and not gateway.requests
+                assert page.evaluate('document.documentElement.scrollWidth <= innerWidth + 1')
+                page.reload()
+                expect(card).to_contain_text('Check allowance to refresh its configuration')
+                expect(card).not_to_contain_text('account link configured')
+                metadata['models'][0]['new_api']['binding_status'] = 'unbound'
+                card.get_by_role('button', name='Check allowance', exact=True).click()
+                expect(card).to_contain_text('account link pending; contact your gateway operator')
+                assert not gateway.requests
+            finally:
+                browser.close()
