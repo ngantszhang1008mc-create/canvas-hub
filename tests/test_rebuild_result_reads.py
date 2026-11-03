@@ -102,3 +102,43 @@ def test_small_rebuild_receipt_remains_direct_with_visible_identity_and_counts(h
     assert reply['migration']['identity_map']['rows'] == args['identity_map']['rows']
     assert reply['migration']['mapped_counts'] == {'rows': 2, 'groups': 0, 'scenarios': 0}
     assert reply['migration']['unresolved_count'] == 0 and reply['migration']['preserved_fields'] == 2
+
+
+def test_gateway_without_reader_gets_compact_receipt_and_keeps_full_proposal(hub, account, monkeypatch):
+    from canvas_hub.assistant.tool_catalog import ToolSession
+
+    ctx, before, args = setup(hub, account, 200)
+    allowed = {'get_component_context', 'propose_component_rebuild'}
+    session = ToolSession({'read', 'ui'}, allowed_names=allowed, discovery=False)
+    assert set(session.catalog.tools) == allowed and 'read_tool_result' not in session.catalog.tools
+    ctx.read_results = None
+    for row in args['spec']['buckets']:
+        row['max'] = 2
+    real, calls = hub.components.propose_rebuild, []
+
+    def counted(*a, **kw):
+        calls.append(True)
+        return real(*a, **kw)
+
+    monkeypatch.setattr(hub.components, 'propose_rebuild', counted)
+    raw, error, display = run_tool_display(ctx, 'propose_component_rebuild', args, {'read', 'ui'})
+    assert not error, raw
+    reply = json.loads(raw)
+    assert len(raw.encode()) <= READ_BYTES and 'read_id' not in reply and 'truncated' not in raw
+    assert reply['pending_approval'] and reply['component_id'] == before['id']
+    assert reply['proposal_id'] == f"component:{before['id']}:version:{before['version'] + 1}"
+    assert reply['migration'] == {'can_accept': False, 'preserved_fields': 2,
+                                  'mapped_counts': {'rows': 200, 'groups': 0, 'scenarios': 0},
+                                  'unresolved_count': 200}
+    assert 'Never call propose_component_rebuild again' in reply['note']
+    assert 'pending proposal and review display' in reply['note']
+    full = display['view']['pending_spec']['migration']
+    assert len(json.dumps(full)) > 24000
+    assert full['identity_map']['rows'] == args['identity_map']['rows'] and len(full['unresolved']) == 200
+    hub.reopen()
+    stored = hub.components.get(account['id'], before['id'])
+    assert stored['pending_spec']['migration'] == full
+    assert stored['spec'] == before['spec'] and stored['state'] == before['state']
+    assert stored['pinned'] == before['pinned'] and stored['version'] == before['version'] + 1
+    assert len(calls) == 1 and ctx.read_results is None
+    assert set(session.catalog.tools) == allowed

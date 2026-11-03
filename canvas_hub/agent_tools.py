@@ -984,6 +984,16 @@ def h_propose_component_rebuild(ctx, a):
     migration = result["migration"]
     migration["mapped_counts"] = {key: len(value) for key, value in migration["identity_map"].items()}
     migration["unresolved_count"] = len(migration["unresolved"])
+    if ctx.read_results is None:
+        # A reviewed gateway may not permit the snapshot reader. Keep its
+        # receipt small without advertising a new tool or cutting diagnostics.
+        # The complete migration is already stored in pending_spec and display.
+        result["migration"] = {key: migration[key] for key in
+                               ("can_accept", "preserved_fields", "mapped_counts", "unresolved_count")}
+        result["note"] = ("The rebuild proposal was already staged once. Full migration mappings and diagnostics "
+                          "remain in this component's pending proposal and review display. "
+                          "Never call propose_component_rebuild again merely to read diagnostics. "
+                          "Current definition, state and pin remain unchanged until review.")
     return result
 
 
