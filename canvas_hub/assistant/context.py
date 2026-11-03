@@ -2,8 +2,10 @@
 
 Unknown endpoints use application safety budgets, not inferred model capacities.
 Exact documented endpoint/model pairs can supply defaults; explicit setup budgets win.
-The estimator deliberately overcounts ordinary prose and includes native reasoning,
-tool schemas and framing. No exact tokenizer (or paid counting call) is required.
+The estimator includes native reasoning, tool schemas and framing. It retains a
+conservative UTF-8 heuristic when no validated local model tokenizer is available;
+documented message text is counted without its outer JSON transport escaping.
+No network token-count call is made.
 """
 from __future__ import annotations
 
@@ -11,9 +13,10 @@ import hashlib
 import json
 import math
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 from ..util import InvalidInput
-from .providers import AnthropicProvider, OpenAICompatibleProvider, ProviderError
+from .providers import AnthropicProvider, OpenAICompatibleProvider, ProviderError, anthropic_output_tokens
 from .model_capacity import verified_capacity
 
 DOCUMENT_TOOLS = {"read_document", "search_context_sources", "read_context_source"}
@@ -32,12 +35,92 @@ def encoded(value) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True, default=str)
 
 
-def estimate(value) -> int:
-    text = value if isinstance(value, str) else encoded(value)
+def _estimate_units(text: str) -> int:
     # Non-ASCII may tokenize into multiple bytes; treating every UTF-8 byte as
     # one token is conservative for CJK, emoji and unusual encodings.
     ascii_chars = sum(ord(c) < 128 for c in text)
-    return math.ceil(ascii_chars / 3 + len(text.encode("utf-8")) - ascii_chars) + 8
+    return ascii_chars + 3 * (len(text.encode("utf-8")) - ascii_chars)
+
+
+def estimate(value) -> int:
+    text = value if isinstance(value, str) else encoded(value)
+    return (_estimate_units(text) + 2) // 3 + 8
+
+
+def _message_format(cfg):
+    """Recognize documented transport semantics, never infer a model tokenizer."""
+    provider = cfg.get("provider")
+    if provider not in ("anthropic", "openai_compatible"):
+        return None
+    # Without an explicit URL, SDK environment/profile/credential routing may
+    # override the vendor default. Do not inspect secrets or change that route.
+    endpoint = cfg.get("base_url")
+    if (not isinstance(endpoint, str) or not endpoint or any(ord(c) <= 32 or ord(c) == 127 for c in endpoint)
+            or any(c in endpoint for c in ("\\", "?", "#"))):
+        return None
+    try:
+        url = urlsplit(endpoint)
+        hosts = {"api.anthropic.com"} if provider == "anthropic" else {"api.openai.com", "api.deepseek.com"}
+        if (url.scheme != "https" or url.hostname not in hosts or url.port not in (None, 443)
+                or url.username is not None or url.password is not None
+                or url.path not in ("", "/", "/v1", "/v1/")):
+            return None
+    except ValueError:
+        return None
+    return "anthropic" if provider == "anthropic" else "chat_completions"
+
+
+def _message_estimate(messages, message_format):
+    """Count decoded text once, retaining all structural and unknown fields.
+
+    Messages/Chat APIs consume content strings, not the HTTP JSON escaping of
+    those strings. JSON *inside* content/function arguments is still literal
+    text: never parse it, strip its own escapes, or omit native reasoning.
+    https://platform.claude.com/docs/en/api/http/messages
+    https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create
+    https://api-docs.deepseek.com/api/create-chat-completion/
+    """
+    if message_format is None:
+        return estimate(messages)
+    units = 0
+
+    def text(value):
+        nonlocal units
+        if isinstance(value, str):
+            units += _estimate_units(value)
+            return ""
+        return value
+
+    def content(value):
+        if not isinstance(value, list):
+            return text(value)
+        blocks = []
+        for block in value:
+            if not isinstance(block, dict):
+                blocks.append(block)
+                continue
+            b = dict(block)
+            kind = b.get("type")
+            if kind in ("text", "thinking") and kind in b:
+                b[kind] = text(b[kind])
+            elif kind == "tool_result" and "content" in b:
+                b["content"] = content(b["content"])
+            blocks.append(b)
+        return blocks
+
+    shell = []
+    for message in messages:
+        m = dict(message)
+        if "content" in m:
+            m["content"] = content(m["content"]) if message_format == "anthropic" else text(m["content"])
+        if message_format == "chat_completions":
+            if "reasoning_content" in m:
+                m["reasoning_content"] = text(m["reasoning_content"])
+            if "tool_calls" in m:
+                m["tool_calls"] = [{**call, "function": {**call["function"],
+                    "arguments": text(call["function"]["arguments"])}} for call in m["tool_calls"]]
+        shell.append(m)
+    return (_estimate_units(encoded(shell)) + units + 2) // 3 + 8
 
 
 def validate_settings(value):
@@ -82,12 +165,16 @@ class Policy:
         capability = verified_capacity(cfg)
         if capability:
             capacity = capability[0]
-        response = 16000 if cfg.get("provider") == "anthropic" else 4096
+        capacity = settings.get("capacity", capacity)
+        response = 4096
         extra = cfg.get("extra_params") or {}
-        response = settings.get("response_tokens", response)
-        for name in ("max_tokens", "max_completion_tokens"):
-            if type(extra.get(name)) is int:
-                response = max(response, extra[name])
+        if cfg.get("provider") == "anthropic":
+            response = max(settings.get("response_tokens", 0), anthropic_output_tokens(cfg))
+        else:
+            response = settings.get("response_tokens", response)
+            for name in ("max_tokens", "max_completion_tokens"):
+                if type(extra.get(name)) is int:
+                    response = max(response, extra[name])
         summary = settings.get('summary_tokens', 2000)
         if cfg.get('provider') == 'allowance_gateway' and cfg.get('_gateway_model'):
             model = cfg['_gateway_model']
@@ -95,7 +182,7 @@ class Policy:
             summary = min(summary, model['max_output_tokens'])
             if min(response, summary) < model['min_output_tokens']:
                 raise ProviderError('Configured response or summary budget is below the gateway minimum.')
-        return cls(settings.get("capacity", capacity), response,
+        return cls(capacity, response,
                    settings.get("history_tokens"), settings.get("tool_tokens"), settings.get("document_tokens"),
                    summary, settings.get("keep_turns", 2),
                    settings.get("auto_compact", False), settings.get("auto_threshold_percent", 80) / 100,
@@ -103,6 +190,7 @@ class Policy:
 
     def measure(self, cfg, system, transcript, tools):
         provider = cfg.get("provider")
+        message_format = _message_format(cfg)
         if provider == "anthropic":
             messages = AnthropicProvider._messages(None, transcript)
         elif provider == "openai_compatible":
@@ -113,7 +201,7 @@ class Policy:
         pos = 0
         for m in transcript:
             n = len(m.get("results", [])) if provider == "openai_compatible" and m["role"] == "tool" else 1
-            cost = estimate(messages[pos:pos+n]) + 24 * max(1, n)
+            cost = _message_estimate(messages[pos:pos+n], message_format) + 24 * max(1, n)
             pos += n
             if m["role"] != "tool":
                 history += cost
@@ -150,7 +238,14 @@ class Policy:
                 "schema_tokens": estimate(tools), "system_tokens": estimate(system),
                 "framing_tokens": 512 + 32 * len(tools), "largest_tool_results": largest,
                 "response_reserved": self.response_tokens, "capacity": self.capacity,
-                "capacity_source": self.capacity_source, "estimator": "conservative UTF-8 heuristic, not exact",
+                "request_max_tokens": anthropic_output_tokens(cfg) if provider == "anthropic" else None,
+                "capacity_source": self.capacity_source,
+                "estimator": "conservative UTF-8 heuristic, " + ("decoded message text plus framing" if message_format
+                              else "serialized projection fallback") + "; not exact",
+                "estimator_provenance": {"method": "utf8_heuristic_v1", "tokenizer": None,
+                    "model_calibrated": False,
+                    "message_representation": "decoded_text_with_structural_framing" if message_format else "serialized_projection",
+                    "message_format": message_format, "network_token_count": False},
                 "used": used, "limits": limits, "available": available, "over_budget": over, "near_limit": near}
 
 
