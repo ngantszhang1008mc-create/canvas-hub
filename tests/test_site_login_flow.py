@@ -96,6 +96,9 @@ def test_batch_failure_to_basic_signin_then_automatic_inspection(hub, account, s
             assert 'fixture-password' not in page.content()
             assert 'fixture-password' not in page.evaluate('JSON.stringify(localStorage)')
             expect(panel).to_contain_text('Stored observations',timeout=10000)
+            expect(panel).to_contain_text('Inspection complete')
+            expect(panel.get_by_role('button',name='Approve and re-inspect',exact=True)).not_to_be_visible()
+            expect(panel.get_by_role('button',name='Review signed-in source',exact=True)).to_be_visible()
             page.screenshot(path=str(tmp_path/f'inspection-started-{width}.png'),full_page=True)
             assert len(models)==2 and 'fixture-password' not in json.dumps(models)
             assert sources.get(account['id'],sid)['classification']['access_mode']=='connected_local_authorized'

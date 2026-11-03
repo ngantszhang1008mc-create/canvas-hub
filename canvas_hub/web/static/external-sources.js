@@ -44,8 +44,9 @@ export function makeExternalSources(env) {
       const current=()=>alive()&&generation===drawGeneration;
       target.querySelector('.workspace-agent-heading h2').textContent=mode==='login'?'Site sign-in':'Source Agent';
       const c=source.classification, req=source.request;
+      const signedInSource=['connected_local_reviewed','connected_local_authorized'].includes(c?.access_mode);
       const proposal=source.adapters.find(a=>a.revision===source.proposed_revision);
-      const status=h('p',{role:'status'},source.status.replaceAll('_',' '));
+      const status=h('p',{role:'status'},signedInSource&&source.status==='enabled'?'Inspection complete':source.status.replaceAll('_',' '));
       mount(content,h('h3',null,source.title),h('a',{href:source.url,target:'_blank',rel:'noopener noreferrer'},source.url));
       if(source.inspection?.enabled===false) {
         target.querySelector('.workspace-agent-heading h2').textContent='Saved source';
@@ -101,7 +102,9 @@ export function makeExternalSources(env) {
             catch(err){if(current()){advanced.append(h('p',{role:'alert'},err.message));e.currentTarget.disabled=false;}}
           }},'Check login requirement'),
           h('button',{onclick:()=>show(main,source,'login')},needsLogin?'Open sign-in':'Connect manually'));
-        const publicReview=needsLogin?advanced:content;
+        if(signedInSource)content.append(note('Saved signed-in page. A new inspection needs a current connection and fresh approval.'),
+          h('button',{onclick:()=>show(main,source,'login')},'Review signed-in source'));
+        const publicReview=needsLogin||signedInSource?advanced:content;
         if (!disclosure) disclosure=await api(aidPath+'/disclosure');
         if(!alive())return;
         const repeat=!!req||!!c||source.decision!=='undecided';
@@ -125,7 +128,7 @@ export function makeExternalSources(env) {
             h('button',{onclick:()=>action('/decision',{approve:false,revision:proposal.revision,spec_hash:proposal.spec_hash})},'Decline adapter'))));
       } else if(source.decision!=='declined') content.append(h('button',{onclick:()=>action('/decision',{approve:false})},source.enabled_revision?'Disable adapter':'Keep classification only'));
       if(source.enabled_revision && ['enabled','stale'].includes(source.status)) content.append(h('button',{onclick:()=>action('/refresh')},'Refresh without Agent'));
-      if(source.last_success_at) content.append(note(`Last successful adapter read ${source.last_success_at}`));
+      if(source.last_success_at) content.append(note(`Last successful ${signedInSource?'inspection':'adapter read'} ${source.last_success_at}`));
       if(source.records.length) content.append(h('h3',null,'Stored observations'),h('ul',null,source.records.map(r=>h('li',null,h('a',{href:`#/item/${r.id}`},r.title)))));
       if(source.conflicts?.length) content.append(h('div',{role:'status'},h('h3',null,'Deadline conflicts'),source.conflicts.map(c=>h('p',null,`${c.title}: ${c.external_due} / ${c.other_due}. Both sources are retained; check the original evidence.`))));
       if(source.origins.length) content.append(h('details',null,h('summary',null,'Source context'),source.origins.map(o=>h('p',null,h('a',{href:`#/item/${o.id}`},o.title)))));
