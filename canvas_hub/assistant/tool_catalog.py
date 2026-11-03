@@ -27,7 +27,7 @@ GROUPS = (
     ("other", "Other tools", "Additional permitted tools from the shared registry."),
 )
 GROUP_NAMES = {g[0] for g in GROUPS}
-DEFAULTS = {"list_courses", "search", "get_item", "get_deadlines", "get_component_context", "create_note", "start_collection"}
+DEFAULTS = {"list_courses", "search", "get_item", "get_deadlines", "get_component_context", "create_note", "start_collection", "read_tool_result"}
 MAX_ADVERTISED = 32
 MAX_GATEWAY_TOOLS = 128  # Fixed registry protocol; full context is budgeted by Policy.
 COMMAND = re.compile(r"^/([a-z][a-z0-9_-]*)(?=\s|$)")
@@ -36,7 +36,7 @@ COMMAND = re.compile(r"^/([a-z][a-z0-9_-]*)(?=\s|$)")
 def group_for(name):
     if any(s in name for s in ("component", "score", "grading", "grade", "checklist", "hours_tracker", "overall_widget")):
         return "tracker"
-    if name in {"list_context_sources", "search_context_sources", "read_context_source", "read_document"}:
+    if name in {"list_context_sources", "search_context_sources", "read_context_source", "read_document", "read_tool_result"}:
         return "documents"
     if name in {"list_accounts", "list_courses", "search", "get_item", "get_item_history", "list_items", "get_announcements",
                 "get_changes", "get_coverage", "get_freshness", "whats_new"}:

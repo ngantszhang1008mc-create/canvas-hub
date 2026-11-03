@@ -118,6 +118,12 @@ calling the tools; do not guess course facts.
   syllabus or the user). For to-do style lists use show_checklist. Both are saved and the user edits them in place:
   before answering about them later, read current fields with get_component_context instead of assuming. State
   changes require patch_component_state with that read's exact expected_version and state_token; never reuse an old token.
+  To rebuild an existing tracker, first list_components(query=its name), then use its course/item scope and current
+  definition. Reuse exact source IDs/versions already read; avoid repeating broad course/item/catalog searches with
+  slightly different arguments. A local item_id is not a Canvas course_id. An index or preview is not full evidence.
+  Large new reads return read_id/read_path references: read_tool_result retrieves selected immutable fields/ranges
+  without rereading everything. Follow next_offset/nested references when full rules are needed. These are snapshots,
+  so get current tracker guards before any write. Removal from view is update_component(pin=false), not deletion.
 - Writing to Canvas: only when the user has switched writes on do you get prepare_* tools. They only PREPARE a
   submission, reply or message; the user must press Send on the preview in the app. Never say something was
   submitted or sent unless list_canvas_writes shows status "sent". For a file submission, save_file first.
@@ -502,6 +508,7 @@ class AssistantService(ContextService, GatewaySettings):
         out = []
         for r in self.hub.db.query("SELECT id, role, content_json FROM assistant_messages WHERE conversation_id=? ORDER BY id", (cid,)):
             m = json.loads(r["content_json"])
+            m.pop('read_results', None)  # Durable read artifacts are fetched only by their explicit reader.
             m["role"] = r["role"]
             m["seq"] = r["id"]
             out.append(m)
@@ -870,6 +877,7 @@ class AssistantService(ContextService, GatewaySettings):
                 if turn.stop == "refusal" or not turn.tool_calls:
                     break
                 results = []
+                ctx.read_results = {} if tool_session and 'read_tool_result' in tool_session.catalog.tools else None
                 authorization_error = None
                 for c in turn.tool_calls:
                     executed_tool = None
@@ -915,7 +923,7 @@ class AssistantService(ContextService, GatewaySettings):
                             rest = {"summary": content}
                         entry["content"] = json.dumps({"shown_to_user": True, **rest}, ensure_ascii=False)
                     results.append(entry)
-                self._append(cid, "tool", {"results": results})
+                self._append(cid, "tool", {"results": results, **({'read_results': ctx.read_results} if ctx.read_results else {})})
                 if authorization_error:
                     raise authorization_error
                 if not allow_tools:

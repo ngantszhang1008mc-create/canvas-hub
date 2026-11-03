@@ -1,7 +1,7 @@
 """Bounded provider projections; never mutate the original conversation.
 
-Limits below are application safety budgets, NOT claims about model capacities.
-Administrators can lower/raise each setup's budget to its actual endpoint limit.
+Unknown endpoints use application safety budgets, not inferred model capacities.
+Exact documented endpoint/model pairs can supply defaults; explicit setup budgets win.
 The estimator deliberately overcounts ordinary prose and includes native reasoning,
 tool schemas and framing. No exact tokenizer (or paid counting call) is required.
 """
@@ -14,6 +14,7 @@ from dataclasses import dataclass
 
 from ..util import InvalidInput
 from .providers import AnthropicProvider, OpenAICompatibleProvider, ProviderError
+from .model_capacity import verified_capacity
 
 DOCUMENT_TOOLS = {"read_document", "search_context_sources", "read_context_source"}
 SUMMARY_KEYS = ("goals", "decisions", "open_questions", "references", "tool_outcomes")
@@ -78,6 +79,9 @@ class Policy:
         # Unknown compatible endpoints include small local models. These are
         # deliberately modest deployment defaults, never inferred model limits.
         capacity = {"anthropic": 64000, "codex": 64000}.get(cfg.get("provider"), 32768)
+        capability = verified_capacity(cfg)
+        if capability:
+            capacity = capability[0]
         response = 16000 if cfg.get("provider") == "anthropic" else 4096
         extra = cfg.get("extra_params") or {}
         response = settings.get("response_tokens", response)
@@ -95,7 +99,7 @@ class Policy:
                    settings.get("history_tokens"), settings.get("tool_tokens"), settings.get("document_tokens"),
                    summary, settings.get("keep_turns", 2),
                    settings.get("auto_compact", False), settings.get("auto_threshold_percent", 80) / 100,
-                   "configured" if "capacity" in settings else "application fallback; verify endpoint capacity")
+                   "configured" if "capacity" in settings else capability[1] if capability else "application fallback; verify endpoint capacity")
 
     def measure(self, cfg, system, transcript, tools):
         provider = cfg.get("provider")
@@ -141,6 +145,8 @@ class Policy:
                           for m in transcript if m["role"] == "tool" for r in m.get("results", [])),
                          key=lambda r: r["estimated_tokens"], reverse=True)[:3]
         return {"estimated_tokens": overhead + total, "overhead_tokens": overhead,
+                "effective_capacity": int(self.capacity * .9), "safety_headroom": self.capacity - int(self.capacity * .9),
+                "total_with_response": overhead + total + self.response_tokens,
                 "schema_tokens": estimate(tools), "system_tokens": estimate(system),
                 "framing_tokens": 512 + 32 * len(tools), "largest_tool_results": largest,
                 "response_reserved": self.response_tokens, "capacity": self.capacity,
@@ -235,12 +241,18 @@ def summary_message(summary, *, live_state_changed=False):
 def context_error(report):
     used = report["used"]
     largest = ", ".join(f"{r['name']} ~{r['estimated_tokens']}" for r in report["largest_tool_results"])
+    exceeded = ', '.join(f'{key} {used[key]}/{limit}' for key, limit in report['limits'].items() if used[key] > limit)
     return ProviderError(f"Context budget exceeded (estimated history {used['history']}, tool results {used['tools']}, "
                          f"documents {used['documents']}; tool schemas {report['schema_tokens']}, system {report['system_tokens']}, "
                          f"framing {report['framing_tokens']}; response reserve {report['response_reserved']}; "
-                         f"capacity {report['capacity']}, {report['capacity_source']}). "
+                         f"capacity {report['capacity']}, {report['capacity_source']}; "
+                         f"effective budget {report['effective_capacity']} after 10% safety margin ({report['safety_headroom']}); "
+                         f"total with response {report['total_with_response']}, "
+                         f"aggregate excess {max(0, report['total_with_response'] - report['effective_capacity'])}). "
                          + (f"Largest tool results: {largest}. " if largest else "")
+                         + (f"Exceeded category budgets: {exceeded}. " if exceeded else "")
                          + "Original history and completed actions are saved; no oversized request was sent. "
                          "Retry answer cannot run tools and tool selection does not remove saved results. "
-                         "Verify this setup's capacity, then continue with a new message; or start a focused chat "
-                         "with tracker IDs and ask it to check current state first. Do not repeat completed changes.")
+                         "Verify this setup's capacity. A new message in this chat retains the same history; "
+                         "choose explicit manual compaction or start a focused chat with tracker IDs and check current state first. "
+                         "Do not repeat completed changes.")
