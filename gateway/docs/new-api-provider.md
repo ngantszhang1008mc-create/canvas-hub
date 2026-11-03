@@ -89,6 +89,19 @@ violation also trips the persistent pause/breach control. A user reset does not
 refund these holds. The integration provides no automatic billing reconciliation
 or administrative refund of uncertain costs.
 
+The documented DeepSeek terminal reasons `content_filter`,
+`insufficient_system_resource` and `aborted` are unsuccessful request outcomes.
+After validating their full stream, terminal usage if supplied, `[DONE]` and
+clean termination, the gateway emits `provider_incomplete`, retains the entire
+uncertain hold, and authorizes no tool execution or automatic retry. These
+outcomes alone do not pause the service. Unknown finish reasons, malformed
+streams and reported bounds violations still trip the breach control, even when
+accompanied by a known unsuccessful reason. New API can consume quota for these
+outcomes; neither a filter nor an interruption proves a zero-cost request.
+See the [DeepSeek finish-reason contract](https://api-docs.deepseek.com/api/create-chat-completion/),
+New API's [stream forwarding and outcome handling](https://github.com/QuantumNous/new-api/blob/ba5f7367797566175a6cd97a748d430af3602a01/relay/channel/openai/relay-openai.go#L179),
+and its [quota-consumption path](https://github.com/QuantumNous/new-api/blob/ba5f7367797566175a6cd97a748d430af3602a01/relay/compatible_handler.go#L171).
+
 These controls bound admission in the Canvas ledger under the reviewed upstream
 assumptions. **They do not establish a strict New API or DeepSeek invoice cap.**
 The gateway cannot prove from a stream that New API honored retries, model

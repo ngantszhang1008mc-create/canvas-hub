@@ -5,6 +5,10 @@ import { protocolError, readSse } from "./sse";
 import type { GenerationRequest } from "./validation";
 
 const identifier = (value: unknown): value is string => typeof value === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(value);
+const incompleteReasons = ["content_filter", "insufficient_system_resource", "aborted"] as const;
+type IncompleteReason = typeof incompleteReasons[number];
+type TerminalReason = Completion["finish_reason"] | IncompleteReason;
+const isIncomplete = (reason: string): reason is IncompleteReason => incompleteReasons.some(value => value === reason);
 
 function fields(value: Record<string, unknown>, allowed: string[]): void {
   if (Object.keys(value).some(key => !allowed.includes(key))) protocolError();
@@ -85,7 +89,7 @@ export class NewApiAdapter implements ProviderAdapter {
           void response.body.cancel().catch(() => {});
           protocolError();
         }
-        let responseId: string | undefined, finish: Completion["finish_reason"] | undefined;
+        let responseId: string | undefined, finish: TerminalReason | undefined;
         let transportDone = false, usageSeen = false, boundViolation = false, emittedBytes = 0;
         const calls = new Map<number, { id: string; name: string; arguments: string }>();
         const countOutput = (text: string) => {
@@ -149,8 +153,8 @@ export class NewApiAdapter implements ProviderAdapter {
               }
             }
             if (choice.finish_reason !== undefined && choice.finish_reason !== null) {
-              if (!["stop", "tool_calls", "length"].includes(choice.finish_reason as string)) protocolError();
-              finish = choice.finish_reason as Completion["finish_reason"];
+              if (!["stop", "tool_calls", "length", ...incompleteReasons].includes(choice.finish_reason as string)) protocolError();
+              finish = choice.finish_reason as TerminalReason;
               if ((finish === "stop" && calls.size > 0) || (finish === "tool_calls" && calls.size === 0)) protocolError();
               if (finish === "tool_calls") {
                 for (const call of calls.values()) {
@@ -168,6 +172,14 @@ export class NewApiAdapter implements ProviderAdapter {
           }
         }
         if (!finish || !transportDone) protocolError();
+        if (isIncomplete(finish)) {
+          // Documented refusals/interruption do not establish zero cost or
+          // authorize tool execution. Validate usage and the entire stream
+          // first so this outcome cannot conceal an actual protocol/bound
+          // violation, then retain the hold without tripping a global breach.
+          if (boundViolation) protocolError();
+          throw new GatewayError(502, "provider_incomplete");
+        }
         return { usage: null, accounting: "full_reservation", finish_reason: finish, bound_violation: boundViolation };
       },
     };

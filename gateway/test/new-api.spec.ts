@@ -187,6 +187,75 @@ describe("New API behind the existing allowance ledger, with network blocked", (
     expect(fetch).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["content_filter", "none"],
+    ["insufficient_system_resource", "terminal"],
+    ["aborted", "inline"],
+  ] as const)("retains %s liability without pausing unrelated requests", async (reason, usagePosition) => {
+    const input = { ...INPUT, tools: ["demo_read_only"] };
+    const failedFinish: Record<string, unknown> = chunk({}, reason);
+    const usage = { prompt_tokens: 10, completion_tokens: 4, total_tokens: 14 };
+    if (usagePosition === "inline") failedFinish.usage = usage;
+    const failed = [
+      chunk({ role: "assistant", content: "Synthetic partial text." }),
+      chunk({ tool_calls: [{ index: 0, id: "call_partial", type: "function", function: { name: "demo_read_only", arguments: "{" } }] }),
+      failedFinish,
+      ...(usagePosition === "terminal" ? [{ id: "chatcmpl_synthetic", object: "chat.completion.chunk",
+        model: "deepseek-flash", choices: [], usage }] : []),
+      "[DONE]",
+    ];
+    let call = 0;
+    const upstream = vi.fn<typeof fetch>(async () => sse(++call === 1 ? failed : streamValues()));
+    const { stub, user } = await relayFixture(upstream, { tools: { demo_read_only: {
+      description: "Synthetic local function.", parameters: { type: "object", properties: {}, additionalProperties: false },
+    } } });
+    const key = crypto.randomUUID();
+    const all = await events(await respond(stub, user.token, key, input));
+    expect(all.some(event => event.type === "text.delta")).toBe(true);
+    expect(all.some(event => event.type === "tool_call.delta" && event.arguments_delta === "{")).toBe(true);
+    expect(all.some(event => event.type === "done")).toBe(false);
+    expect(all.at(-1)).toMatchObject({ type: "error", error: "provider_incomplete", status: "uncertain" });
+    expect(await status(stub)).toMatchObject({ paused: false, breached: false,
+      lifetime: { spent_microusd: "0", held_microusd: RESERVE } });
+    const replay = await doc(await respond(stub, user.token, key, input));
+    expect(replay).toMatchObject({ replay: true, status: "uncertain", error: "provider_incomplete", request_id: all[0].request_id });
+    expect(upstream).toHaveBeenCalledTimes(1);
+
+    // The operator can still pause/resume after an ordinary failed completion.
+    // Neither that toggle nor an idempotency replay releases its liability.
+    expect((await api(stub, "/admin/pause", { paused: true })).status).toBe(200);
+    expect((await respond(stub, user.token)).status).toBe(503);
+    expect((await status(stub)).lifetime.held_microusd).toBe(RESERVE);
+    expect((await api(stub, "/admin/pause", { paused: false })).status).toBe(200);
+    const healthy = await events(await respond(stub, user.token));
+    expect(healthy.at(-1)).toMatchObject({ type: "done", status: "completed", charged_microusd: RESERVE });
+    expect(await status(stub)).toMatchObject({ paused: false, breached: false,
+      lifetime: { spent_microusd: RESERVE, held_microusd: RESERVE } });
+    expect(upstream).toHaveBeenCalledTimes(2);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("still breaches on unknown failed reasons, malformed terminals, and output overruns accompanying failure", async () => {
+    for (const scenario of ["unknown_reason", "malformed_suffix", "output_overrun"]) {
+      const values: unknown[] = [chunk({ content: "Synthetic partial text." }),
+        chunk({}, scenario === "unknown_reason" ? "unrecognized_stop" : "content_filter")];
+      if (scenario === "output_overrun") values.push({ id: "chatcmpl_synthetic", object: "chat.completion.chunk",
+        model: "deepseek-flash", choices: [], usage: { prompt_tokens: 1, completion_tokens: 129, total_tokens: 130 } });
+      values.push("[DONE]");
+      const upstream = vi.fn<typeof fetch>(async () => sse(values, scenario === "malformed_suffix" ? "data: malformed\n\n" : ""));
+      const { stub, user } = await relayFixture(upstream);
+      const all = await events(await respond(stub, user.token));
+      expect(all.some(event => event.type === "done")).toBe(false);
+      expect(all.at(-1)).toMatchObject({ type: "error", status: "uncertain" });
+      expect(all.at(-1).error).not.toBe("provider_incomplete");
+      expect(await status(stub)).toMatchObject({ paused: true, breached: true,
+        lifetime: { spent_microusd: "0", held_microusd: RESERVE } });
+      expect((await api(stub, "/admin/pause", { paused: false })).status).toBe(409);
+      expect(upstream).toHaveBeenCalledTimes(1);
+    }
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it("snapshots the accounting mode at admission and rejects an adapter trying to switch a metered request", async () => {
     const finish = gate(), started = gate();
     const { stub, user } = await relayFixture(vi.fn<typeof fetch>(async () => {
