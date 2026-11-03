@@ -74,7 +74,7 @@ def test_table_links_follow_title_rows_through_sort_filter_details_and_reload(hu
         expect(bound.locator(".t-detail")).to_have_text("Beta task detail")
         bound.locator("a.cmp-link").click()
         drawer = page.get_by_role("dialog", name="Item details")
-        expect(drawer.locator("h2")).to_have_text(beta["title"])
+        expect(drawer.locator(".drawer-head h2")).to_have_text(beta["title"])
         expect(drawer.get_by_role("link", name="Open in Canvas")).to_have_attribute("href", beta["source_url"])
         drawer.get_by_role("button", name="Close", exact=True).click()
         expect(page.locator(".drawer.open")).to_have_count(0)
@@ -94,7 +94,12 @@ def test_table_links_follow_title_rows_through_sort_filter_details_and_reload(hu
         expect(bound.locator("a.cmp-link")).to_have_count(6)
         check_links()
         expect(old.locator("a.cmp-link")).to_have_text(alpha["title"])
-        assert all(request.method == "GET" for request in requests), [(request.method, request.url) for request in requests if request.method != "GET"]
+        # The app shell polls due reminders on reload independently of tables.
+        # Every other request must still be read-only, including component/chat APIs.
+        reminder_poll = f"{base}/api/accounts/{account['id']}/reminders/due"
+        writes = [(request.method, request.url) for request in requests
+                  if request.method != "GET" and not (request.method == "POST" and request.url == reminder_poll)]
+        assert not writes, writes
         assert not errors, errors
         browser.close()
         assert stored_messages() == stored_before
