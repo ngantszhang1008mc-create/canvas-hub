@@ -17,11 +17,46 @@ from .test_components import HMAW
 
 EXTRA_TRACKER_TOOLS = ['tool:' + name for name in (
     'list_context_sources', 'read_context_source', 'search_context_sources',
-    'get_coverage', 'wait_for_job', 'show_artifact')]
+    'get_coverage', 'show_artifact')]
+
+
+def test_overfull_tracker_selection_is_rejected_before_dispatch_or_history(hub, account, monkeypatch):
+    api = HubAPI(hub)
+    svc = api.assistant = AssistantService(hub, api)
+    svc.update_config({'preset': 'codex'})
+    permissions = svc.permissions(svc._load())
+    extras = [*EXTRA_TRACKER_TOOLS, 'tool:wait_for_job']
+    selection = ['group:tracker', *extras]
+    session = ToolSession(permissions, ['group:tracker'])
+    before_tools = session.advertised()
+
+    # The bounded-reader and guarded-rebuild tools bring the old fixture's
+    # selection to 33 schemas. Rejection must not trim or partially load it.
+    with pytest.raises(InvalidInput) as discovered:
+        session.discover({'select': extras})
+    assert discovered.value.code == 'tool_selection_too_large'
+    assert discovered.value.detail['advertised_count'] == 33
+    assert discovered.value.detail['max_advertised'] == 32
+    assert discovered.value.detail['over_by'] == 1
+    assert session.manual == ['group:tracker'] and session.discovered == []
+    assert session.advertised() == before_tools
+
+    provider_calls = []
+    def unexpected_provider(cfg):
+        provider_calls.append(cfg)
+        pytest.fail('an over-limit selection must stop before provider creation')
+    monkeypatch.setattr('canvas_hub.assistant.make_provider', unexpected_provider)
+    with pytest.raises(InvalidInput) as sent:
+        svc.send(account['id'], 'Explain this tracker', tool_selection=selection)
+    assert sent.value.code == 'tool_selection_too_large'
+    assert sent.value.detail['advertised_count'] == 33
+    assert not provider_calls
+    assert svc.list_conversations(account['id']) == []
+    assert not hub.db.query('SELECT 1 FROM assistant_messages')
 
 
 @pytest.mark.parametrize('characters,extra_tools', [(6500, []), (6800, []), (6500, EXTRA_TRACKER_TOOLS)],
-                         ids=['original-tracker', 'tracker-followup', '31-tool-tracker-sources'])
+                         ids=['original-tracker', 'tracker-followup', '32-tool-tracker-sources'])
 def test_tracker_results_share_unused_budget_without_masking_or_replaying(hub, account, monkeypatch, characters, extra_tools):
     aid = account['id']
     api = HubAPI(hub)
@@ -48,7 +83,7 @@ def test_tracker_results_share_unused_budget_without_masking_or_replaying(hub, a
     cfg = svc._load()
     tools = ToolSession(svc.permissions(cfg), ['group:tracker', *extra_tools]).advertised()
     if extra_tools:
-        assert len(tools) == 31 and estimate(tools) + 32 * len(tools) > 8000
+        assert len(tools) == 32 and estimate(tools) + 32 * len(tools) > 8000
         discovered = ToolSession(svc.permissions(cfg), ['group:tracker'])
         result = json.loads(discovered.discover({'select': extra_tools}, include_schemas=True))
         assert not result['executed'] and discovered.advertised() == tools

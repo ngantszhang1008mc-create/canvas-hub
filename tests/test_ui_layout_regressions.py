@@ -16,7 +16,7 @@ pytestmark = pytest.mark.browser
 
 
 @pytest.fixture
-def layout_examples(hub, account, fixture_pkg):
+def layout_examples(hub, account, fixture_pkg, external_inspection_enabled):
     package = copy.deepcopy(fixture_pkg)
     now = datetime.now(timezone.utc)
     assignment = next(i for i in package["items"] if i["type"] == "assignment")
@@ -295,8 +295,14 @@ def test_launchers_open_left_tooltips_dismiss_and_activate_once(hub, layout_exam
                         expect(tooltip).to_have_attribute("role", "tooltip")
                         assert tooltip.evaluate("el => getComputedStyle(el).whiteSpace") == "nowrap"
                         if width == 1440:
-                            toggle.focus()
+                            # Focus changes must not hide a tooltip while the
+                            # pointer still rests on the same action.
                             action.hover()
+                            toggle.focus()
+                            expect(tooltip).to_be_visible()
+                            action.hover()
+                            expect(tooltip).to_be_visible()
+                            page.evaluate("document.dispatchEvent(new Event('scroll'))")
                             expect(tooltip).to_be_visible()
                     assert_no_horizontal_overflow(page)
                     page.keyboard.press("Escape")

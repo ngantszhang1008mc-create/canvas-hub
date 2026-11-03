@@ -29,27 +29,101 @@ configuration, not forwarded as provider request settings.
 
 | Field | Default |
 | --- | --- |
-| `capacity` | Application safety ceiling: Anthropic/Codex 64,000; compatible endpoints 32,768 |
-| `response_tokens` | Anthropic 16,000; others 4,096 |
+| `capacity` | Exact supported endpoint/model metadata when known; otherwise application fallback: Anthropic/Codex 64,000, compatible endpoints 32,768 |
+| `response_tokens` | Anthropic 6,000 at resolved capacity ≤64,000, otherwise 16,000; others 4,096. Explicit output settings take precedence. |
 | `auto_compact` | `false` (manual compaction remains available) |
 | `auto_threshold_percent` | `80` |
 | `keep_turns` | `2` |
 | `summary_tokens` | `2000` |
 | `history_tokens`, `tool_tokens`, `document_tokens` | Share remaining input space; an explicitly configured category ceiling still applies |
 
-These are configurable **application budgets, not advertised model limits**.
-Unknown models/endpoints are not assigned invented capacities. Verify the actual
+An explicit `capacity` always overrides defaults. The exact models
+`deepseek-flash` and `deepseek-v4-pro` on `https://api.deepseek.com` (optionally
+`/v1`) use the documented 1,048,576-token input-plus-output window, checked against
+[DeepSeek model metadata](https://api-docs.deepseek.com/api/list-models/) on
+2026-11-03. This is a static verified mapping, not an authenticated model probe;
+custom endpoints, aliases and Codex model names do not inherit this capacity.
+Unknown models/endpoints use **application fallback budgets, not advertised limits**. Verify the actual
 endpoint's capacity and configure it, especially for small local models. Estimates
 include provider-native reasoning, schemas, message framing and non-ASCII text;
 10% headroom and response/reasoning space are reserved. No paid tokenizer call is
 used. Explicit extra-provider output limits increase the reserve. Anthropic and
 compatible calls set an output bound; Codex's app-server retains control of its
 native output limit, so its reserve is a planning allowance. Actual provider usage
-may differ from estimates. Direct SDK retries are disabled; the narrow pre-acceptance
+may differ from estimates. Anthropic effort remains unchanged; unsupported explicit
+thinking/budget controls are rejected rather than silently ignored or truncated.
+When explicit context and provider output budgets differ, the larger planning
+reserve protects the input window while the provider's explicit output cap remains
+unchanged. Both values are reported. Direct SDK retries are disabled; the narrow pre-acceptance
 compatibility fallback is documented in [the usage contract](PROVIDER_USAGE.md).
 Compaction always uses a single attempt without capability negotiation.
 
+Estimation retains the conservative ASCII/UTF-8 heuristic; no exact tokenizer or
+universal CJK calibration is claimed. Recognized, explicit official Messages/Chat
+endpoints count decoded message text with structural framing instead of charging
+outer JSON transport escapes as extra text. Unknown/custom endpoints and implicit
+SDK routing retain serialized-projection estimates. The API exposes
+`estimator_provenance` (method, representation, format and absence of a tokenizer
+or paid counting call), and Context & usage displays the method. Existing usage
+observations can identify overestimation but do not justify applying one model's
+divisors to unrelated models.
+
+Errors and Context & usage show the effective budget after headroom. For example,
+64,000 capacity leaves 57,600 including the output reserve; an estimated 58,000
+request exceeds it by 400. The 6,400 safety margin is retained. Explicit category
+ceilings are reported separately. Starting another message keeps the same history;
+an already oversized chat needs explicit manual compaction or a focused new chat
+after checking completed actions. Answer-only Retry cannot finish pending tool work.
+
+## Bounded tool reads
+
+New large in-app reads of trackers, items, courses, search results, deadlines,
+announcements, SQL query results and source catalogs return a compact index and `read_id`. The full
+result is saved locally in the same transaction as its tool reply. This changes
+new reply formats; no existing message/result is shortened or replaced. Automatic
+compaction stays off. An identical later result references its existing snapshot;
+the original tool still runs to check current data, and deliberate rereads work.
+
+`read_tool_result` retrieves selected fields and ranges using `read_id`, `path`,
+`offset`, `limit` and `chars`. Follow `next_offset` and nested `read_path` values;
+ordinary JSON pointers also work. `key_paths` exposes unusually long object keys
+without cutting them. Indexes explicitly mark incomplete values. Neither indexes
+nor opening excerpts establish that all rules were read. Existing search/item
+cursors and source-catalog offsets remain retrievable within their snapshot.
+Item reads retain full text instead of the old fixed prefix; tracker snapshots
+include exact definitions, manual state, source configuration and pending rules.
+
+Reader replies remain bounded to 4,800 UTF-8 bytes including their final JSON
+envelope. Text reads default to at most 4,000 characters and fill the available
+bytes without splitting characters. New references prefer readable JSON pointers
+such as `/definition` and `/fields/body/value`; historical `@/` ordinal paths still
+work, including the fallback for oversized keys. Array positions are not item IDs.
+Indexes prioritize actual identity fields, titles and source links when they fit.
+In-app source catalogs page directly within the same final-response byte bound,
+avoiding a second snapshot paging layer for ordinary metadata. An individually
+oversized source entry still uses the complete, durable snapshot fallback.
+
+Snapshots survive restart and manual compaction and belong to one account and
+conversation. The reader checks current read permission and cannot execute a tool.
+They describe historical data: reread the original tool for live changes and use
+fresh version/state tokens before patching. All source text remains untrusted.
+`list_components(query=...)` filters before its bounded metadata page; course
+queries likewise narrow discovery. Reuse known item/course/source IDs instead of
+repeating account-wide catalogs with different arguments.
+
+This protocol is enabled only when the selected provider's permitted catalog
+includes `read_tool_result`. MCP and reviewed gateway catalogs lacking it keep
+their existing response format; the app never silently expands a gateway allowlist.
+Benchmark harnesses with custom tool allowlists must include this reader or use
+the production catalog to exercise the new path. No schema migration is required.
+
 ## Tool selection and discovery
+
+Discovery reports group sizes and whether adding each group fits the current
+selection. Oversized selections report the required schema count, unchanged
+manual/discovered selections, and individual tool choices for recovery. The
+32-schema discovery ceiling remains an application limit, separate from model
+context capacity; reviewed gateway limits and allowlists are unchanged.
 
 The circular arrow beside the chat input opens a searchable list of all currently
 permitted groups and tools. `/tracker` (or another group/tool command) adds a
@@ -164,12 +238,18 @@ local telemetry cannot authorize quota. Source bodies use the separate
 [request-local source contract](SOURCE_CONTEXT_PAYLOADS.md).
 
 Source invalidation remains conservative and account-wide: source versions,
-imported revisions and resource extraction invalidate the checkpoint. The next
-request uses original history until safely compacted again. Tracker and local
-note/to-do changes retain the historical summary and completed-action manifest,
-with a freshness notice requiring current reads and fresh tracker state tokens.
-This also covers live edits during summarization. Older broad fingerprints are
-invalidated once. There is no vector
+imported revisions and resource extraction invalidate the summary's **source
+evidence**, without expanding the next request back to the entire saved history.
+Historical user intent, decisions, references and completed actions remain, with
+an explicit stale-evidence notice. Old rules, formulas and coverage claims require
+current versioned source reads before use; a summary never establishes reading
+coverage. Re-compacting a stale summary does not make its source facts current.
+New exact tool evidence remains independently usable. Original messages and
+checkpoints are not edited by this projection, and account ownership is checked.
+Tracker and local note/to-do changes likewise retain the historical summary and
+completed-action manifest, with a freshness notice requiring current reads and
+fresh tracker state tokens. Concurrent source edits still reject installation of
+a new summary. Older broad fingerprints are treated as stale evidence. There is no vector
 search, semantic quality guarantee, exact tokenizer, monetary-price calculation or
 multi-pass summarization of already enormous histories. An active Codex tool turn
 is never restarted for compaction; an oversized turn stops with its results saved.

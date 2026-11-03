@@ -14,6 +14,7 @@ import re
 
 from ..htmltools import to_text
 from ..util import Conflict, InvalidInput, NotFound, canonical_json, now_iso, parse_iso, sha256_text
+from .component_migration import entries, plan_migration, remap_target
 
 SOURCE_META = ("source_config_json", "source_values_json", "source_status_json",
                "source_overrides_json", "pending_spec_json")
@@ -532,32 +533,91 @@ class ComponentSourceSync:
             return self._save(account_id, row, spec, state, "source_override", before,
                               source_changes={"source_overrides_json": canonical_json(overrides)})
 
-    def propose_spec(self, account_id, cid, spec):
+    def propose_rebuild(self, account_id, cid, spec, *, expected_version, state_token, identity_map=None):
+        """Stage an in-place rebuild; never replace, hide, or reset a tracker."""
+        with self._lock:
+            conflict, result = None, None
+            with self.db.tx():
+                try:
+                    result = self.propose_spec(account_id, cid, spec, identity_map=identity_map,
+                        rebuild=True, expected_version=expected_version, state_token=state_token)
+                except Conflict as error:
+                    # Persist newly observed source facts even if they invalidate
+                    # the read guard; the next context read can then refresh it.
+                    conflict = error
+            if conflict is not None:
+                raise conflict
+            return result
+
+    def propose_spec(self, account_id, cid, spec, *, identity_map=None, rebuild=False,
+                     expected_version=None, state_token=None):
         with self._lock, self.db.tx():
             row = self._row(account_id, cid)
+            def check_guard():
+                if rebuild and (type(expected_version) is not int or expected_version != row["version"]
+                                or state_token != self.state_token(self._view(account_id, row))):
+                    raise Conflict("Tracker or linked to-do changed. Read get_component_context before rebuilding.",
+                                   code="version_conflict")
+            check_guard()
             clean = self.normalize(row["kind"], spec)
             self._validate_spec_items(account_id, clean)
             # Recheck evidence at proposal time, even without a recent import hook.
             self._sync_component(account_id, row)
             row = self._row(account_id, cid)
-            self._check_proposed_source_fields(row, clean)
+            check_guard()
+            before = self._effective_state_json(account_id, row)
+            migration, source_changes = self._plan_spec_migration(row, clean, json.loads(before),
+                                                                 identity_map=identity_map, rebuild=rebuild)
             status = json.loads(row["source_status_json"])
             proposal = {"spec": clean, "base_version": row["version"] + 1, "proposed_at": now_iso(),
-                        "review_fingerprints": status.get("review_fingerprints", {})}
-            before = self._effective_state_json(account_id, row)
+                        "review_fingerprints": status.get("review_fingerprints", {}), "rebuild": rebuild,
+                        "base_state_token": self.state_token({"id": row["id"], "version": row["version"] + 1, "state": json.loads(before)}),
+                        "identity_map": migration["identity_map"], "migration": migration,
+                        "source_config": json.loads(source_changes["source_config_json"])}
             return self._save(account_id, row, json.loads(row["spec_json"]), json.loads(before), "spec_proposal", before,
                               source_changes={"pending_spec_json": canonical_json(proposal)})
 
-    def _check_proposed_source_fields(self, row, proposed):
-        """Source scalar edits use the reversible override API, never a rule proposal."""
+    def _plan_spec_migration(self, row, proposed, state, *, identity_map=None, rebuild=False):
         current = json.loads(row["spec_json"])
+        config = json.loads(row["source_config_json"])
+        migration = plan_migration(row["kind"], current, proposed, state, identity_map=identity_map,
+                                   sources=config, rebuild=rebuild)
+        target_map = {}
         targets = set(json.loads(row["source_values_json"])) | set(json.loads(row["source_overrides_json"]))
-        targets.update(b["target"] for b in json.loads(row["source_config_json"]).get("bindings", []))
-        for target in targets:
+        targets.update(b["target"] for b in config.get("bindings", []))
+        for target in sorted(targets):
+            mapped = remap_target(row["kind"], target, migration["identity_map"], proposed)
+            if mapped is None:
+                migration["unresolved"].append({"type": "unmapped_source", "target": target})
+                continue
             old, old_leaf = target_slot(row["kind"], current, target)
-            new, new_leaf = target_slot(row["kind"], proposed, target)
+            new, new_leaf = target_slot(row["kind"], proposed, mapped)
             if old.get(old_leaf) != new.get(new_leaf):
                 raise InvalidInput("source-bound fields must be changed with a source override")
+            target_map[target] = mapped
+        config = copy.deepcopy(config)
+        for binding in config.get("bindings", []):
+            binding["target"] = target_map.get(binding["target"], binding["target"])
+        collection = config.get("collection")
+        if collection and row["kind"] == "checklist":
+            sid = migration["identity_map"]["groups"].get(collection["section_id"])
+            if sid is None:
+                migration["unresolved"].append({"type": "unmapped_source", "target": "collection/section_id"})
+            else:
+                collection["section_id"] = sid
+        changes = {"source_config_json": canonical_json(config)}
+        for field in ("source_values_json", "source_overrides_json"):
+            changes[field] = canonical_json({target_map.get(k, k): v for k, v in json.loads(row[field]).items()})
+        status = json.loads(row["source_status_json"])
+        for unavailable in status.get("unavailable", []):
+            if unavailable.get("target") in target_map:
+                unavailable["target"] = target_map[unavailable["target"]]
+        changes["source_status_json"] = canonical_json(status)
+        cleaned = self._clean_state(row["kind"], proposed, migration["state"])
+        if cleaned != migration["state"]:
+            migration["unresolved"].append({"type": "incompatible_state", "reason": "normalization_would_change_saved_values"})
+        migration["can_accept"] = not migration["unresolved"]
+        return migration, changes
 
     def accept_spec(self, account_id, cid, expected_version):
         with self._lock:
@@ -565,12 +625,21 @@ class ComponentSourceSync:
             result = None
             # Hold one write transaction through the evidence check and accept.
             # Commit newly detected source changes even if acceptance is stale.
-            with self.db.tx():
+            with self.db.tx() as conn:
                 self._sync_component(account_id, self._row(account_id, cid))
+                # A failed save must roll back linked to-do changes as well.
+                # Nested Database.tx joins its parent, so use a savepoint here.
+                conn.execute("SAVEPOINT accept_component_spec")
                 try:
                     result = self._accept_spec(account_id, cid, expected_version)
-                except Conflict as error:
-                    conflict = error
+                except Exception as error:
+                    conn.execute("ROLLBACK TO accept_component_spec")
+                    if isinstance(error, Conflict):
+                        conflict = error
+                    else:
+                        raise
+                finally:
+                    conn.execute("RELEASE accept_component_spec")
             if conflict is not None:
                 raise conflict
             return result
@@ -584,20 +653,34 @@ class ComponentSourceSync:
             status = json.loads(row["source_status_json"])
             if (isinstance(expected_version, bool) or not isinstance(expected_version, int)
                     or expected_version != row["version"] or proposal["base_version"] != row["version"]
-                    or proposal["review_fingerprints"] != status.get("review_fingerprints", {})):
+                    or proposal["review_fingerprints"] != status.get("review_fingerprints", {})
+                    or proposal.get("base_state_token") != self.state_token(self._view(account_id, row))):
                 raise Conflict("component or source changed since this proposal; review a new proposal", code="version_conflict")
+            if not proposal.get("migration", {}).get("can_accept"):
+                raise Conflict("Definition migration has unresolved identities or rule changes. Review and submit a corrected proposal.",
+                               code="migration_unresolved")
             spec = self.normalize(row["kind"], proposal["spec"])
             self._validate_spec_items(account_id, spec)
-            # Keep source targets meaningful after a proposed structural edit.
-            self._validate_sources(account_id, row["kind"], spec, json.loads(row["source_config_json"]), row["course_id"])
             before = self._effective_state_json(account_id, row)
-            state = self._clean_state(row["kind"], spec, json.loads(before))
+            migration, changes = self._plan_spec_migration(row, spec, json.loads(before),
+                identity_map=proposal.get("identity_map"), rebuild=proposal.get("rebuild", False))
+            if not migration["can_accept"]:
+                raise Conflict("Definition migration has unresolved identities or rule changes. Review and submit a corrected proposal.",
+                               code="migration_unresolved")
+            self._validate_sources(account_id, row["kind"], spec, json.loads(changes["source_config_json"]), row["course_id"])
+            state = migration["state"]
             if row["kind"] == "checklist" and spec.get("sync_todos"):
-                state = self._push_todos(account_id, spec, state, previous=json.loads(row["spec_json"]))
+                previous = json.loads(row["spec_json"])
+                old_entries, _ = entries(row["kind"], previous)
+                for namespace in ("rows", "groups"):
+                    for oid, nid in migration["identity_map"][namespace].items():
+                        old_entries[namespace][oid]["id"] = nid
+                state = self._push_todos(account_id, spec, state, previous=previous)
+            status = json.loads(changes["source_status_json"])
             status.update(needs_review=False, changed_review_sources=[], accepted_fingerprints=status.get("review_fingerprints", {}),
                           reviewed_at=now_iso())
             return self._save(account_id, row, spec, state, "accepted_spec", before,
-                              source_changes={"pending_spec_json": None, "source_status_json": canonical_json(status)})
+                              source_changes={**changes, "pending_spec_json": None, "source_status_json": canonical_json(status)})
 
     def _validate_spec_items(self, account_id, spec):
         entries = list(spec.get("buckets", []))

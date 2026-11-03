@@ -4,6 +4,9 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
+
+# Exercise dormant connection logic explicitly; shipping default stays frozen.
+pytestmark = pytest.mark.usefixtures("external_inspection_enabled")
 from fastapi.testclient import TestClient
 
 from canvas_hub.boundary import HubAPI
@@ -113,12 +116,14 @@ def test_http_source_keeps_public_analysis_panel_available(hub, account, source)
             row.get_by_role('button', name='Workspace actions', exact=True).click()
             row.locator('.workspace-action-icon[aria-label="Analyse link"]').click()
             panel = page.get_by_role('complementary', name='Source Agent', exact=True)
-            expect(panel).to_contain_text('Public link analysis is still available')
             expect(panel.get_by_role('button', name='Approve and analyse', exact=True)).to_be_visible()
             assert not reads and not hub.requests.list(account['id'])
+            panel.get_by_text('More options and diagnostics',exact=True).click()
+            panel.get_by_role('button',name='Connect manually',exact=True).click()
+            expect(panel).to_contain_text('Sign-in requires HTTPS')
             panel.get_by_role('button', name='Use HTTPS version', exact=True).click()
             expect(panel.locator('h3').first).to_have_text('https://public.example.edu/course')
-            expect(panel.get_by_role('button', name='Review connection', exact=True)).to_be_visible()
+            expect(panel.get_by_role('button', name='Agree and open sign-in window', exact=True)).to_be_visible()
             assert not reads and not hub.requests.list(account['id'])
             assert not (hub.paths.browser_profiles / 'external-sites').exists()
         finally:

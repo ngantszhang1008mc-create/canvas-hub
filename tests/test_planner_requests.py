@@ -60,7 +60,7 @@ def test_planner_week_classes_suggestions_and_ics(hub, account, fixture_pkg):
     assert p.list_classes(aid) == []
 
 
-def test_view_request_lifecycle(hub, account, fixture_pkg):
+def test_view_request_lifecycle(hub, account, fixture_pkg, external_inspection_enabled):
     hub.importer.import_package(fixture_pkg)
     aid = account["id"]
     rq = hub.requests
@@ -97,7 +97,8 @@ def test_mcp_agent_fulfils_request(hub, account, fixture_pkg):
     from mcp.client.session import ClientSession
     from mcp.client.stdio import StdioServerParameters, stdio_client
     hub.importer.import_package(fixture_pkg)
-    req = hub.requests.create(account["id"], url="https://comp1023.example.edu/", title="COMP1023 site")
+    # Canvas-page MCP requests remain available during the external inspection freeze.
+    req = hub.requests.create(account["id"], url=account['origin']+"/courses/4242/pages/schedule", title="Canvas schedule")
     home = str(hub.paths.home)
 
     async def main(flags):
@@ -137,7 +138,7 @@ def test_assistant_components_and_planner_tools(hub, account, fixture_pkg):
     try:
         svc = AssistantService(hub, HubAPI(hub))
         svc.update_config({"preset": "custom", "base_url": fake.url + "/v1", "model": "m", "api_key": "sk-x-123456789"})
-        r = svc.send(account["id"], "Plan my week")
+        r = svc.send(account["id"], "Plan my week", tool_selection=["group:planner", "tool:show_choices", "tool:show_deadlines", "tool:show_chart"])
         svc.wait(r["conversation_id"], 30)
         msgs = svc.get_conversation(account["id"], r["conversation_id"])["messages"]
         displays = [res["display"] for m in msgs if m["role"] == "tool" for res in m["results"] if res.get("display")]

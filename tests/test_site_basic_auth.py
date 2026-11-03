@@ -5,6 +5,9 @@ import threading
 from concurrent.futures import Future
 
 import pytest
+
+# Exercise dormant connection logic explicitly; shipping default stays frozen.
+pytestmark = pytest.mark.usefixtures("external_inspection_enabled")
 from fastapi.testclient import TestClient
 
 from canvas_hub.boundary import HubAPI
@@ -19,6 +22,23 @@ USERNAME = 'synthetic-user-491'
 PASSWORD = 'synthetic-pass-491'
 AUTH = 'Basic ' + base64.b64encode(f'{USERNAME}:{PASSWORD}'.encode()).decode()
 CONTENT = b'<body><table><tr><td>' + b'Course lectures and assignment information. ' * 12 + b'</td></tr></table></body>'
+
+
+def test_basic_offer_is_consented_headless_and_has_no_extra_origins(hub, account, source):
+    options=[]
+    def factory(*args, **kwargs):
+        options.append(kwargs); return FakeBrowser(*args)
+    service=SiteConnections(hub,browser_factory=factory)
+    aid,sid=account['id'],source[1]
+    with pytest.raises(InvalidInput): service.offer(aid,sid,['https://identity.example.edu'],method='basic')
+    with pytest.raises(InvalidInput): service.offer(aid,sid,[],method='unknown')
+    offer=service.offer(aid,sid,[],method='basic')
+    with pytest.raises(InvalidInput): service.start(aid,sid,offer['token'],False)
+    assert not options
+    service.start(aid,sid,offer['token'],True)
+    assert options==[{'headless':True}] and service.status(aid,sid)['method']=='basic'
+    with pytest.raises(Conflict): service.start(aid,sid,offer['token'],True)
+    service.close()
 
 
 @pytest.mark.browser
@@ -76,6 +96,21 @@ def test_basic_credentials_never_follow_redirects_or_assets(tmp_path):
         assert len(calls) >= 3
         assert all('authorization' not in headers for url, headers in calls if url != TARGET)
         assert not session.snapshot()['redirect_blocked']
+
+
+@pytest.mark.browser
+def test_basic_form_never_sends_credentials_to_a_redirected_challenge(tmp_path):
+    calls=[]
+    def transport(url, method, headers, body):
+        calls.append((url, dict(headers)))
+        if url==TARGET: return 302, {'location':COURSE+'/other-page'}, [], b''
+        return 401, {'www-authenticate':'Basic realm="fixture"'}, [], b''
+    with browser_session(tmp_path,transport) as session:
+        session._login_method='basic'
+        with pytest.raises(Conflict,match='page changed'):
+            session.call('http_auth',{'challenge':session.snapshot()['http_auth'],'username':USERNAME,'password':PASSWORD})
+        assert all('authorization' not in headers for _,headers in calls)
+        assert not session._basic_auth
 
 
 @pytest.mark.browser

@@ -37,7 +37,7 @@ def test_long_login_form_is_not_mistaken_for_course_content():
 
 
 @pytest.fixture
-def source(hub, account, fixture_pkg):
+def source(hub, account, fixture_pkg, external_inspection_enabled):
     fixture_pkg['items'][2].setdefault('links',[]).append({'relation':'body_link','to':{
         'type':'external_link','course_id':'4242','url':URL,'title':'Course site'}})
     hub.importer.import_package(fixture_pkg)

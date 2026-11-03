@@ -1552,11 +1552,11 @@ VIEWS.assistant = async (main, parts, params) => {
     };
     const budget = cx.budget;
     mount(contextInfo,
-      h("p", null, cx.compacted_through ? (cx.stale ? "Saved summary is stale after data changes; original context will be used." : `Older turns compacted through message ${cx.compacted_through}.`) : "Using original conversation context."),
-      cx.compacted_through && !cx.stale && cx.live_state_changed ? h('p', null, 'Local trackers or notes changed. The historical summary is retained; current state must be read again before using or updating it.') : null,
+      h("p", null, cx.compacted_through ? (cx.stale ? "Historical goals and decisions are retained. Source facts in the saved summary are stale and must be checked against current versions before use." : `Older turns compacted through message ${cx.compacted_through}.`) : "Using original conversation context."),
+      cx.compacted_through && cx.live_state_changed ? h('p', null, 'Local trackers or notes changed. The historical summary is retained; current state must be read again before using or updating it.') : null,
       h("p", null, `${cx.summary_requests || 0} summary requests · reported summary tokens: ${reportedTokens(cost, "input_tokens")} in / ${reportedTokens(cost, "output_tokens")} out. Total reported tokens: ${reportedTokens(total, "input_tokens")} in / ${reportedTokens(total, "output_tokens")} out; included cache read ${reportedTokens(total, "cache_read_input_tokens")}, cache write ${reportedTokens(total, "cache_creation_input_tokens")}; included reasoning ${reportedTokens(total, "reasoning_output_tokens")}.${total.unreported_requests ? ` Usage unavailable or incomplete for ${total.unreported_requests} request(s); these are not counted as zero cost.` : ""} Local telemetry does not determine free allowance or billed cost.`),
       h("p", null, "Usage from earlier interrupted requests may be absent from these totals."),
-      budget ? h("p", null, `Last request estimate: ${budget.estimated_tokens} input tokens; ${budget.response_reserved} reserved for output/reasoning. Safety budget: ${budget.capacity} (${budget.capacity_source}).`) : null,
+      budget ? h("p", null, `Last request estimate: ${budget.estimated_tokens} input tokens; ${budget.response_reserved} reserved for output/reasoning. ${budget.request_max_tokens != null && budget.request_max_tokens !== budget.response_reserved ? `Provider output cap: ${budget.request_max_tokens}. ` : ""}Capacity: ${budget.capacity} (${budget.capacity_source}). Usable budget after 10% safety margin: ${budget.effective_capacity ?? Math.floor(budget.capacity * 0.9)}. Method: ${budget.estimator || "unreported"}.`) : null,
       d.conversation.context_notice ? h("p", null, d.conversation.context_notice) : null);
     mount(status, busy ? h("span", { class: "working" }, st === "cancelling" ? "Stopping…" : "Working…")
       : st === "error" ? h("div", { class: "banner bad", style: "margin:0" }, h("div", { class: "b-body" }, h("div", { class: "b-title" }, "The assistant stopped"), h("div", { class: "small" }, d.conversation.run_error || ""),
@@ -1805,7 +1805,7 @@ function assistantSettingsCard(cfg, prof) {
   const contextField = h("div", { class: "field", style: "grid-column:1/-1" },
     h("label", null, autoCompact, " Automatically compact older turns near the context budget"),
     h("label", null, "Context token capacity (optional)", capacity),
-    h("p", { class: "tiny muted" }, "Set this to a capacity verified for your model and endpoint. Defaults are conservative application budgets, not advertised model limits. Compaction uses model quota; original history stays saved. Replies and reasoning have reserved space."));
+    h("p", { class: "tiny muted" }, "Set this to a capacity verified for your model and endpoint. Exact supported endpoints use documented model limits; others use conservative application defaults. Compaction uses model quota; original history stays saved. Replies, reasoning and a 10% safety margin have reserved space."));
   const isGateway = () => presetSel.value === "allowance_gateway"
     || cfg.presets.some((p) => p.id === presetSel.value && p.provider === "allowance_gateway");
   const gatewayMode = h("select", { "aria-label": "Gateway mode" },
@@ -2192,8 +2192,14 @@ VIEWS.requests = async (main) => {
   const course = h("select", null, h("option", { value: "" }, "Course (optional)"), accessible.map((c) => h("option", { value: c.course_id }, c.title)));
   const note = h("textarea", { rows: 2, placeholder: "Instructions for the agent, e.g. “Use Chrome profile ngan. Read the Schedule and Assignments pages.”" });
   const STATUS = { open: ["info", "Waiting for an agent"], claimed: ["warn", "Being read"], done: ["ok", "Done"], declined: ["bad", "Declined"], cancelled: ["muted", "Cancelled"] };
-  mount(main, pageHead("Agent requests", "Ask a connected agent to read sites Canvas Hub can't open itself, such as a course website outside Canvas."),
-    h("div", { class: "banner info" }, h("div", { class: "b-body small" },
+  const inspectionPaused=S.info?.external_inspection?.enabled===false;
+  if(inspectionPaused) {
+    url.placeholder=(S.account?.origin||'https://canvas.example.edu')+'/courses/…';
+    title.placeholder='Canvas page title';note.placeholder='Which Canvas page content should the agent read?';
+  }
+  mount(main, pageHead("Agent requests", inspectionPaused?"External-site inspection is temporarily unavailable. Saved results and Canvas-page requests remain available.":"Ask a connected agent to read sites Canvas Hub can't open itself, such as a course website outside Canvas."),
+    inspectionPaused?h('p',{role:'status'},'New requests must use your Canvas instance address while external inspection is paused.'):null,
+    inspectionPaused?null:h("div", { class: "banner info" }, h("div", { class: "b-body small" },
       "Canvas Hub never opens these sites or touches your other browser profiles. An agent you connect over MCP (for example Codex or Claude with your browser) can pick up a request, read the site with its own access, and send back the text. It is stored as ",
       h("strong", null, "agent-provided"), " content, separate from what Canvas reported, and becomes searchable. The agent needs ",
       h("code", null, "canvas-hub mcp --allow-fulfil"), ".")),
@@ -2206,7 +2212,7 @@ VIEWS.requests = async (main) => {
           if (r) { toast("Request left for connected agents"); route(); } } }, "Leave request")))),
     h("div", { class: "card" }, h("h2", { style: "margin-bottom:6px" }, "Requests"),
       reqs.requests.length ? h("ul", { class: "list" }, reqs.requests.map((r) => h("li", null,
-        h("div", { class: "spread" }, h("div", { class: "row" }, pill(STATUS[r.status][0], STATUS[r.status][1]), h("span", { class: "strong" }, r.title || r.url)),
+        h("div", { class: "spread" }, h("div", { class: "row" }, pill(r.inspection_paused&&['open','claimed'].includes(r.status)?'muted':STATUS[r.status][0], r.inspection_paused&&['open','claimed'].includes(r.status)?'Inspection paused':STATUS[r.status][1]), h("span", { class: "strong" }, r.title || r.url)),
           ["open", "claimed"].includes(r.status) ? h("button", { class: "ghost sm", onclick: async () => { await guard(() => api(A(`/requests/${r.id}/cancel`), { method: "POST" })); route(); } }, "Cancel") : null),
         h("div", { class: "li-meta" }, h("a", { href: r.url, target: "_blank", rel: "noopener noreferrer" }, r.url),
           r.claimed_by ? h("span", null, `agent: ${r.claimed_by}`) : null, h("span", null, `asked by ${r.requested_by} ${ago(r.created_at)}`)),
@@ -2228,8 +2234,18 @@ const W = makeWorkspace({ h,mount,api,A,fmtDate,ago,componentView,
   startAction:(scope,action,panel)=>contextualAgent.start(scope,action,panel),
   approveSpec:async c=>{
     const diff = C.diffPair(JSON.stringify(c.spec,null,2),JSON.stringify(c.pending_spec.spec,null,2));
+    const migration = c.pending_spec.migration;
+    const blocked = !migration?.can_accept;
+    const migrationReview = h("section",null,h("h3",null,"Saved choices"),
+      h("p",null,blocked ? "This proposal has unresolved state or rule changes. Ask for a corrected proposal before approving." : `${migration.preserved_fields} saved fields preserved. The tracker ID and pin stay unchanged.`),
+      ...(migration?.unresolved || []).map(issue=>h("p",{class:"small"},JSON.stringify(issue))),
+      migration ? C.diffPair(JSON.stringify(c.state,null,2),JSON.stringify(migration.state,null,2)) : null,
+      migration ? h("details",null,h("summary",null,"Identity mapping"),h("pre",{class:"text"},JSON.stringify(migration.identity_map,null,2))) : null);
     const dialog=h("dialog",{class:"proposal-dialog"},h("h2",null,"Review study-tool changes"),diff,
-      h("div",{class:"row"},h("button",{class:"primary",onclick:async()=>{const result=await guard(()=>api(A(`/components/${c.id}/approve`),{method:"POST",body:{expected_version:c.version}}));if(result){dialog.close();dialog.remove();route();}}},"Approve changes"),
+      migrationReview,
+      c.pending_spec.source_config && JSON.stringify(c.source_config)!==JSON.stringify(c.pending_spec.source_config)
+        ? h("section",null,h("h3",null,"Source bindings"),C.diffPair(JSON.stringify(c.source_config,null,2),JSON.stringify(c.pending_spec.source_config,null,2))) : null,
+      h("div",{class:"row"},h("button",{class:"primary",disabled:blocked,onclick:async()=>{const result=await guard(()=>api(A(`/components/${c.id}/approve`),{method:"POST",body:{expected_version:c.version}}));if(result){dialog.close();dialog.remove();route();}}},"Approve changes"),
         h("button",{onclick:()=>{dialog.close();dialog.remove();}},"Cancel")));
     document.body.append(dialog);dialog.showModal();
   },

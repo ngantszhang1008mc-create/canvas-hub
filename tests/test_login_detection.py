@@ -3,6 +3,9 @@ import threading
 import time
 
 import pytest
+
+# Exercise dormant connection logic explicitly; shipping default stays frozen.
+pytestmark = pytest.mark.usefixtures("external_inspection_enabled")
 from fastapi.testclient import TestClient
 
 from canvas_hub.boundary import HubAPI

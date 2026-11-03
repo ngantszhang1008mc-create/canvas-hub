@@ -10,7 +10,7 @@ from .context import (Policy, SUMMARY_SYSTEM, context_error, data_version, live_
 from .providers import ProviderError, Stopped
 from .usage import stored_usage, usage_totals
 from .request_shape import stable_tools
-from .source_context import with_source_context
+from .source_context import restore_source_context, with_source_context
 
 
 class ContextService:
@@ -43,12 +43,15 @@ class ContextService:
                           (status, encoded(usage) if usage is not None else None, model, now_iso(), attempt))
 
     def _context_projection(self, cid, account_id, transcript):
+        self._conv(account_id, cid)
         row = self.hub.db.one("SELECT * FROM assistant_context WHERE conversation_id=?", (cid,))
-        if not row or row["data_version"] != data_version(self.hub, account_id):
+        if not row:
             return transcript
         tail = [m for m in transcript if m.get("seq", float("inf")) > row["through_seq"]]
         summary = json.loads(row['summary_json'])
-        return [summary_message(summary, live_state_changed=summary.get('_live_state_version') != live_data_version(self.hub, account_id)), *tail]
+        return [summary_message(summary,
+                    live_state_changed=summary.get('_live_state_version') != live_data_version(self.hub, account_id),
+                    sources_changed=row['data_version'] != data_version(self.hub, account_id)), *tail]
 
     def _compact_context(self, cid, account_id, cfg, transcript, make_provider):
         policy = Policy.for_config(cfg)
@@ -59,7 +62,8 @@ class ContextService:
         # a model to reconstruct a long resource ID or a stale-write token.
         anchors, executions = [], []
         reference_keys = {"id", "note_id", "item_id", "course_id", "resource_id", "component_id", "source_id",
-                          "version", "expected_version", "state_token", "offset", "start_char", "end_char"}
+                          "version", "expected_version", "state_token", "offset", "start_char", "end_char",
+                          "read_id", "read_path", "path", "next_offset"}
 
         def refs(value):
             if isinstance(value, dict):
@@ -75,6 +79,7 @@ class ContextService:
 
         for m in prefix:
             refs(m.get("tool_calls", []))
+            refs(m.get("source_context", {}))
             if m.get("context_summary"):
                 # Previous deterministic references are kept in the summary
                 # input and copied separately rather than recursively growing.
@@ -105,6 +110,9 @@ class ContextService:
             raise ProviderError("Older history is too large for one safe summary request. Original context is retained; start a focused chat. No summary request was sent.")
         version = data_version(self.hub, account_id)
         live_version = live_data_version(self.hub, account_id)
+        prior = self.hub.db.one("SELECT data_version,summary_json FROM assistant_context WHERE conversation_id=?", (cid,))
+        inherited_stale = bool(prior and (prior['data_version'] != version or
+                               json.loads(prior['summary_json']).get('_source_evidence_stale')))
         source_seq = self.hub.db.one("SELECT MAX(id) AS seq FROM assistant_messages WHERE conversation_id=?", (cid,))["seq"]
         if cid in self._cancel:
             raise Stopped()
@@ -133,6 +141,10 @@ class ContextService:
             summary["reference_manifest"] = anchors
             summary["tool_execution_manifest"] = executions
             summary['_live_state_version'] = live_version
+            # Re-summarizing old evidence cannot certify it against new sources.
+            # Newly read, versioned tool results remain independently usable.
+            if inherited_stale:
+                summary['_source_evidence_stale'] = True
             # Installation is atomic and refuses concurrent source/message changes.
             with self._lock, self.hub.db.tx() as c:
                 check_cancel("")
@@ -167,6 +179,10 @@ class ContextService:
     def _prepare_context(self, cid, account_id, cfg, system, transcript, tools, make_provider,
                          *, allow_compact=True, provider_pending=False, request_context=None):
         policy = Policy.for_config(cfg)
+        # A source can become unavailable between tool rounds with unchanged
+        # indexed bytes/version. Check live provenance before each dispatch.
+        if request_context:
+            request_context = restore_source_context(self.hub, account_id, request_context)
         transcript = self._context_projection(cid, account_id, transcript)
         projected = with_source_context(transcript, request_context)
         report = policy.measure(cfg, system, projected, tools)
@@ -185,6 +201,8 @@ class ContextService:
                     raise
                 with self.hub.db.tx() as c:
                     c.execute("UPDATE assistant_conversations SET context_notice=? WHERE id=?", (str(e), cid))
+            if request_context:
+                request_context = restore_source_context(self.hub, account_id, request_context)
             projected = with_source_context(transcript, request_context)
             report = policy.measure(cfg, system, projected, tools)
         self._context_reports[cid] = report
@@ -236,7 +254,8 @@ class ContextService:
         summary_uses = [a["usage"] for a in summaries]
 
         return {"compacted_through": row["through_seq"] if row else None,
-                "stale": bool(row and row["data_version"] != data_version(self.hub, account_id)),
+                "stale": bool(row and (row["data_version"] != data_version(self.hub, account_id) or
+                                       json.loads(row['summary_json']).get('_source_evidence_stale'))),
                 "live_state_changed": bool(row and json.loads(row['summary_json']).get('_live_state_version') != live_data_version(self.hub, account_id)),
                 "summary_usage": usage_totals(summary_uses), "total_usage": usage_totals(uses + [a["usage"] for a in attempts]),
                 "usage_scope": "recorded assistant attempts and compaction attempts; earlier failed requests may be absent",

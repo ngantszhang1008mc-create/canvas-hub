@@ -94,7 +94,7 @@ export function makeWorkspace(env) {
       button.addEventListener("mouseenter", showTip);
       button.addEventListener("animationend", () => { if (button === document.activeElement || button.matches(":hover")) showTip(); });
       button.addEventListener("mouseleave", () => { if (!button.matches(":focus-visible")) tip.hidden = true; });
-      button.addEventListener("blur", () => { tip.hidden = true; });
+      button.addEventListener("blur", () => { if (!button.matches(":hover")) tip.hidden = true; });
       tips.set(button, showTip);
       options.append(button);
       root.append(tip);
@@ -113,7 +113,9 @@ export function makeWorkspace(env) {
       window.addEventListener("resize", () => { hideTips(); fitTray(); }, { signal });
       document.addEventListener("scroll", () => {
         if (!root.isConnected) { close(); return; }
-        hideTips(); tips.get(document.activeElement)?.();
+        hideTips();
+        const show = tips.get(document.activeElement) || tips.get(options.querySelector(".workspace-action-icon:hover"));
+        show?.();
       }, { signal, capture: true });
     });
     root.addEventListener("keydown", (e) => {

@@ -196,11 +196,13 @@ def test_reasoning_is_chosen_per_message(seeded, monkeypatch):
     hub, acct = seeded
     svc = AssistantService(hub, HubAPI(hub))
     runs = []
-    monkeypatch.setattr(svc, "_run", lambda cid, aid, cfg, a: runs.append(cfg))
+    monkeypatch.setattr(svc, "_run", lambda cid, aid, cfg, a, *, request_context=None: runs.append(cfg))
     claude = svc.update_config({"preset": "anthropic", "api_key": "sk-ant-x-1234"})["saved_profile"]
     assert svc.public_config()["profiles"][0]["reasoning_levels"] == ["low", "medium", "high", "xhigh", "max"]
-    svc.send(acct["id"], "q", profile_id=claude, reasoning="xhigh")
-    svc.send(acct["id"], "q", profile_id=claude)
+    first = svc.send(acct["id"], "q", profile_id=claude, reasoning="xhigh")
+    svc.wait(first["conversation_id"], 5)
+    second = svc.send(acct["id"], "q", profile_id=claude)
+    svc.wait(second["conversation_id"], 5)
     assert runs[0]["effort"] == "xhigh" and runs[1]["effort"] == ""
     with pytest.raises(InvalidInput):
         svc.send(acct["id"], "q", profile_id=claude, reasoning="off")       # DeepSeek-only level

@@ -1,3 +1,5 @@
+import {showSiteLogin} from './site-login.js';
+
 // A contextual source list and side Agent panel. No analysis happens while rendering.
 export function makeExternalSources(env) {
   const { h, mount, api, A, launcher } = env;
@@ -15,7 +17,7 @@ export function makeExternalSources(env) {
     panel.hidden = false;
     return panel;
   }
-  async function show(main, source) {
+  async function show(main, source, mode='review') {
     const aidPath = A(`/external-sources/${source.id}`); // Capture account before asynchronous work.
     const route = location.hash;
     const target = panelShell(main);
@@ -28,10 +30,10 @@ export function makeExternalSources(env) {
       generation++; versions.delete(target); target.hidden=true; main.querySelector('.workspace-context')?.classList.remove('agent-open','external-open');
     }},'×');
     const content = h('div',{class:'external-agent-content'});
-    mount(target,h('div',{class:'workspace-agent-heading'},h('h2',null,'Source Agent'),close),content);
+    mount(target,h('div',{class:'workspace-agent-heading'},h('h2',null,mode==='login'?'Site sign-in':'Source Agent'),close),content);
     async function action(path, body={}) {
       const buttons = [...content.querySelectorAll('button')]; buttons.forEach(b=>b.disabled=true);
-      try { source=await api(aidPath+path,{method:'POST',body}); if(!alive())return; disclosure=null; await draw(); window.dispatchEvent(new Event('external-sources-updated')); }
+      try { source=await api(aidPath+path,{method:'POST',body}); if(!alive())return; disclosure=null; mode='review'; await draw(); window.dispatchEvent(new Event('external-sources-updated')); }
       catch(e) { if(!alive())return; content.append(h('p',{role:'alert'},e.message)); buttons.forEach(b=>b.disabled=false); }
     }
     async function draw() {
@@ -39,13 +41,29 @@ export function makeExternalSources(env) {
       generation++;
       const drawGeneration=generation;
       const current=()=>alive()&&generation===drawGeneration;
+      target.querySelector('.workspace-agent-heading h2').textContent=mode==='login'?'Site sign-in':'Source Agent';
       const c=source.classification, req=source.request;
       const proposal=source.adapters.find(a=>a.revision===source.proposed_revision);
       const status=h('p',{role:'status'},source.status.replaceAll('_',' '));
-      mount(content,h('h3',null,source.title),h('a',{href:source.url,target:'_blank',rel:'noopener noreferrer'},source.url),status,
-        note('Local adapters read public pages only. Connect this site for sign-in; JavaScript-only pages may need a connected Agent. Adapter approval stays separate.'),
-        c ? h('div',null,note(`${c.roles.join(' · ')} · ${Math.round(c.confidence*100)}% confidence`),h('p',null,c.summary||''),note(`Read ${c.read_at} · ${c.provided_by}`)) : note('No successful classification saved.'),
-        source.error ? h('p',{role:'alert'},source.error):null);
+      mount(content,h('h3',null,source.title),h('a',{href:source.url,target:'_blank',rel:'noopener noreferrer'},source.url));
+      if(source.inspection?.enabled===false) {
+        target.querySelector('.workspace-agent-heading h2').textContent='Saved source';
+        content.append(...[h('p',{role:'status'},source.inspection.message),
+          c?h('section',null,h('h3',null,'Saved classification'),note(c.roles.join(' · ')),h('p',null,c.summary||'')):null,
+          source.last_success_at?note(`Last saved read: ${source.last_success_at}`):null,
+          source.records.length?h('section',null,h('h3',null,'Saved observations'),h('ul',null,source.records.map(r=>h('li',null,h('a',{href:`#/item/${r.id}`},r.title))))):null,
+          source.reads.length?h('details',null,h('summary',null,'Saved source text'),source.reads.map(r=>h('div',null,note(r.read_at),r.evidence.map(p=>h('pre',{class:'text'},p.content||''))))):null].filter(Boolean));
+        return;
+      }
+      if(mode==='login'&&!source.analysis_running&&!['open','claimed'].includes(req?.status)) {
+        const box=h('section',{class:'site-login','aria-label':'Site connection'});
+        content.append(box,h('button',{class:'site-login-back',onclick:()=>show(main,source)},'Back to source review'));
+        await showSiteLogin({h,mount,api,root:box,path:aidPath,source,current,
+          analyse:token=>action('/analyze-connected',{token,consent:true}),reopen:next=>show(main,next,'login')});
+        return;
+      }
+      content.append(status,
+        c ? h('div',null,note(`${c.roles.join(' · ')} · ${Math.round(c.confidence*100)}% confidence`),h('p',null,c.summary||'')) : null);
       if (source.analysis_running || (req && ['open','claimed'].includes(req.status))) {
         content.append(note(!req ? 'Finishing the previous attempt.' : req.claimed_by==='Canvas Hub built-in Assistant' ? `Request #${req.id} · Assistant is reading and analysing. Cancel discards the result; a model request already sent may still use API quota.` : `Request #${req.id} · ${req.status}. Connect an MCP Agent with --allow-fulfil and ask it to claim this request and submit_source_analysis.`),
           h('a',{href:'#/requests'},'Connected Agent requests'),['open','claimed'].includes(req?.status)?h('button',{onclick:async()=>{
@@ -54,173 +72,47 @@ export function makeExternalSources(env) {
         const token=++generation;
         setTimeout(async()=>{ if(token!==generation||!alive())return; try{source=await api(aidPath);await draw();if(!source.analysis_running&&!['open','claimed'].includes(source.request?.status))window.dispatchEvent(new Event('external-sources-updated'));}catch(e){status.textContent=e.message;} },1200);
       } else {
-        const checkResult=h('div',{role:'status'});
-        let probePoll=0;
-        function showProbe(result) {
-          if(!current())return;
-          if(result.failure_id&&!result.manual&&(req?.status!=='declined'||req?.id!==result.failure_id)) {mount(checkResult);return;}
-          if(result.state==='not_checked')return;
-          if(result.state==='running') {mount(checkResult,note('Checking whether sign-in is needed. This anonymous check uses no saved session or model call.'));return;}
-          const message={
-            login_required:result.auth_scheme==='basic'?'This site requires HTTP Basic authentication. Use the local connection form to enter your credentials.':'This page shows an authentication challenge. Sign in, then check the requested course page.',
-            access_denied:'The site denied access. This does not establish that login is required; check your permissions or connect manually.',
-            readable:'The anonymous page is readable. The failed inspection may have another cause; course access is still unverified.',
-            unknown:'Login requirement is unknown. A chooser, security challenge or incomplete page is not proof of a login requirement.',
-            unsupported_unavailable:result.evidence?.includes('timeout')?'The anonymous check timed out. Login requirement is unknown.':result.evidence?.includes('probe_busy')?'Login checks are busy. Retry the check or connect manually.':'The anonymous check could not read this site. Login requirement is unknown.'
-          }[result.outcome]||'Login requirement is unknown.';
-          mount(checkResult,note(message),result.final_host?note(`Checked host: ${result.final_host}. Course access after login is not verified.`):null,
-            h('button',{class:result.outcome==='login_required'?'primary':'',onclick:()=>{
-              connectBox.scrollIntoView({block:'center'});connectBox.querySelector('button')?.focus();
-            }},result.outcome==='login_required'?'Sign in to this site':'Connect manually'));
+        const probe=source.login_check||{state:'not_checked'};
+        const needsLogin=probe.outcome==='login_required';
+        const advanced=h('details',{class:'external-source-diagnostics'},h('summary',null,'More options and diagnostics'));
+        if(req?.status==='declined'||probe.state!=='not_checked') {
+          const message=probe.state==='running'?'Checking whether sign-in is needed…':needsLogin?
+            'This page requires sign-in. Continue below to connect this site.':probe.outcome==='access_denied'?
+            'The site denied access. Could not determine whether sign-in would help.':probe.outcome==='readable'?
+            (req?.status==='declined'?'The public page is readable. This analysis failed for another reason.':'The public page is readable without sign-in.'):
+            'Could not determine whether this page needs sign-in. You can retry analysis or connect manually.';
+          content.append(h('section',{'aria-label':'Inspection recovery'},h('h3',null,req?.status==='declined'?'Latest inspection failed':'Sign-in check'),note(message),
+            needsLogin?h('button',{class:'primary',onclick:()=>show(main,source,'login')},'Needs login'):null));
+          if(probe.state==='running')setTimeout(async()=>{
+            if(!current())return;
+            try {source=await api(aidPath);if(current()){await draw();window.dispatchEvent(new Event('external-sources-updated'));}}
+            catch(e){if(current())status.textContent=e.message;}
+          },1000);
         }
-        async function followProbe() {
-          const poll=++probePoll;
-          for(let i=0;i<30&&current()&&poll===probePoll;i++) {
-            const result=await api(aidPath+'/login-check');
-            if(!current()||poll!==probePoll)return;
-            showProbe(result);
-            if(result.state!=='running')return;
-            await new Promise(resolve=>setTimeout(resolve,1000));
-          }
-        }
-        content.append(note('Failed inspections automatically check for login anonymously. Saved sessions and model calls are never used for this check.'),
+        if(source.error)advanced.append(note(source.error));
+        if(req?.result_note)advanced.append(note(req.result_note));
+        if(probe.final_host)advanced.append(note(`Checked host: ${probe.final_host}. Course access is not verified.`));
+        advanced.append(note('Failed inspections check for sign-in anonymously, without saved sessions or a model call.'),
           h('button',{onclick:async e=>{
-            const button=e.currentTarget; button.disabled=true;
-            try {
-              await api(aidPath+'/login-check',{method:'POST',body:{}});
-              await followProbe();
-            } catch(err) { if(current())checkResult.textContent=err.message; }
-            finally { if(current())button.disabled=false; }
-          }},'Check login requirement'),checkResult);
-        const connectBox=h('section',{'aria-label':'Site connection'});
-        content.append(connectBox);
-        let connectionGeneration=0;
-        async function connectionPanel() {
-          const connectionVersion=++connectionGeneration;
-          const cp=aidPath+'/site-connection';
-          let state=await api(cp); if(!current()||connectionVersion!==connectionGeneration)return;
-          const output=h('div',{'aria-live':'polite'});
-          const button=(label,fn)=>h('button',{onclick:async e=>{
-            const b=e.currentTarget; b.disabled=true;
-            // A review opened by this action must stay visible until the user
-            // acts again. In-flight status polls may not remount it away.
-            connectionGeneration++;
-            try { await fn(); } catch(err) { if(alive())output.append(h('p',{role:'alert'},err.message)); }
-            finally { if(alive())b.disabled=false; }
-          }},label);
-          if(state.state==='not_supported') {
-            const secure=new URL(source.url);secure.protocol='https:';
-            mount(connectBox,note(state.message),note('To connect, first review the separate HTTPS version. Its availability has not been verified; credentials are never sent over HTTP.'),
-              h('a',{href:secure.href,target:'_blank',rel:'noopener noreferrer'},secure.href),
-              button('Use HTTPS version',async()=>{
-                const upgraded=await api(aidPath+'/https-source',{method:'POST',body:{consent:true}});
-                if(!current())return;
-                window.dispatchEvent(new Event('external-sources-updated'));
-                await show(main,upgraded);
-              }),output);return;
-          }
-          mount(connectBox,h('h3',null,'Connect this site'),
-            note('Use a separate local browser profile for this account and site. Enter credentials and MFA in its window; HTTP Basic authentication uses a local form below. No page text or session is sent to the Assistant.'),
-            note('Only the site and identity-provider origins you approve may receive requests. Login form submissions require a separate one-time approval.'),
-            note(`Connection: ${state.state.replaceAll('_',' ')}`),output);
-          const failure={
-            browser_unavailable:'The sign-in browser could not open. Check that Chromium or your configured Chrome installation is available and that a desktop window can open.',
-            browser_closed:'The sign-in browser closed unexpectedly. Reopen the connection to retry.',
-            request_failed:'The requested page could not be reached safely. Check the address and connection; this does not establish that login is required.',
-            access_denied:'The site denied access. Login or course permission has not been verified.',
-            page_unavailable:'The site returned an unsuccessful response. Retry later; login requirement is unknown.'
-          }[state.failure_reason];
-          if(failure)connectBox.append(note(failure));
-          if(['not_connected','closed','error'].includes(state.state)) {
-            const ids=h('input',{type:'text',placeholder:'https://identity.example.edu', 'aria-label':'Additional identity-provider origins'});
-            connectBox.append(note('Optional: enter identity-provider HTTPS origins separated by commas. Unknown origins are blocked.'),ids,
-              button('Review connection',async()=>{
-                const origins=ids.value.split(',').map(s=>s.trim()).filter(Boolean);
-                const offer=await api(cp+'/offer',{method:'POST',body:{identity_origins:origins}});
-                if(!alive())return;
-                mount(output,note(`Approve local sign-in for ${offer.site}. Network access will be limited to: ${offer.origins.join(', ')}. A persistent local browser profile will be created.`),
-                  button('Agree and open sign-in window',async()=>{
-                    await api(cp+'/start',{method:'POST',body:{token:offer.token,consent:true}}); if(alive())await connectionPanel();
-                  }));
-              }));
-          } else {
-            if(state.popup_blocked)connectBox.append(note('This site tried to open another sign-in popup. This connection supports sign-in in its main window only. Try a same-window sign-in option; popup-only SSO is not supported.'));
-            if(state.http_auth?.scheme==='basic') {
-              const username=h('input',{type:'text',autocomplete:'off','aria-label':'Site username'});
-              const password=h('input',{type:'password',autocomplete:'off','aria-label':'Site password'});
-              connectBox.append(note(`HTTP Basic sign-in for ${state.http_auth.origin}. Credentials are used only for this exact page over HTTPS, kept in memory until the connection closes, and excluded from Assistant requests and exports.`),
-                username,password,button('Sign in to requested page',async()=>{
-                  const request={challenge:state.http_auth,username:username.value,password:password.value};
-                  username.value='';password.value='';
-                  try {await api(cp+'/http_auth',{method:'POST',body:{request}});}
-                  finally {request.username='';request.password='';}
-                  if(current())await connectionPanel();
-                }));
-            } else if(state.http_auth)connectBox.append(note('This HTTP authentication scheme is not supported. Use an authorized browser or connected Agent; do not paste credentials into chat.'));
-            if(state.redirect_blocked) {
-              const reason={
-                unapproved_origin:'The destination has not been approved. Review the blocked origin before reconnecting.',
-                unsafe_target:'The destination could not be used safely.',
-                post_replay:'The sign-in flow would repeat a submission. It cannot be continued automatically.',
-                verification:'The requested page redirected instead of showing course content. Reopen sign-in, then check the requested page again.',
-                loop:'The sign-in page redirected in a loop.',
-                limit:'The sign-in page redirected too many times.',
-                timeout:'The sign-in redirects took too long.',
-                navigation_changed:'The sign-in destination changed unexpectedly. Reopen the sign-in page to try again.',
-                subresource:'A page resource tried to redirect. This sign-in flow may not be supported.',
-                request_failed:'The next sign-in page could not be reached safely.'
-              }[state.redirect_reason]||'This redirect is not supported.';
-              connectBox.append(note(`A sign-in redirect was stopped. ${reason} Saved source data is unchanged.`));
-            }
-            if(state.blocked_origins?.length)connectBox.append(note(`Blocked origins: ${state.blocked_origins.join(', ')}. Close and reopen after reviewing any identity-provider origin you need.`));
-            if(state.blocked_submission_origin)connectBox.append(note(`A submission to ${state.blocked_submission_origin} was blocked because its purpose could not be verified. This sign-in flow may not be supported.`));
-            if(state.pending_post)connectBox.append(note(`A sign-in submission to ${state.pending_post.origin} is waiting for approval. Approve once, then submit again in the site window.`),
-              button('Approve one sign-in submission',async()=>{await api(cp+'/approve_post',{method:'POST',body:{request:state.pending_post}});if(alive())await connectionPanel();}));
-            if(state.state==='connected')connectBox.append(button('Review connected source analysis',async()=>{
-              const offer=await api(aidPath+'/connected-disclosure',{method:'POST',body:{}}); if(!alive())return;
-              if(!offer.available){mount(output,note(offer.message));return;}
-              mount(output,note(`The exact text below and the website origin will be sent to ${offer.setup||offer.provider} (${offer.endpoint}), model ${offer.model}; ${offer.usage_note||'this may use your quota.'} The reviewed text and classification will be saved locally and included in data backups.`),
-                note('Forms, common credential patterns, links and email addresses are removed automatically, but no filter can recognize every secret. Review the entire text and do not approve if it contains credentials, tokens, or information you do not want sent.'),
-                h('details',{open:true},h('summary',null,'Exact text to send and save'),h('pre',{class:'text'},offer.content)),
-                button('Approve, analyse and save',()=>action('/analyze-connected',{token:offer.token,consent:true})));
-            }));
-            connectBox.append(button('Refresh connection status',connectionPanel),
-              button('Reopen sign-in page',async()=>{await api(cp+'/retry_login',{method:'POST',body:{}});if(alive())await connectionPanel();}),
-              button('Check requested page',async()=>{
-                const result=await api(cp+'/verify',{method:'POST',body:{}}); if(!alive())return;
-                mount(output,note(result.state==='content_visible'?'Content appeared at the exact requested address. Confirm it is your course page; this does not prove enrollment or send text to an Assistant.':`Could not verify the requested page: ${result.state.replaceAll('_',' ')}. Existing saved data is unchanged.`),
-                  result.content?h('details',null,h('summary',null,'View retrieved page text'),h('pre',{class:'text'},result.content)):null,
-                  result.review_token?button('Confirm this is the requested course page',async()=>{await api(cp+'/confirm_content',{method:'POST',body:{request:result.review_token}});if(alive())await connectionPanel();}):null);
-              }),button('Close connection',async()=>{await api(cp+'/cancel',{method:'POST',body:{}});if(alive())await connectionPanel();}));
-            // Read status without remounting unchanged credential fields or reviews.
-            const seen=JSON.stringify(state);
-            const poll=async()=>{
-              if(!current()||connectionVersion!==connectionGeneration)return;
-              try {
-                const next=await api(cp);
-                if(!current()||connectionVersion!==connectionGeneration)return;
-                if(JSON.stringify(next)!==seen) {await connectionPanel();return;}
-                setTimeout(poll,1200);
-              } catch(err) {if(current())output.append(note(err.message));}
-            };
-            setTimeout(poll,1200);
-          }
-        }
-        await connectionPanel(); if(!alive())return;
-        followProbe().catch(err=>{if(current())checkResult.textContent=err.message;});
-        if(req?.status==='declined') content.append(note('Latest inspection failed. Previous successful results are retained; you can re-inspect after reviewing the disclosure.'));
-        if(req?.result_note) content.append(note(req.result_note));
+            e.currentTarget.disabled=true;
+            try {await api(aidPath+'/login-check',{method:'POST',body:{}});source=await api(aidPath);if(current())await draw();}
+            catch(err){if(current()){advanced.append(h('p',{role:'alert'},err.message));e.currentTarget.disabled=false;}}
+          }},'Check login requirement'),
+          h('button',{onclick:()=>show(main,source,'login')},needsLogin?'Open sign-in':'Connect manually'));
+        const publicReview=needsLogin?advanced:content;
         if (!disclosure) disclosure=await api(aidPath+'/disclosure');
         if(!alive())return;
         const repeat=!!req||!!c||source.decision!=='undecided';
         if(disclosure.available) {
-          content.append(note(`Read only this public URL: ${disclosure.urls.join(', ')}. Its page text will be sent to ${disclosure.setup || disclosure.provider} (${disclosure.endpoint}), model ${disclosure.model}. ${disclosure.usage_note||(disclosure.provider === 'codex' ? 'This may use your Codex quota.' : 'This uses your API quota.')} No Canvas cookies or login are used.`),
+          publicReview.append(note(`Read only this public URL: ${disclosure.urls.join(', ')}. Its page text will be sent to ${disclosure.setup || disclosure.provider} (${disclosure.endpoint}), model ${disclosure.model}. ${disclosure.usage_note||(disclosure.provider === 'codex' ? 'This may use your Codex quota.' : 'This uses your API quota.')} No Canvas cookies or login are used.`),
             h('button',{class:'primary',onclick:()=>action('/analyze',{token:disclosure.token,consent:true,reanalyze:repeat})},repeat?'Approve and re-inspect':'Approve and analyse'));
-        } else content.append(note(disclosure.message),h('a',{href:'#/assistant/settings'},'Open Assistant settings'));
-        content.append(h('button',{onclick:()=>action('/analyze',{executor:'mcp',reanalyze:repeat})},'Use connected Agent instead'));
+        } else publicReview.append(note(disclosure.message),h('a',{href:'#/assistant/settings'},'Open Assistant settings'));
+        advanced.append(h('button',{onclick:()=>action('/analyze',{executor:'mcp',reanalyze:repeat})},'Use connected Agent instead'));
+        content.append(advanced);
       }
       if(proposal && ['proposed','validated'].includes(proposal.status) && source.decision!=='declined') {
         content.append(h('section',{class:'external-proposal'},h('h3',null,'Approve this adapter?'),
+          note('Local adapters read public pages only. Site sign-in and adapter approval stay separate.'),
           note(`Adapter ${source.adapter_id} · revision ${proposal.revision}`),
           h('p',null,'Approve the exact pages and fields below. Approval runs a public smoke read; it enables this revision only if every declared field passes.'),
           h('ul',null,proposal.spec.pages.map(url=>h('li',null,url))),
@@ -253,17 +145,29 @@ export function makeExternalSources(env) {
     const route=location.hash, accountPath=A('/external-sources'), batchPath=A('/external-analysis');
     const previous=bindings.get(main);
     if(previous)window.removeEventListener('external-sources-updated',previous);
-    const refresh=()=>{if(main.querySelector('.external-source-list')?.isConnected)attach(main,scope).catch(()=>{});};
+    const refresh=()=>{if(valid()&&main.querySelector('.external-source-list')?.isConnected)attach(main,scope).catch(()=>{});};
     bindings.set(main,refresh); window.addEventListener('external-sources-updated',refresh);
     const query=new URLSearchParams(scope).toString();
     const valid=()=>main.isConnected&&bindings.get(main)===refresh&&location.hash===route&&A('/external-sources')===accountPath;
     const result=await api(accountPath+'?'+query);
     if(!valid()||!result.sources.length)return;
+    if(result.inspection?.enabled===false) {
+      const list=h('details',{class:'workspace-evidence external-source-list',open:true},
+        h('summary',{class:'external-source-heading'},'External sources'),
+        h('p',{class:'external-inspection-paused',role:'status'},result.inspection.message));
+      for(const source of result.sources)list.append(h('div',{class:'external-source-row'},
+        h('div',{class:'external-source-info'},h('a',{href:source.url,target:'_blank',rel:'noopener noreferrer'},source.title),
+          note(source.classification?'Saved · '+source.classification.roles.join(', '):'Saved link')),
+        h('button',{onclick:()=>show(main,source)},'View saved source')));
+      const host=main.querySelector('.workspace-content')||main;
+      host.querySelector('.external-source-list')?.remove();main.querySelector('.external-source-nudge')?.remove();host.append(list);
+      return;
+    }
     const seenURLs=new Set();
     const eligible=result.sources.filter(s=>{
       const failed=s.request?.status==='declined';
       const fresh=!s.analysis_request_id&&!s.classification&&s.decision==='undecided'&&s.status==='unclassified';
-      if((!fresh&&!failed)||s.analysis_running||s.access_needed||seenURLs.has(s.url))return false;
+      if((!fresh&&!failed)||s.analysis_running||s.access_needed||s.login_check?.outcome==='login_required'||seenURLs.has(s.url))return false;
       seenURLs.add(s.url);return true;
     });
     const fresh=eligible.filter(s=>!s.analysis_request_id);
@@ -282,7 +186,8 @@ export function makeExternalSources(env) {
       const run=++polling;
       mount(batchArea,h('h3',null,`Analysis · ${scopeLabel}`),
         h('p',{role:'status','aria-live':'polite'},`${batch.completed} / ${batch.total} completed · ${batch.failed} failed · ${batch.state}`),
-        note('Only the approved links run, one at a time. Cancel stops queued links and discards in-flight results; API usage already incurred cannot be undone.'));
+        batch.state==='running'?note('Only approved links run, one at a time. Cancel stops queued links; API usage already incurred cannot be undone.'):
+          batch.failed?note('Failed links are checked for sign-in automatically. Use Needs login beside the matching link when a login requirement is confirmed.'):null);
       all.disabled=batch.state==='running'||!eligible.length;
       if(batch.state==='running') {
         batchArea.append(h('button',{onclick:async(e)=>{
@@ -320,15 +225,23 @@ export function makeExternalSources(env) {
     const all=h('button',{class:'primary external-analyse-all',disabled:!eligible.length,onclick:(e)=>{e.preventDefault();e.stopPropagation();list.open=true;review();}},`Analyse all (${eligible.length})`);
     list.append(h('summary',{class:'external-source-heading'},h('span',null,'External sources'),all),batchArea);
     for(const source of result.sources) {
+      const failed=source.request?.status==='declined';
+      const needsLogin=failed&&source.login_check?.outcome==='login_required';
+      const connected=source.connection_state==='connected';
+      const recovery=failed?(source.login_check?.state==='running'?'Checking sign-in requirement…':needsLogin?
+        (connected?'Course page confirmed — ready for analysis':'Needs login'):source.login_check?.outcome==='readable'?
+        'Analysis failed · public page is readable':'Analysis failed · could not determine login requirement'):null;
       list.append(h('div',{class:'external-source-row'},h('div',{class:'external-source-info'},h('a',{href:source.url,target:'_blank',rel:'noopener noreferrer'},source.title),
-        note(`${source.status.replaceAll('_',' ')}${source.request?.status==='declined'?' · latest inspection failed':''}${source.classification?' · '+source.classification.roles.join(', '):''}${source.last_success_at?' · read '+source.last_success_at:''}`)),
+        h('p',{class:'small muted',role:failed?'status':null},recovery||`${source.status.replaceAll('_',' ')}${source.classification?' · '+source.classification.roles.join(', '):''}${source.last_success_at?' · read '+source.last_success_at:''}`)),
         h('div',{class:'external-source-actions'},
-          source.analysis_request_id && !source.analysis_running && !['open','claimed'].includes(source.request?.status) ? h('button',{onclick:()=>show(main,source)},'Re-inspect') : null,
+          needsLogin?h('button',{class:'primary',onclick:()=>show(main,source,'login')},connected?'Continue analysis':'Needs login'):
+            source.analysis_request_id && !source.analysis_running && !['open','claimed'].includes(source.request?.status) ? h('button',{onclick:()=>show(main,source)},failed?'Review failure':'Re-inspect') : null,
           launcher([{id:'analyze',icon:'message',label:source.classification||source.decision!=='undecided'?'Review source':'Analyse link',
             description:'Review the public URL and Assistant API usage before analysis; cached decisions are reused.',run:()=>{dismiss();return show(main,source);} }]))));
     }
     const host=main.querySelector('.workspace-content')||main;
     host.querySelector('.external-source-list')?.remove(); main.querySelector('.external-source-nudge')?.remove(); host.append(list);
+    if(result.sources.some(s=>s.login_check?.state==='running'))setTimeout(()=>{if(valid())refresh();},1200);
     if(fresh.some(s=>!dismissed(key).has(s.id))) {
       toast=h('aside',{class:'external-source-nudge','aria-label':'Uninspected external links'},
         h('button',{class:'workspace-icon-button',title:'Dismiss link reminder','aria-label':'Dismiss link reminder',onclick:dismiss},'×'),

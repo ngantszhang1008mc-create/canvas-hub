@@ -62,7 +62,7 @@ def test_real_15_16_upgrade_matrix(tmp_path, monkeypatch, versions):
                 conn.execute("INSERT INTO component_source_changes VALUES (1,'item','123')")
         assert database.migrate(conn)==[f[0] for f in files if f[0] not in versions]
         assert database.migrate(conn)==[]
-        assert database.schema_version(conn)==16
+        assert database.schema_version(conn)==max(f[0] for f in files)
         for table in ('source_analysis_attempts','source_analysis_batches','component_source_dependencies','component_source_changes'):
             assert conn.execute('SELECT 1 FROM sqlite_master WHERE name=?',(table,)).fetchone()
         if versions:
