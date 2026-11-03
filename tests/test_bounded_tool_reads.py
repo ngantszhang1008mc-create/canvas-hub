@@ -183,7 +183,7 @@ def test_snapshot_complete_retrieval_restart_scope_and_live_change(hub, account,
     text, offset = '', 0
     while True:
         page = read(ctx, {'read_id': reply['read_id'], 'path': '/fields/a~1b~0c/body', 'offset': offset, 'chars': 4000})
-        assert len(json.dumps(page, ensure_ascii=False).encode()) < READ_BYTES
+        assert len(json.dumps(page, ensure_ascii=False).encode()) <= READ_BYTES
         text += page['text']
         if page['next_offset'] is None: break
         offset = page['next_offset']
@@ -271,6 +271,10 @@ def test_real_tool_indexes_keep_full_fields_and_existing_page_cursors(hub, accou
                               ('list_items', {'course_id': '4242'}, 'items'),
                               ('list_context_sources', {'course_id': '4242'}, 'sources')]:
         reply = invoke(name, args)
+        if name == 'list_context_sources':
+            assert 'read_id' not in reply  # one direct, byte-bounded catalog page
+            assert reply['sources'] and reply['next_offset'] > 0
+            continue
         assert reply['read_id'] and not reply['complete']
         flow = retrieve(reply['read_id'], '')
         request = next(flow)

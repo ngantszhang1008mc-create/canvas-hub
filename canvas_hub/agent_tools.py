@@ -929,8 +929,10 @@ def h_patch_component(ctx, a):
 
 def h_context_sources(ctx, a, action):
     from .services.context_sources import ContextSources
+    from .assistant.read_results import READ_BYTES
     return getattr(ContextSources(ctx.api.hub.db), action)(_account(ctx, a),
         **({'byte_limit': 8000} if action == 'catalog' else {}),
+        **({'response_byte_limit': READ_BYTES} if action == 'catalog' and ctx.read_results is not None else {}),
         **{k: v for k, v in a.items() if k != "account_id"})
 
 

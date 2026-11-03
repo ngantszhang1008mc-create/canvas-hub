@@ -125,13 +125,27 @@ class ToolCatalog:
         # a separate fixed token slice can reject an otherwise fitting request.
         # Keep the independent tool-count bound and never truncate definitions.
         if self.discovery and len(result) > MAX_ADVERTISED:
-            raise InvalidInput("Selected tools exceed the 32-tool request budget. Choose fewer groups or individual tools from the picker.", code="tool_selection_too_large")
+            raise InvalidInput(
+                f"Selected tools require {len(result)} schemas; the request budget is {MAX_ADVERTISED} "
+                f"({len(result) - MAX_ADVERTISED} too many). Select only the individual tools needed; no selection was changed.",
+                code="tool_selection_too_large", detail={
+                    **self.selection_fit(selection),
+                    "individual_choices": ["tool:" + name for name in self.tools if name in names and name not in DEFAULTS],
+                })
         if not self.discovery and len(result) > MAX_GATEWAY_TOOLS:
             raise InvalidInput("The reviewed tool catalog exceeds the gateway protocol limit.", code="tool_selection_too_large")
         return result
 
+    def selection_fit(self, selection):
+        count = len(self.names(selection)) + (2 if self.discovery else 0)
+        maximum = MAX_ADVERTISED if self.discovery else MAX_GATEWAY_TOOLS
+        return {"advertised_count": count, "max_advertised": maximum, "fits": count <= maximum,
+                "remaining_slots": max(0, maximum - count), "over_by": max(0, count - maximum)}
+
     def public(self):
-        return {"groups": self.groups, "tools": [{"name": n, "group": group_for(n), "description": t.description,
+        return {"groups": [{**g, "tool_count": len(g["tools"]),
+                            "selection_fit": self.selection_fit(["group:" + g["id"]])} for g in self.groups],
+                "tools": [{"name": n, "group": group_for(n), "description": t.description,
                  "schema_tokens": estimate(definition(t)) + 32} for n, t in self.tools.items()],
                 "default_tools": [n for n in self.tools if n in DEFAULTS], "discovery_available": self.discovery,
                 "limits": {"max_advertised": MAX_ADVERTISED if self.discovery else MAX_GATEWAY_TOOLS,
@@ -183,17 +197,28 @@ class ToolSession:
         args = validate_args(DISCOVER, args)
         if "select" in args:
             selected = self.catalog.normalize(args["select"])
-            self.catalog.advertised(self.manual + selected)  # atomic: rejected selection changes nothing
+            try:
+                self.catalog.advertised(self.manual + selected)  # atomic: rejected selection changes nothing
+            except InvalidInput as error:
+                if error.code == 'tool_selection_too_large':
+                    error.detail.update(manual_selection=self.manual, discovered_selection=self.discovered,
+                                        current_fit=self.catalog.selection_fit(self.manual + self.discovered),
+                                        manual_fit=self.catalog.selection_fit(self.manual),
+                                        selection_semantics='select replaces discovered choices; manual selections stay. Choose individual_choices that fit manual_fit.remaining_slots.')
+                raise
             self.discovered = selected
         query = (args.get("query") or "").casefold()[:200]
         offset = args.get("offset") or 0
         out = {"manual_selection": self.manual, "discovered_selection": self.discovered,
                "loaded_tools": [t["name"] for t in self.advertised()], "executed": False,
+               "selection_fit": self.catalog.selection_fit(self.manual + self.discovered),
                "note": "Selection only loads tools. To change discovered tools, pass select again. Manual choices remain for this message."}
         if 'select' not in args or 'query' in args or 'offset' in args:
             public = self.catalog.public()
             matches = [t for t in public["tools"] if query in (t["name"] + " " + t["group"] + " " + t["description"]).casefold()]
-            out.update(groups=[{k: g[k] for k in ("id", "label", "description")} for g in public["groups"]],
+            out.update(groups=[{**{k: g[k] for k in ("id", "label", "description", "tool_count")},
+                                "fit_if_added": self.catalog.selection_fit(self.manual + self.discovered + ["group:" + g["id"]])}
+                               for g in public["groups"]],
                        tools=[{**t, "description": t["description"][:220]} for t in matches[offset:offset+15]],
                        next_offset=offset + 15 if offset + 15 < len(matches) else None)
         if include_schemas and "select" in args:

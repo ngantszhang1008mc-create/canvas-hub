@@ -98,13 +98,25 @@ class ContextSources:
         return {k: row[k] for k in ("source_id", "version", "title", "total_chars", "chunk_count", "item_id",
                                     "resource_id", "course_canvas_id", "source_url", "current_revision", "presence")}
 
-    def catalog(self, account_id, *, course_id=None, item_id=None, offset=0, limit=15, include_preview=False, byte_limit=None):
+    def catalog(self, account_id, *, course_id=None, item_id=None, offset=0, limit=15, include_preview=False,
+                byte_limit=None, response_byte_limit=None):
         self._backfill(account_id, course_id, item_id)
         where, args = self._scope(account_id, course_id, item_id)
         limit, offset = max(1, min(20, int(limit))), max(0, int(offset))
         rows = self.db.query("SELECT s.*,d.item_id,d.resource_id,i.course_canvas_id,i.source_url,i.current_revision,i.presence "
                              "FROM context_sources s JOIN search_docs d ON d.id=s.search_doc_id JOIN items i ON i.id=d.item_id "
                              f"WHERE {where} ORDER BY s.source_id LIMIT ? OFFSET ?", (*args, limit + 1, offset))
+        metadata = {
+            "preview_included": bool(include_preview),
+            "preview_kind": "opening excerpt, not a complete summary" if include_preview else None,
+            "note": "Metadata only by default. Set include_preview=true for opening excerpts, or read_context_source with source_id/version for full original ranges. Listing does not establish reading coverage.",
+            "coverage": self.coverage(account_id, course_id, item_id), "untrusted_data": True,
+        }
+
+        def page(sources):
+            return {"sources": sources,
+                    "next_offset": offset + len(sources) if len(rows) > len(sources) else None, **metadata}
+
         sources, size = [], 0
         for row in rows[:limit]:
             source = self._metadata(row)
@@ -113,14 +125,15 @@ class ContextSources:
             cost = len(json.dumps(source, ensure_ascii=False).encode('utf-8'))
             if sources and byte_limit is not None and size + cost > byte_limit:
                 break
+            # In-app catalogs fit their final envelope directly, rather than
+            # requiring snapshot pages merely to discover source IDs. A single
+            # oversized row still reaches the snapshot fallback intact.
+            if sources and response_byte_limit is not None and len(json.dumps(
+                    page([*sources, source]), ensure_ascii=False, default=str).encode()) > response_byte_limit:
+                break
             sources.append(source)
             size += cost
-        return {"sources": sources,
-                "next_offset": offset + len(sources) if len(rows) > len(sources) else None,
-                "preview_included": bool(include_preview),
-                "preview_kind": "opening excerpt, not a complete summary" if include_preview else None,
-                "note": "Metadata only by default. Set include_preview=true for opening excerpts, or read_context_source with source_id/version for full original ranges. Listing does not establish reading coverage.",
-                "coverage": self.coverage(account_id, course_id, item_id), "untrusted_data": True}
+        return page(sources)
 
     def search(self, account_id, query, *, course_id=None, item_id=None, source_id=None, offset=0, limit=2):
         from .search import _fts_query

@@ -79,6 +79,16 @@ cursors and source-catalog offsets remain retrievable within their snapshot.
 Item reads retain full text instead of the old fixed prefix; tracker snapshots
 include exact definitions, manual state, source configuration and pending rules.
 
+Reader replies remain bounded to 4,800 UTF-8 bytes including their final JSON
+envelope. Text reads default to at most 4,000 characters and fill the available
+bytes without splitting characters. New references prefer readable JSON pointers
+such as `/definition` and `/fields/body/value`; historical `@/` ordinal paths still
+work, including the fallback for oversized keys. Array positions are not item IDs.
+Indexes prioritize actual identity fields, titles and source links when they fit.
+In-app source catalogs page directly within the same final-response byte bound,
+avoiding a second snapshot paging layer for ordinary metadata. An individually
+oversized source entry still uses the complete, durable snapshot fallback.
+
 Snapshots survive restart and manual compaction and belong to one account and
 conversation. The reader checks current read permission and cannot execute a tool.
 They describe historical data: reread the original tool for live changes and use
@@ -94,6 +104,12 @@ Benchmark harnesses with custom tool allowlists must include this reader or use
 the production catalog to exercise the new path. No schema migration is required.
 
 ## Tool selection and discovery
+
+Discovery reports group sizes and whether adding each group fits the current
+selection. Oversized selections report the required schema count, unchanged
+manual/discovered selections, and individual tool choices for recovery. The
+32-schema discovery ceiling remains an application limit, separate from model
+context capacity; reviewed gateway limits and allowlists are unchanged.
 
 The circular arrow beside the chat input opens a searchable list of all currently
 permitted groups and tools. `/tracker` (or another group/tool command) adds a
