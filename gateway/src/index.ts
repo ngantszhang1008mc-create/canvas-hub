@@ -1,6 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import { adminMatches, bearer, bodyFingerprint, digest, opaqueToken, peerDigest } from "./crypto";
-import { assertConfigured, exactKeys, integer, MAX_AMOUNT, parsePolicy, SINGLETON, type Env, type ModelPolicy, type Policy } from "./config";
+import { assertConfigured, exactKeys, integer, MAX_AMOUNT, newApiRelayKeys, parsePolicy, SINGLETON, type Env, type ModelPolicy, type Policy } from "./config";
 import { errorResponse, GatewayError, json, responseHeaders } from "./errors";
 import { Ledger, publicRequest, type RequestRow, type SessionRow } from "./ledger";
 import { adapterFor, PreflightError, type Completion, type Delta, type PreparedCall } from "./providers";
@@ -28,7 +28,8 @@ export class AllowanceGateway extends DurableObject<Env> {
   // These local seams are exercised inside workerd by runInDurableObject.
   // There are no HTTP endpoints to select time, adapter, or usage.
   private clock = () => Date.now();
-  private adapter = (model: ModelPolicy) => adapterFor(model, this.env);
+  private adapter = (model: ModelPolicy, userId?: string) => adapterFor(model, this.env,
+    model.provider === "new_api" && userId ? this.ledger.relayKeyRef(userId) : null);
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -91,7 +92,14 @@ export class AllowanceGateway extends DurableObject<Env> {
       this.ledger.rateLimit([{ key: `user:${session.user_id}`, limit: this.policy.user_requests_per_minute }], this.clock());
 
       if (url.pathname === "/v1/allowance" && request.method === "GET") {
-        return json(this.ledger.allowance(session.user_id, this.policy, this.clock()));
+        const allowance = this.ledger.allowance(session.user_id, this.policy, this.clock());
+        // Public metadata describes local configuration only. Do not expose the
+        // secret-map reference, relay key, upstream identity or claimed health.
+        const binding = this.hasNewApi() ? this.newApiBinding(session.user_id) : undefined;
+        return json({ ...allowance, models: allowance.models.map(model => ({ ...model,
+          ...(this.policy.models[model.id].provider === "new_api" && binding ? {
+            new_api: { identity_mode: binding.identity_mode, binding_status: binding.binding_status },
+          } : {}) })) });
       }
       const statusPath = /^\/v1\/requests\/([0-9a-f-]{36})$/.exec(url.pathname);
       if (statusPath && request.method === "GET") {
@@ -117,22 +125,52 @@ export class AllowanceGateway extends DurableObject<Env> {
     ], this.clock());
   }
 
+  private hasNewApi(): boolean {
+    return Object.values(this.policy.models).some(model => model.provider === "new_api");
+  }
+
+  private newApiBinding(userId: string) {
+    const reference = this.ledger.relayKeyRef(userId);
+    const perUser = this.env.NEW_API_IDENTITY_MODE === "per_user";
+    const bindingStatus = !perUser ? "shared" : reference === null ? "unbound"
+      : Object.hasOwn(newApiRelayKeys(this.env), reference) ? "bound" : "credential_missing";
+    return { user_id: userId, identity_mode: perUser ? "per_user" : "shared",
+      relay_key_ref: reference, binding_status: bindingStatus };
+  }
+
   private async adminRoute(request: Request, path: string): Promise<Response> {
     if (path === "/admin/status" && request.method === "GET") return json(this.ledger.status(this.policy, this.clock()));
+    const bindingPath = /^\/admin\/users\/([0-9a-f-]{36})\/new-api$/.exec(path);
+    if (bindingPath) {
+      if (!this.hasNewApi()) throw new GatewayError(404, "not_found");
+      if (request.method === "GET") return json(this.newApiBinding(bindingPath[1]));
+    }
     if (request.method !== "POST") throw new GatewayError(404, "not_found");
     const body = await readJson(request, 2048);
     const now = this.clock();
+    if (bindingPath) {
+      exactKeys(body, ["relay_key_ref"]);
+      if (this.env.NEW_API_IDENTITY_MODE !== "per_user" || (body.relay_key_ref !== null
+        && (typeof body.relay_key_ref !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(body.relay_key_ref)
+          || !Object.hasOwn(newApiRelayKeys(this.env), body.relay_key_ref)))) throw new GatewayError(400, "invalid_relay_binding");
+      this.ledger.bindRelayKey(bindingPath[1], body.relay_key_ref, now);
+      return json({ ok: true });
+    }
     if (path === "/admin/invites") {
-      exactKeys(body, ["expires_in_seconds", "user_id"], ["expires_in_seconds"]);
+      exactKeys(body, ["expires_in_seconds", "user_id", "relay_key_ref"], ["expires_in_seconds"]);
       if (!integer(body.expires_in_seconds, 1, this.policy.invite_ttl_max_seconds)
         || (body.user_id !== undefined && (typeof body.user_id !== "string" || !/^[0-9a-f-]{36}$/.test(body.user_id)))) {
         throw new GatewayError(400, "invalid_invite_options");
       }
+      if (body.relay_key_ref !== undefined && (!this.hasNewApi() || this.env.NEW_API_IDENTITY_MODE !== "per_user"
+        || body.user_id !== undefined || typeof body.relay_key_ref !== "string"
+        || !/^[A-Za-z0-9_-]{1,64}$/.test(body.relay_key_ref)
+        || !Object.hasOwn(newApiRelayKeys(this.env), body.relay_key_ref))) throw new GatewayError(400, "invalid_invite_options");
       const invite = opaqueToken("inv");
       const id = crypto.randomUUID();
       const hash = await digest(invite);
       const expiresAt = this.clock() + body.expires_in_seconds * 1000;
-      this.ledger.createInvite(id, hash, body.user_id as string | undefined ?? null, expiresAt, this.clock());
+      this.ledger.createInvite(id, hash, body.user_id as string | undefined ?? null, expiresAt, this.clock(), body.relay_key_ref as string | undefined ?? null);
       return json({ invite_id: id, invite, expires_at: expiresAt }, 201);
     }
     const limitsPath = /^\/admin\/users\/([0-9a-f-]{36})\/limits$/.exec(path);
@@ -171,6 +209,9 @@ export class AllowanceGateway extends DurableObject<Env> {
     const key = idempotencyKey(request);
     const body = await readJson(request, this.policy.max_body_bytes);
     const { input, model } = generation(body, this.policy);
+    if (model.provider === "new_api" && request.headers.get("X-Gateway-Consent-Version") !== "2") {
+      throw new GatewayError(409, "disclosure_required");
+    }
     const [keyHash, bodyHash] = await Promise.all([digest(key), bodyFingerprint(JSON.stringify(input), this.env.ADMIN_SECRET)]);
     const reserved = this.ledger.reserve(session, crypto.randomUUID(), keyHash, bodyHash, input.model, model, input.max_output_tokens, this.policy, this.clock());
     if (reserved.replay) {
@@ -179,7 +220,7 @@ export class AllowanceGateway extends DurableObject<Env> {
     const row = reserved.row;
     let prepared: PreparedCall;
     try {
-      prepared = this.adapter(model).prepare(input, model, this.policy);
+      prepared = this.adapter(model, session.user_id).prepare(input, model, this.policy);
       if (request.signal.aborted) throw new GatewayError(499, "client_disconnected");
       this.ledger.markDispatched(row.id, session, this.clock());
       await this.scheduleAlarm();

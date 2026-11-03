@@ -36,7 +36,7 @@ from .providers import (ANTHROPIC_DEFAULT_MODEL, RESERVED_PARAMS, ProviderError,
 from .context import Policy, validate_settings
 from .context_service import ContextService
 from .source_context import source_manifest, restore_source_context, followup_source_context
-from .gateway_settings import GATEWAY_FIELDS, GatewaySettings, apply_gateway
+from .gateway_settings import GATEWAY_FIELDS, GatewaySettings, apply_gateway, gateway_consent_valid
 from .tool_catalog import ToolCatalog, ToolSession
 
 log = logging.getLogger("canvas_hub.assistant")
@@ -286,7 +286,7 @@ class AssistantService(ContextService, GatewaySettings):
         if cfg.get("provider") == "codex":
             return True    # the connection test checks the CLI and its own login
         if cfg.get("provider") == "allowance_gateway":
-            return bool(cfg.get('base_url') and cfg.get('model') and cfg.get('gateway_token') and cfg.get('gateway_consent') is True)
+            return bool(cfg.get('base_url') and cfg.get('model') and cfg.get('gateway_token') and gateway_consent_valid(cfg))
         return False
 
     def update_config(self, data: dict) -> dict:

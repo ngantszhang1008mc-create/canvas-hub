@@ -1,16 +1,20 @@
-import type { Env, ModelPolicy, Policy } from "./config";
+import { newApiRelayKey, type Env, type ModelPolicy, type Policy } from "./config";
 import type { GenerationRequest } from "./validation";
 import type { MeteredUsage } from "./pricing";
 import { OpenAIResponsesAdapter } from "./openai-responses";
+import { NewApiAdapter } from "./new-api";
 
 export type Delta =
   | { type: "text.delta"; delta: string }
   | { type: "tool_call.delta"; index: number; id?: string; name?: string; arguments_delta?: string };
 
 export interface Completion {
-  // Only a complete provider stream with terminal authoritative usage may
-  // release any reservation. Intermediate usage estimates are not accepted.
+  // Authoritative usage can reduce a reservation after a complete stream.
+  // Relay completions instead consume the full amount without metered usage.
   usage: MeteredUsage | null;
+  // Only requests reserved in this mode may complete without authoritative
+  // usage. The ledger consumes the full hold; relay estimates cannot refund it.
+  accounting?: "authoritative_usage" | "full_reservation";
   finish_reason: "stop" | "tool_calls" | "length";
   bound_violation?: boolean;
 }
@@ -60,7 +64,8 @@ export class MockAdapter implements ProviderAdapter {
   }
 }
 
-export function adapterFor(model: ModelPolicy, env: Env): ProviderAdapter {
+export function adapterFor(model: ModelPolicy, env: Env, relayKeyRef?: string | null): ProviderAdapter {
   if (model.provider === "mock") return new MockAdapter();
+  if (model.provider === "new_api") return new NewApiAdapter(newApiRelayKey(env, relayKeyRef), env.NEW_API_BASE_URL);
   return new OpenAIResponsesAdapter(env.OPENAI_API_KEY);
 }

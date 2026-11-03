@@ -1829,11 +1829,13 @@ function assistantSettingsCard(cfg, prof) {
     || cfg.presets.some((p) => p.id === presetSel.value && p.provider === "allowance_gateway");
   const gatewayMode = h("select", { "aria-label": "Gateway mode" },
     h("option", { value: "mock", selected: cur.gateway_mode !== "production" }, "Mock — synthetic responses"),
-    h("option", { value: "production", selected: cur.gateway_mode === "production" }, "Production — OpenAI"));
+    h("option", { value: "production", selected: cur.gateway_mode === "production" }, "Production — operator-funded models"));
   const gatewayConsent = h("input", { type: "checkbox", checked: cur.gateway_consent === true });
   const invitation = h("input", { type: "password", autocomplete: "off", autocapitalize: "off", spellcheck: "false", maxlength: 128,
     placeholder: "Invitation from your gateway operator" });
   const gatewaySession = h("p", { class: "small", "aria-live": "polite" });
+  const gatewayAccount = h("p", { class: "small wrap-anywhere" });
+  const gatewayLink = h("p", { class: "small", "aria-live": "polite" });
   const gatewayToolSummary = h("summary");
   const gatewayToolNames = h("p", { class: "tiny wrap-anywhere" });
   const gatewayToolChoices = h("div", { class: "perm-list" });
@@ -1846,8 +1848,8 @@ function assistantSettingsCard(cfg, prof) {
   const gatewayField = h("div", { class: "field", style: "grid-column:1/-1", hidden: true },
     h("label", { class: "field" }, h("span", null, "Gateway mode (must match your operator's gateway)"), gatewayMode),
     h("label", { class: "check" }, gatewayConsent,
-      "I allow selected conversation and course excerpts to pass through this gateway. Production mode also sends them to OpenAI. Tools still run under local permissions. Canvas Hub will not switch to an API-key provider automatically."),
-    gatewaySession,
+      "I allow selected conversation and course excerpts to pass through this gateway. Production mode sends them to OpenAI or through the operator's New API relay to DeepSeek, according to the selected model. New API requests consume the full reserved allowance; token usage and the provider's actual bill may differ. Tools still run under local permissions. Canvas Hub will not switch to an API-key provider automatically."),
+    gatewaySession, gatewayAccount, gatewayLink,
     h("label", { class: "field" }, h("span", null, "Invitation"), invitation),
     h("div", { class: "row" }, enrollBtn, removeSessionBtn),
     h("p", { class: "tiny muted" }, "Connecting saves these settings and uses the invitation once. The invitation is cleared immediately and enrollment is never retried automatically."),
@@ -1867,6 +1869,14 @@ function assistantSettingsCard(cfg, prof) {
   };
   const microUsd = (value) => typeof value === "string" && /^\d{1,40}$/.test(value)
     ? `${value.replace(/^0+(?=\d)/, "")} micro-USD` : "not reported";
+  const relayStatus = (entry, fresh) => {
+    if (!entry?.new_api) return entry?.accounting === "full_reservation" ? "New API relay configuration not reported." : "";
+    const identity = entry.new_api.identity_mode === "per_user" ? "Per-user New API identity" : "Shared New API service identity";
+    if (!fresh) return `${identity} (saved). Check allowance to refresh its configuration.`;
+    const status = { shared: "shared service configured", bound: "account link configured",
+      unbound: "account link pending; contact your gateway operator", credential_missing: "relay credential missing; contact your gateway operator" }[entry.new_api.binding_status] || "configuration not reported";
+    return `${identity}: ${status}. Last reported configuration only; upstream access and quota have not been checked.`;
+  };
   const toolSummary = () => {
     gatewayToolSummary.textContent = `${gatewaySelectedTools.size} enabled tools · model limits`;
     gatewayToolNames.textContent = gatewaySelectedTools.size ? `Enabled: ${[...gatewaySelectedTools].join(", ")}` : "No tools enabled.";
@@ -1877,6 +1887,8 @@ function assistantSettingsCard(cfg, prof) {
     gatewaySession.textContent = saved
       ? `Gateway session saved · ${gatewayMode.value} mode · expires ${utcTime(gatewayProfile.gateway_expires_at)}${Number.isSafeInteger(gatewayProfile.gateway_expires_at) && gatewayProfile.gateway_expires_at <= Date.now() ? " (expired)" : ""}.${activeGatewaySession() ? " Remove the saved session before using another invitation." : ""}`
       : "No session saved for these gateway settings. Check the URL and mode, give consent, then connect with an invitation.";
+    const userId = matches ? reportedAllowance?.user_id || gatewayProfile.gateway_user_id : null;
+    gatewayAccount.textContent = userId ? `Canvas gateway account ID: ${userId}. Share this ID with your operator for account support.` : "";
     const available = matches && Array.isArray(gatewayProfile.gateway_available_tools) ? gatewayProfile.gateway_available_tools : [];
     gatewayDetails.hidden = !matches;
     toolSummary();
@@ -1892,13 +1904,19 @@ function assistantSettingsCard(cfg, prof) {
       return h("label", { class: "check" }, toggle, `${tool}${unavailable ? " (unavailable; uncheck to remove)" : ""}`);
     }) : h("p", { class: "tiny muted" }, "No available local tools reported. Connect or check allowance to refresh capabilities."));
     const models = matches ? reportedAllowance?.models || gatewayProfile.gateway_models || [] : [];
+    gatewayLink.textContent = relayStatus(models.find((entry) => entry.id === model.value.trim()), !!reportedAllowance && matches);
     mount(gatewayModels, h("strong", null, "Reported model output limits"), models.length ? models.map((entry) => h("div", null,
-      `${entry.id}: ${Number.isSafeInteger(entry.min_output_tokens) ? entry.min_output_tokens : "unknown"}–${Number.isSafeInteger(entry.max_output_tokens) ? entry.max_output_tokens : "unknown"} output tokens`))
+      h("div", null, `${entry.id}: ${Number.isSafeInteger(entry.min_output_tokens) ? entry.min_output_tokens : "unknown"}–${Number.isSafeInteger(entry.max_output_tokens) ? entry.max_output_tokens : "unknown"} output tokens`),
+      entry.reservation ? h("div", null, `Each model round reserves ${microUsd(entry.reservation.min_microusd)}–${microUsd(entry.reservation.max_microusd)}, depending on the output cap.`,
+        entry.accounting === "full_reservation" ? ` At the maximum output cap (${entry.max_output_tokens} tokens), the full conservative charge is ${microUsd(entry.reservation.max_microusd)}.` : "") : null,
+      entry.accounting === "full_reservation" && !entry.reservation ? h("div", null, "Full reservation charged per completed model round; reservation bounds not reported.") : null,
+      h("div", null, relayStatus(entry, !!reportedAllowance && matches))))
       : h("div", null, "No model limits reported yet."));
     if (!reportedAllowance || !matches) mount(gatewayAllowance);
     else mount(gatewayAllowance,
-      h("p", null, h("strong", null, `Reported allowance · ${reportedAllowance.mode || gatewayMode.value} mode`),
+      h("p", null, h("strong", null, `Canvas gateway allowance · ${reportedAllowance.mode || gatewayMode.value} mode`),
         reportedAllowance.gateway_paused ? " · gateway paused" : ""),
+      h("p", { class: "tiny muted" }, "These daily and monthly balances come from the Canvas gateway ledger. New API manages upstream channels, users and token quotas separately; its balance is not synchronized here."),
       h("div", { style: "overflow-x:auto" }, h("table", null,
         h("thead", null, h("tr", null, ["Period", "Remaining", "Held", "Spent", "Resets (UTC)"].map((title) => h("th", { scope: "col" }, title)))),
         h("tbody", null, ["daily", "monthly"].map((period) => {
@@ -1907,7 +1925,7 @@ function assistantSettingsCard(cfg, prof) {
             h("td", null, microUsd(amount.remaining_microusd)), h("td", null, microUsd(amount.held_microusd)),
             h("td", null, microUsd(amount.spent_microusd)), h("td", null, utcTime(amount.resets_at)));
         })))),
-      h("p", { class: "tiny muted" }, "1,000,000 micro-USD = US$1. Held amounts are reservations, not final charges. Checking allowance does not generate a model response."));
+      h("p", { class: "tiny muted" }, "1,000,000 micro-USD = US$1. Held amounts are reservations. Completed New API requests consume the full reservation as a conservative allowance charge, not a measured provider bill. Interrupted requests may keep their holds. Checking allowance does not generate a model response."));
     updateButtons();
   };
   const adoptProfile = (response, syncFields = true) => {
@@ -1961,6 +1979,7 @@ function assistantSettingsCard(cfg, prof) {
   const changeGateway = () => { gatewayConsent.checked = false; invitation.value = ""; reportedAllowance = null; mount(result); renderGateway(); };
   gatewayMode.addEventListener("change", changeGateway);
   base.addEventListener("input", () => { if (isGateway()) changeGateway(); });
+  model.addEventListener("input", () => { if (isGateway()) renderGateway(); });
   const result = h("div", { class: "small", "aria-live": "polite" });
   const save = async () => {
     if (!presetSel.value) { toast("Choose a provider first", true); return null; }
