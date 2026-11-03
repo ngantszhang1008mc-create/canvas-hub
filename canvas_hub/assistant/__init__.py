@@ -119,7 +119,13 @@ calling the tools; do not guess course facts.
   before answering about them later, read current fields with get_component_context instead of assuming. State
   changes require patch_component_state with that read's exact expected_version and state_token; never reuse an old token.
   To rebuild an existing tracker, first list_components(query=its name), then use its course/item scope and current
-  definition. Reuse exact source IDs/versions already read; avoid repeating broad course/item/catalog searches with
+  definition. Discover/load tool:propose_component_rebuild and pass component_id, a fresh expected_version/state_token,
+  and spec. Optional identity_map maps old IDs to new IDs under rows/groups/scenarios; use stable identities, never guess
+  ambiguous mappings. This stages the rebuild on the existing tracker and keeps its active definition, state and pin
+  until user approval. Never rebuild by unpinning the old tracker and calling show_* to create a replacement, or by
+  manually recreating its state. Preserve skipped choices, explicit zeroes and existing rule/source semantics; resolve
+  reported mapping conflicts before acceptance. Deliberate rule changes need a separately reviewed definition proposal.
+  Reuse exact source IDs/versions already read; avoid repeating broad course/item/catalog searches with
   slightly different arguments. A local item_id is not a Canvas course_id. An index or preview is not full evidence.
   Large new reads return read_id/read_path references: read_tool_result retrieves selected immutable fields/ranges
   without rereading everything. Follow next_offset/nested references when full rules are needed. These are snapshots,

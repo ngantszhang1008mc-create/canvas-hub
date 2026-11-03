@@ -13,7 +13,7 @@ from ..util import InvalidInput
 from .context import estimate
 
 GROUPS = (
-    ("tracker", "Trackers & scores", "Read current tracker inputs, local totals and guarded state patches."),
+    ("tracker", "Trackers & scores", "Read current inputs/totals, patch state and propose guarded rebuilds that preserve progress."),
     ("documents", "Documents & sources", "Search and read bounded stored document excerpts with source coverage."),
     ("courses", "Courses & changes", "Read courses, items, changes and collection coverage."),
     ("deadlines", "Deadlines", "Read deadlines and manage local views, archives and completion."),
@@ -67,7 +67,8 @@ def definition(tool):
 DISCOVER = AgentTool("discover_tools",
     "Find additional permitted Canvas Hub tools. No selection: page/search names and groups. "
     "select replaces the request's discovered selection (manual selections stay). It only loads schemas, never executes tools. "
-    "Use group:tracker or tool:get_component_context. On Codex, invoke newly discovered tools with call_discovered_tool.", "read",
+    "Use group:tracker or tool:get_component_context. For an existing tracker rebuild, load tool:propose_component_rebuild "
+    "when permitted; do not unpin and create a replacement. On Codex, invoke newly discovered tools with call_discovered_tool.", "read",
     {"query": {"type": "string"}, "offset": {"type": "integer", "minimum": 0},
      "select": {"type": "array", "items": {"type": "string"}},
      "refresh_schemas": {"type": "boolean", "description": "Explicitly reread selected Codex schemas if their earlier definitions are needed again."}})
