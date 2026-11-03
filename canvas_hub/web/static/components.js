@@ -242,19 +242,23 @@ footer{margin-top:24px;font-size:12px;color:#8b8170}</style></head><body><h1>${h
       markdown: toMD(cols, evs), csv: toCSV(cols, evs), json: d.week }));
   }
 
-  // ---------- table v2 ----------
+  // ---------- tables: row-bound cells, details and verified navigation ----------
   function tableView(d) {
     const cols = d.columns, types = d.column_types || [];
-    const isNum = (i) => types[i] === "number" || (types[i] == null && d.rows.length && d.rows.every((r) => r[i] === "" || r[i] == null || num(r[i]) != null));
+    // Saved array tables normally arrive normalized by the server. If a legacy
+    // payload reaches the renderer directly, retain its content/details but do
+    // not trust its unverified parallel IDs.
+    const rows = d.rows.map((r, i) => Array.isArray(r) ? { cells: r, detail: (d.details || [])[i] } : r);
+    const isNum = (i) => types[i] === "number" || (types[i] == null && rows.length && rows.every((r) => r.cells[i] === "" || r.cells[i] == null || num(r.cells[i]) != null));
     const st = { sort: null, dir: 1, filter: "", open: new Set() };
     const filterIn = h("input", { type: "search", class: "cmp-filter", placeholder: "Filter rows", "aria-label": "Filter rows" });
     const host = h("div", { class: "table-wrap" });
     const visible = () => {
-      let idx = d.rows.map((_, i) => i);
-      if (st.filter) { const q = st.filter.toLowerCase(); idx = idx.filter((i) => d.rows[i].some((c) => String(c ?? "").toLowerCase().includes(q))); }
+      let idx = rows.map((_, i) => i);
+      if (st.filter) { const q = st.filter.toLowerCase(); idx = idx.filter((i) => rows[i].cells.some((c) => String(c ?? "").toLowerCase().includes(q))); }
       if (st.sort != null) {
         const k = st.sort, n = isNum(k);
-        idx.sort((a, b) => { const x = d.rows[a][k], y = d.rows[b][k];
+        idx.sort((a, b) => { const x = rows[a].cells[k], y = rows[b].cells[k];
           const c = n ? (num(x) ?? -Infinity) - (num(y) ?? -Infinity) : String(x ?? "").localeCompare(String(y ?? ""), undefined, { numeric: true });
           return c * st.dir; });
       }
@@ -262,16 +266,15 @@ footer{margin-top:24px;font-size:12px;color:#8b8170}</style></head><body><h1>${h
     };
     const gi = d.group_by ? cols.indexOf(d.group_by) : -1;
     const totalsRow = (idx) => d.totals && d.totals.length ? h("tr", { class: "t-total" }, cols.map((c, i) => h("td", { class: isNum(i) ? "num" : "" },
-      i === 0 && !d.totals.includes(c) ? "Total" : d.totals.includes(c) ? fmtN(idx.reduce((s, r) => s + (num(d.rows[r][i]) || 0), 0)) : ""))) : null;
+      i === 0 && !d.totals.includes(c) ? "Total" : d.totals.includes(c) ? fmtN(idx.reduce((s, r) => s + (num(rows[r].cells[i]) || 0), 0)) : ""))) : null;
     const rowEls = (i) => {
-      const r = d.rows[i];
-      const hasDetail = d.details && d.details[i];
-      const iid = d.item_ids && d.item_ids[i];
-      const toggle = hasDetail ? h("button", { class: "link-btn", "aria-expanded": st.open.has(i) ? "true" : "false", "aria-label": `Details for ${r[0]}`,
+      const row = rows[i], r = row.cells, hasDetail = row.detail;
+      const iid = Number.isSafeInteger(row.item_id) && row.item_id > 0 ? row.item_id : null;
+      const toggle = hasDetail ? h("button", { class: "link-btn", "aria-expanded": st.open.has(i) ? "true" : "false", "aria-label": `Details for ${r[row.link_column ?? 0]}`,
         onclick: () => { st.open.has(i) ? st.open.delete(i) : st.open.add(i); draw(); } }, st.open.has(i) ? "▾ " : "▸ ") : null;
-      const tr = h("tr", { class: hasDetail ? "expandable" : "" }, cols.map((_, k) => h("td", { class: isNum(k) ? "num" : "" },
-        k === 0 ? [toggle, iid ? itemLink(iid, String(r[k] ?? "")) : String(r[k] ?? "")] : String(r[k] ?? ""))));
-      return [tr, hasDetail && st.open.has(i) ? h("tr", { class: "t-detail" }, h("td", { colspan: cols.length }, h("div", { class: "pre-wrap small" }, d.details[i]))) : null];
+      const tr = h("tr", { class: hasDetail ? "expandable" : "", title: row.link_warning || null }, cols.map((_, k) => h("td", { class: isNum(k) ? "num" : "" },
+        k === 0 ? toggle : null, iid && k === row.link_column ? itemLink(iid, String(r[k] ?? "")) : String(r[k] ?? ""))));
+      return [tr, hasDetail && st.open.has(i) ? h("tr", { class: "t-detail" }, h("td", { colspan: cols.length }, h("div", { class: "pre-wrap small" }, row.detail))) : null];
     };
     const draw = () => {
       const idx = visible();
@@ -281,19 +284,22 @@ footer{margin-top:24px;font-size:12px;color:#8b8170}</style></head><body><h1>${h
       let body;
       if (gi >= 0) {
         const groups = new Map();
-        for (const i of idx) { const g = String(d.rows[i][gi] ?? ""); if (!groups.has(g)) groups.set(g, []); groups.get(g).push(i); }
+        for (const i of idx) { const g = String(rows[i].cells[gi] ?? ""); if (!groups.has(g)) groups.set(g, []); groups.get(g).push(i); }
         body = [...groups.entries()].map(([g, ix]) => h("tbody", null, h("tr", { class: "t-group" }, h("td", { colspan: cols.length }, `${g || "(none)"} · ${ix.length}`)),
           ix.map(rowEls), totalsRow(ix)));
       } else body = h("tbody", null, idx.map(rowEls));
       mount(host, h("table", { class: "t" }, head, body, gi < 0 && totalsRow(idx) ? h("tfoot", null, totalsRow(idx)) : null),
-        idx.length < d.rows.length ? h("div", { class: "tiny muted", style: "padding:4px 2px" }, `${idx.length} of ${d.rows.length} rows`) : null);
+        idx.length < rows.length ? h("div", { class: "tiny muted", style: "padding:4px 2px" }, `${idx.length} of ${rows.length} rows`) : null);
     };
     filterIn.addEventListener("input", () => { st.filter = filterIn.value; draw(); });
     draw();
-    const data = () => { const idx = visible(); const rows = idx.map((i) => d.rows[i]);
-      return { title: d.title || "Table", markdown: (d.title ? `**${d.title}**\n\n` : "") + toMD(cols, rows), csv: toCSV(cols, rows),
-        json: rows.map((r) => Object.fromEntries(cols.map((c, i) => [c, r[i]]))) }; };
-    return frame("table", d.title, h("div", null, d.rows.length > 5 ? filterIn : null, host), data);
+    const data = () => { const shown = visible().map((i) => rows[i].cells);
+      return { title: d.title || "Table", markdown: (d.title ? `**${d.title}**\n\n` : "") + toMD(cols, shown), csv: toCSV(cols, shown),
+        json: shown.map((r) => Object.fromEntries(cols.map((c, i) => [c, r[i]]))) }; };
+    const notices = d.link_warnings?.length ? h("details", { class: "tiny muted cmp-table-notices" },
+      h("summary", null, "Some item links could not be verified. Review link notices."),
+      h("ul", null, d.link_warnings.map((warning) => h("li", null, warning)))) : null;
+    return frame("table", d.title, h("div", null, notices, rows.length > 5 ? filterIn : null, host), data);
   }
 
   // ---------- charts ----------
@@ -1291,9 +1297,8 @@ ${pv.body || ""}`, json: w })));
   const cache = new Map();
   function componentView(d, ctx = {}, key = null) {
     if (!d) return null;
-    // Deadline snapshots may have changed because an item was archived since
-    // this answer was saved. Rebuild these cards when the visible data changes.
-    const visibility = ["deadlines", "timetable"].includes(d.component) ? JSON.stringify(d) : null;
+    // Rebuild snapshots when archive visibility or verified table links change.
+    const visibility = ["deadlines", "timetable", "table"].includes(d.component) ? JSON.stringify(d) : null;
     if (key && cache.has(key) && cache.get(key).visibility !== visibility) cache.delete(key);
     if (key && cache.has(key)) {
       const hit = cache.get(key);

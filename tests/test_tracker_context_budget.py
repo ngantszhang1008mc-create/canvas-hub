@@ -48,7 +48,7 @@ def test_tracker_results_share_unused_budget_without_masking_or_replaying(hub, a
     cfg = svc._load()
     tools = ToolSession(svc.permissions(cfg), ['group:tracker', *extra_tools]).advertised()
     if extra_tools:
-        assert len(tools) == 31 and estimate(tools) + 32 * len(tools) > 8000
+        assert len(tools) == 32 and estimate(tools) + 32 * len(tools) > 8000
         discovered = ToolSession(svc.permissions(cfg), ['group:tracker'])
         result = json.loads(discovered.discover({'select': extra_tools}, include_schemas=True))
         assert not result['executed'] and discovered.advertised() == tools

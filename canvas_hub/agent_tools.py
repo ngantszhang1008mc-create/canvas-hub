@@ -35,6 +35,7 @@ from .model import CATEGORIES, ITEM_TYPES
 from .services.querylayer import VIEW_HELP
 from .services.deadlines import archived_sql
 from .util import HubError, InvalidInput
+from .table_display import TableLinks
 
 PERMISSIONS = ("read", "notes", "collect", "settings", "deadlines", "ui", "fulfil")
 MAX_RESULT_CHARS = 24000
@@ -49,6 +50,7 @@ class ToolContext:
     scope_course_id: str | None = None
     scope_item_id: int | None = None
     permissions: frozenset[str] | None = None   # set per call by run_tool_display; None = not restricted
+    read_results: dict | None = None  # New immutable artifacts, committed with this tool-result group.
 
 
 @dataclass
@@ -151,6 +153,9 @@ def h_list_accounts(ctx, a):
 def h_list_courses(ctx, a):
     aid = _account(ctx, a)
     cs = ctx.api.list_courses(aid)["courses"]
+    if a.get('query'):
+        q = a['query'].casefold()
+        cs = [c for c in cs if q in ((c['title'] or '') + ' ' + (c['course_code'] or '')).casefold()]
     return {"courses": [{"course_id": c["course_id"], "title": c["title"], "code": c["course_code"], "term": c["term"],
                          "section": c["listing_section"], "access": c["access"], "item_counts": c["item_counts"],
                          "content_state": c.get("content_state"), "content_state_reason": c.get("content_state_reason"),
@@ -173,7 +178,7 @@ def h_search(ctx, a):
             "next_cursor": r["next_cursor"]}
 
 
-def _item_view(ctx, aid, item_id, body_chars=8000):
+def _item_view(ctx, aid, item_id, body_chars=8000, *, full=False):
     it = ctx.api.read_item(aid, item_id)
     tz = it.get("time_zone")
     fields = {}
@@ -182,10 +187,12 @@ def _item_view(ctx, aid, item_id, body_chars=8000):
             continue
         v = f["value"]
         if f["kind"] == "html":
-            v = _clip(to_text(v) if v else v, body_chars)
+            v = to_text(v) if v else v
+            if not full:
+                v = _clip(v, body_chars)
         elif f["kind"] == "date":
             v = _date_view(v, tz)
-        elif isinstance(v, (list, dict)):
+        elif isinstance(v, (list, dict)) and not full:
             s = json.dumps(v, ensure_ascii=False)
             v = json.loads(s) if len(s) <= 4000 else _clip(s, 4000)
         fields[f["field"]] = {"value": v, "last_read": f["last_observed_at"]}
@@ -200,9 +207,9 @@ def _item_view(ctx, aid, item_id, body_chars=8000):
                            "caution": "text read by OCR; check numbers and formulas against the original"}
                           if r.get("ocr_confidence") is not None else {})} for r in it["resources"]],
         "links": [{"relation": ln["relation"], "item_id": ln["item_id"], "type": ln["item_type"], "title": ln["title"],
-                   "read": ln["collected"]} for ln in it["links_out"][:40]],
+                   "read": ln["collected"]} for ln in (it["links_out"] if full else it["links_out"][:40])],
         "referenced_from": [{"relation": ln["relation"], "item_id": ln["item_id"], "title": ln["title"]}
-                            for ln in it["links_in"][:20]],
+                            for ln in (it["links_in"] if full else it["links_in"][:20])],
         "date_conflicts": [d["detail"] for d in it["discrepancies"]],
         "submission_item_id": it.get("submission_item_id"),
         "my_notes": [{"note_id": n["id"], "kind": n["kind"], "title": n["title"], "body": n["body"],
@@ -211,7 +218,7 @@ def _item_view(ctx, aid, item_id, body_chars=8000):
 
 
 def h_get_item(ctx, a):
-    return _item_view(ctx, _account(ctx, a), a["item_id"])
+    return _item_view(ctx, _account(ctx, a), a["item_id"], full=ctx.read_results is not None)
 
 
 def h_item_history(ctx, a):
@@ -255,7 +262,8 @@ def h_announcements(ctx, a):
         msg = (f.get("message") or {}).get("value")
         out.append({"item_id": it["id"], "title": it["title"], "course": it.get("course_title"),
                     "posted": _date_view(posted, it.get("time_zone")), "author": (f.get("author") or {}).get("value"),
-                    "text": _clip(to_text(msg) if msg else None, a.get("body_chars", 1500)),
+                    "text": (to_text(msg) if msg else None) if ctx.read_results is not None and 'body_chars' not in a
+                            else _clip(to_text(msg) if msg else None, a.get("body_chars", 1500)),
                     "source_url": it["source_url"], "last_read": it["last_observed_at"]})
     return {"announcements": out, "total_stored": len(anns)}
 
@@ -667,9 +675,14 @@ def _component_display(ctx, view: dict, verb: str) -> dict:
     else:
         head = (f"{verb} checklist #{view['id']} '{view['title']}': {t['done_count']}/{t['count']} done"
                 + (f", {t['done_points']:g}/{t['points']:g} points" if t["points"] else ""))
-    return {"display": {"component": view["kind"], "component_id": view["id"], "view": view},
+    result = {"display": {"component": view["kind"], "component_id": view["id"], "view": view},
             "summary": head + ". The user can change it in place; read it back with get_component.",
             "component_id": view["id"], "pending_approval": bool(view.get("pending_spec"))}
+    if view.get("pending_spec"):
+        migration = view["pending_spec"].get("migration", {})
+        result["migration"] = {k: migration[k] for k in ("can_accept", "identity_map", "unresolved", "preserved_fields") if k in migration}
+        result["summary"] += " Definition proposal only; current tracker and saved choices remain in place until user approval."
+    return result
 
 
 def view_account(ctx, view: dict) -> int:
@@ -891,7 +904,16 @@ def h_mark_assignment(ctx, a):
 
 
 def h_get_component(ctx, a):
-    return ctx.api.hub.components.describe(_account(ctx, a), a["component_id"])
+    aid = _account(ctx, a)
+    svc = ctx.api.hub.components
+    with svc._lock, svc.db.tx():
+        result = svc.describe(aid, a['component_id'])
+        if ctx.read_results is not None:
+            view = svc.get(aid, a['component_id'])
+            result.update(definition=view['spec'], state=view['state'], state_token=svc.state_token(view),
+                          source_config=view['source_config'], source_status=view['source_status'],
+                          source_overrides=view['source_overrides'], pending_spec=view['pending_spec'])
+        return result
 
 
 def h_component_context(ctx, a):
@@ -913,17 +935,66 @@ def h_patch_component(ctx, a):
 
 def h_context_sources(ctx, a, action):
     from .services.context_sources import ContextSources
+    from .assistant.read_results import READ_BYTES
     return getattr(ContextSources(ctx.api.hub.db), action)(_account(ctx, a),
         **({'byte_limit': 8000} if action == 'catalog' else {}),
+        **({'response_byte_limit': READ_BYTES} if action == 'catalog' and ctx.read_results is not None else {}),
         **{k: v for k, v in a.items() if k != "account_id"})
+
+
+def h_read_tool_result(ctx, a):
+    from .assistant.read_results import read
+    return read(ctx, a)
 
 
 def h_list_components(ctx, a):
     aid = _account(ctx, a)
-    rows = ctx.api.hub.components.list(aid, pinned=a.get("pinned"), limit=50, course_id=a.get("course_id"), item_id=a.get("item_id"))
-    return {"components": [{"component_id": v["id"], "kind": v["kind"], "title": v["title"], "pinned": v["pinned"],
+    svc = ctx.api.hub.components
+    where, params = ['account_id=?'], [aid]
+    course_id, item_id = a.get('course_id'), a.get('item_id')
+    if course_id is not None or item_id is not None:
+        course_id, _ = svc.validate_links(aid, course_id, item_id)
+        where.append('item_id=?' if item_id is not None else 'course_id=?')
+        params.append(item_id if item_id is not None else course_id)
+    if 'pinned' in a:
+        where.append('pinned=?'); params.append(int(a['pinned']))
+    if a.get('query'):
+        where.append('instr(lower(title),lower(?))>0'); params.append(a['query'])
+    offset, limit = a.get('offset', 0), a.get('limit', 20)
+    # Identity lookup does not evaluate every tracker's full computed state.
+    rows = svc.db.query('SELECT id,kind,title,pinned,updated_at,course_id,item_id,version,purpose_key FROM components WHERE '
+                        + ' AND '.join(where) + ' ORDER BY updated_at DESC,id DESC LIMIT ? OFFSET ?', (*params, limit+1, offset))
+    return {"components": [{"component_id": v["id"], "kind": v["kind"], "title": v["title"], "pinned": bool(v["pinned"]),
                             "updated_at": v["updated_at"], "course_id": v["course_id"], "item_id": v["item_id"],
-                            "version": v["version"], "purpose": v["purpose_key"]} for v in rows]}
+                            "version": v["version"], "purpose": v["purpose_key"]} for v in rows[:limit]],
+            'next_offset': offset + limit if len(rows) > limit else None}
+
+
+def h_propose_component_rebuild(ctx, a):
+    aid = _account(ctx, a)
+    current = _scoped_component(ctx, aid, a["component_id"])
+    if current["kind"] == "checklist" and (current["spec"].get("sync_todos") or a["spec"].get("sync_todos")):
+        _need_notes_for_todos(ctx)
+    view = ctx.api.hub.components.propose_rebuild(aid, current["id"], a["spec"],
+        expected_version=a["expected_version"], state_token=a["state_token"], identity_map=a.get("identity_map"))
+    result = _component_display(ctx, view, "Proposed rebuild for")
+    # A proposal is identified by the same component/version reviewed on accept.
+    # Keep a compact receipt visible even when its full migration needs paging.
+    result["proposal_id"] = f"component:{view['id']}:version:{view['version']}"
+    migration = result["migration"]
+    migration["mapped_counts"] = {key: len(value) for key, value in migration["identity_map"].items()}
+    migration["unresolved_count"] = len(migration["unresolved"])
+    if ctx.read_results is None:
+        # A reviewed gateway may not permit the snapshot reader. Keep its
+        # receipt small without advertising a new tool or cutting diagnostics.
+        # The complete migration is already stored in pending_spec and display.
+        result["migration"] = {key: migration[key] for key in
+                               ("can_accept", "preserved_fields", "mapped_counts", "unresolved_count")}
+        result["note"] = ("The rebuild proposal was already staged once. Full migration mappings and diagnostics "
+                          "remain in this component's pending proposal and review display. "
+                          "Never call propose_component_rebuild again merely to read diagnostics. "
+                          "Current definition, state and pin remain unchanged until review.")
+    return result
 
 
 def h_update_component(ctx, a):
@@ -937,6 +1008,8 @@ def h_update_component(ctx, a):
         _need_notes_for_todos(ctx)
     if a.get("state") is not None:
         raise InvalidInput("State writes now require patch_component_state with expected_version and state_token from get_component_context. This legacy call made no changes.", code="component_state_api_v2")
+    if a.get("spec") is not None and a.get("pin") is not None and a["pin"] != v["pinned"]:
+        raise InvalidInput("A definition proposal must keep the existing tracker pinned as it is until review. For a rebuild use propose_component_rebuild.")
     if a.get("spec") is not None:
         v = svc.propose_spec(aid, v["id"], a["spec"])
     if a.get("pin") is not None:
@@ -1067,22 +1140,25 @@ def h_set_grading_rules(ctx, a):
     return ctx.api.propose_grading_rules(aid, str(a["course_id"]), rules)
 
 
-def _num_or_text(v):
-    return v if isinstance(v, (int, float)) and not isinstance(v, bool) else str(v)[:300]
-
-
 def h_show_table_v2(ctx, a):
     cols = [str(c)[:60] for c in a["columns"]][:12]
-    rows = [[_num_or_text(x) for x in r][:len(cols)] for r in a["rows"][:200] if isinstance(r, list)]
     types = [t if t in ("text", "number", "date") else "text" for t in (a.get("column_types") or [])][:len(cols)]
     totals = [c for c in (a.get("totals") or []) if c in cols]
     group_by = a.get("group_by") if a.get("group_by") in cols else None
-    details = [str(d)[:4000] for d in (a.get("details") or [])][:len(rows)]
-    item_ids = [int(x) if isinstance(x, int) else None for x in (a.get("item_ids") or [])][:len(rows)]
-    return _display("table", {"title": (a.get("title") or "")[:120], "columns": cols, "rows": rows, "column_types": types,
-                              "totals": totals, "group_by": group_by, "details": details, "item_ids": item_ids},
-                    f"Showed a table with {len(rows)} row(s) (sortable, filterable"
-                    + (f", totals of {', '.join(totals)}" if totals else "") + (f", grouped by {group_by}" if group_by else "") + ").")
+    linked = bool(a.get("item_ids")) or any(isinstance(r, dict) and r.get("item_id") is not None for r in a["rows"][:200])
+    resolver = TableLinks(ctx.api.hub.db, _account(ctx, a)) if linked and ctx is not None else TableLinks()
+    display = resolver.display({"component": "table", "title": (a.get("title") or "")[:120], "columns": cols,
+                                "rows": a["rows"], "column_types": types, "totals": totals, "group_by": group_by,
+                                "details": a.get("details"), "item_ids": a.get("item_ids")}, strict=True)
+    warnings = display.get("link_warnings", [])
+    result = _display("table", display, f"Showed a table with {len(display['rows'])} row(s) (sortable, filterable"
+                      + (f", totals of {', '.join(totals)}" if totals else "")
+                      + (f", grouped by {group_by}" if group_by else "") + ")."
+                      + (f" {len(warnings)} item-link notice(s); unverified links were omitted." if warnings else ""))
+    if warnings:
+        result["link_warnings"] = warnings[:8]
+        result["link_warning_count"] = len(warnings)
+    return result
 
 
 def h_show_chart_v2(ctx, a):
@@ -1301,8 +1377,8 @@ _DATE_DESC = "ISO-8601 timestamp with offset, e.g. 2026-11-01T00:00:00+08:00"
 TOOLS: list[AgentTool] = [
     AgentTool("list_accounts", "List the Canvas accounts stored in Canvas Hub.", "read", handler=h_list_accounts,
               account_scoped=False),
-    AgentTool("list_courses", "List the user's Canvas courses with term, access state and how many items of each type are stored.",
-              "read", handler=h_list_courses),
+    AgentTool("list_courses", "List stored courses with access/counts. Use query for a course code or title before broad browsing.",
+              "read", {"query": {"type": "string"}}, handler=h_list_courses),
     AgentTool("search", "Full-text search over everything collected: titles, announcement/page/assignment bodies, comments, "
               "staff replies and text extracted from course documents (PDF, slides, Word...). All words must match; "
               "use \"quotes\" for phrases and word* for prefixes.", "read",
@@ -1310,8 +1386,7 @@ TOOLS: list[AgentTool] = [
                "types": {"type": "array", "items": {"type": "string", "enum": list(ITEM_TYPES)}},
                "include_documents": {"type": "boolean"}, "limit": {"type": "integer", "minimum": 1, "maximum": 50},
                "cursor": {"type": "string"}}, ["query"], h_search),
-    AgentTool("get_item", "Read one stored item in full (assignment, announcement, page, file, submission, module...): fields with "
-              "the time each was last read from Canvas, text of its body, documents, links, date conflicts and the user's notes.",
+    AgentTool("get_item", "Read a stored item: fields, provenance, body, documents, links and notes. Large in-app reads return an immutable index; follow read_tool_result paths/ranges for full text, never infer rules from an index.",
               "read", {"item_id": {"type": "integer"}}, ["item_id"], h_get_item),
     AgentTool("get_item_history", "Change history of an item: edits with old and new values.", "read",
               {"item_id": {"type": "integer"}}, ["item_id"], h_item_history),
@@ -1510,11 +1585,11 @@ TOOLS += [
     AgentTool("set_component_source_override", "Explicitly override a bound field, or follow its Canvas source again. User-owned state stays separate.", "ui",
               {"component_id": {"type": "integer"}, "target": {"type": "string"}, "value": {}, "follow_source": {"type": "boolean"}}, ["component_id", "target"], h_source_override),
     # ---- saved components (readable from any agent)
-    AgentTool("get_component", "Read back a saved score model or checklist: which lines are ticked or skipped, values the "
-              "user entered, and the computed totals.", "read", {"component_id": {"type": "integer"}}, ["component_id"],
+    AgentTool("get_component", "Read saved tracker totals/inputs and, in-app, exact definition/state. Large results return a durable read index; use read_tool_result for selected fields/ranges. Use get_component_context for fresh patch guards.", "read", {"component_id": {"type": "integer"}}, ["component_id"],
               h_get_component),
     AgentTool("list_components", "List saved interactive components (score models, checklists).", "read",
-              {"item_id": {"type": "integer", "description": "Link this component to a collected item in this account"}, "course_id": {"type": "string", "description": "Link to a collected Canvas course ID"}, "pinned": {"type": "boolean"}}, [], h_list_components),
+              {"item_id": {"type": "integer", "description": "Link this component to a collected item in this account"}, "course_id": {"type": "string", "description": "Link to a collected Canvas course ID"}, "pinned": {"type": "boolean"}, "query": {"type": "string"},
+               "offset": {"type": "integer", "minimum": 0}, "limit": {"type": "integer", "minimum": 1, "maximum": 50}}, [], h_list_components),
     AgentTool("course_score_lines", "Draft score-model buckets for a course from its assignments: points, due dates, "
               "assignment groups and status from the submission state.", "read", {"course_id": {"type": "string"}},
               ["course_id"], h_course_score_lines),
@@ -1541,15 +1616,25 @@ TOOLS += [
     AgentTool("show_items", "Show stored items (announcements, assignments, pages, files...) as cards.", "ui",
               {"item_ids": {"type": "array", "items": {"type": "integer"}}}, ["item_ids"], h_show_items),
     AgentTool("show_table", "Show a table (max 12 columns, 200 rows) the user can sort, filter, total, group and export. "
-              "Optional per-row detail text expands in place; item_ids open the full item in a side panel.", "ui",
+              "Use row objects to keep cells, item_id, source_url and detail together when sorting/grouping. "
+              "Item links are checked against stored account data; include the exact stored title or source_url in a visible cell. "
+              "Ambiguous, mismatched or unavailable links are omitted with a notice; never guess IDs.", "ui",
               {"title": {"type": "string"}, "columns": {"type": "array", "items": {"type": "string"}},
-               "rows": {"type": "array", "items": {"type": "array", "items": {"type": "string"}},
-                        "description": "cell values; numbers may be given as text"},
+               "rows": {"type": "array", "items": {"anyOf": [
+                   {"type": "object", "properties": {
+                       "cells": {"type": "array", "items": {"type": ["string", "number"]}},
+                       "item_id": {"type": "integer", "minimum": 1, "maximum": 9007199254740991,
+                                   "description": "Stored Canvas Hub item ID, bound to these cells"},
+                       "source_url": {"type": "string", "description": "Exact stored source URL; required for duplicate titles"},
+                       "detail": {"type": "string"}}, "required": ["cells"], "additionalProperties": False},
+                   {"type": "array", "items": {"type": ["string", "number"]}}]},
+                        "description": "Prefer {cells:[...], item_id:123, source_url:..., detail:...}; plain cell arrays remain supported"},
                "column_types": {"type": "array", "items": {"type": "string", "enum": ["text", "number", "date"]}},
                "totals": {"type": "array", "items": {"type": "string"}, "description": "column names to sum"},
                "group_by": {"type": "string", "description": "a column name"},
-               "details": {"type": "array", "items": {"type": "string"}, "description": "one expandable text per row"},
-               "item_ids": {"type": "array", "items": {"type": "integer"}, "description": "one Canvas Hub item id per row"}},
+               "details": {"type": "array", "items": {"type": "string"}, "description": "Legacy cell arrays only: expandable text at the same row index"},
+               "item_ids": {"type": "array", "items": {"type": ["integer", "null"]},
+                            "description": "Legacy cell arrays only: exactly one ID or null per row; all links are validated"}},
               ["columns", "rows"], h_show_table_v2),
     AgentTool("show_chart", "Show a chart of numbers you computed: bar (one series), grouped or stacked (several series, "
               "e.g. earned vs remaining vs lost per category), or waterfall (running total). Optional threshold line.", "ui",
@@ -1667,6 +1752,10 @@ TOOLS += [
               "when created) is never overwritten until the user approves the diff.", "ui",
               {"component_id": {"type": "integer"}, "spec": {"type": "object"}, "state": {"type": "object"},
                "pin": {"type": "boolean"}}, ["component_id"], h_update_component),
+    AgentTool("propose_component_rebuild", "Rebuild an existing tracker in place for user approval. Read its current definition and fresh version/state_token first. Stable IDs and unique source item identities preserve saved false/zero values; optionally map renamed IDs with identity_map rows/groups/scenarios (old ID to new ID). Unmapped, ambiguous or incompatible state blocks acceptance. Keep existing grading rules and source bindings; deliberate rule changes use a separate reviewed definition proposal. Never unpin and create a replacement.", "ui",
+              {"component_id": {"type": "integer"}, "expected_version": {"type": "integer"}, "state_token": {"type": "string"},
+               "spec": {"type": "object"}, "identity_map": {"type": "object", "description": "Optional {rows:{old_id:new_id},groups:{old_id:new_id},scenarios:{old_id:new_id}}. Groups are checklist sections or grade categories."}},
+              ["component_id", "expected_version", "state_token", "spec"], h_propose_component_rebuild),
     AgentTool("show_grades", "Show visible assignment scores as a chart (% of points); hidden grades are listed, not zero.",
               "ui", {"course_id": {"type": "string"}}, [], h_show_grades),
     AgentTool("show_choices", "Offer the user up to 6 quick-reply buttons; their click is sent as their next message.", "ui",
@@ -1676,6 +1765,11 @@ TOOLS += [
 from .widget_tools import widget_tools
 TOOLS.extend(widget_tools(AgentTool, _account, _scoped_component))
 TOOLS.extend([
+    AgentTool("read_tool_result", "Read an immutable tool snapshot using read_id and read_path (or JSON pointer). offset pages keys/items or text characters. Follow next_offset, nested read_path and key_paths (full oversized keys) for original data. Does not rerun tools; call original tool for current state.", "read",
+              {"read_id": {"type": "string"}, "path": {"type": "string"},
+               "offset": {"type": "integer", "minimum": 0}, "limit": {"type": "integer", "minimum": 1, "maximum": 20},
+               "chars": {"type": "integer", "minimum": 1, "maximum": 4000}}, ['read_id'],
+              h_read_tool_result),
     AgentTool("get_component_context", "Read lightweight tracker identity, version/state_token and locally computed totals. Request selected row_ids or page include_rows for current inputs. Never infer current values from a summary.", "read",
               {"component_id": {"type": "integer"}, "row_ids": {"type": "array", "items": {"type": "string"}},
                "include_rows": {"type": "boolean"}, "offset": {"type": "integer", "minimum": 0},
@@ -1721,8 +1815,10 @@ def run_tool_display(ctx: ToolContext, name: str, args: Any, permissions: set[st
             ctx = replace(ctx, permissions=frozenset(permissions))
         result = tool.handler(ctx, args)
         display = result.pop("display", None) if isinstance(result, dict) else None
+        from .assistant.read_results import bound
+        result = bound(ctx, name, result)
         text = json.dumps(result, ensure_ascii=False, default=str)
-        if len(text) > MAX_RESULT_CHARS:
+        if len(text) > MAX_RESULT_CHARS and name != 'read_tool_result':
             text = text[:MAX_RESULT_CHARS] + '… [result truncated; narrow the query or page with cursor/offset]'
         return text, False, display
     except HubError as e:

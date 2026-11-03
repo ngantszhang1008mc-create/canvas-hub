@@ -29,7 +29,7 @@ configuration, not forwarded as provider request settings.
 
 | Field | Default |
 | --- | --- |
-| `capacity` | Application safety ceiling: Anthropic/Codex 64,000; compatible endpoints 32,768 |
+| `capacity` | Exact supported endpoint/model metadata when known; otherwise application fallback: Anthropic/Codex 64,000, compatible endpoints 32,768 |
 | `response_tokens` | Anthropic 16,000; others 4,096 |
 | `auto_compact` | `false` (manual compaction remains available) |
 | `auto_threshold_percent` | `80` |
@@ -37,8 +37,13 @@ configuration, not forwarded as provider request settings.
 | `summary_tokens` | `2000` |
 | `history_tokens`, `tool_tokens`, `document_tokens` | Share remaining input space; an explicitly configured category ceiling still applies |
 
-These are configurable **application budgets, not advertised model limits**.
-Unknown models/endpoints are not assigned invented capacities. Verify the actual
+An explicit `capacity` always overrides defaults. The exact models
+`deepseek-flash` and `deepseek-v4-pro` on `https://api.deepseek.com` (optionally
+`/v1`) use the documented 1,048,576-token input-plus-output window, checked against
+[DeepSeek model metadata](https://api-docs.deepseek.com/api/list-models/) on
+2026-11-03. This is a static verified mapping, not an authenticated model probe;
+custom endpoints, aliases and Codex model names do not inherit this capacity.
+Unknown models/endpoints use **application fallback budgets, not advertised limits**. Verify the actual
 endpoint's capacity and configure it, especially for small local models. Estimates
 include provider-native reasoning, schemas, message framing and non-ASCII text;
 10% headroom and response/reasoning space are reserved. No paid tokenizer call is
@@ -49,7 +54,62 @@ may differ from estimates. Direct SDK retries are disabled; the narrow pre-accep
 compatibility fallback is documented in [the usage contract](PROVIDER_USAGE.md).
 Compaction always uses a single attempt without capability negotiation.
 
+Errors and Context & usage show the effective budget after headroom. For example,
+64,000 capacity leaves 57,600 including the output reserve; an estimated 58,000
+request exceeds it by 400. The 6,400 safety margin is retained. Explicit category
+ceilings are reported separately. Starting another message keeps the same history;
+an already oversized chat needs explicit manual compaction or a focused new chat
+after checking completed actions. Answer-only Retry cannot finish pending tool work.
+
+## Bounded tool reads
+
+New large in-app reads of trackers, items, courses, search results, deadlines,
+announcements, SQL query results and source catalogs return a compact index and `read_id`. The full
+result is saved locally in the same transaction as its tool reply. This changes
+new reply formats; no existing message/result is shortened or replaced. Automatic
+compaction stays off. An identical later result references its existing snapshot;
+the original tool still runs to check current data, and deliberate rereads work.
+
+`read_tool_result` retrieves selected fields and ranges using `read_id`, `path`,
+`offset`, `limit` and `chars`. Follow `next_offset` and nested `read_path` values;
+ordinary JSON pointers also work. `key_paths` exposes unusually long object keys
+without cutting them. Indexes explicitly mark incomplete values. Neither indexes
+nor opening excerpts establish that all rules were read. Existing search/item
+cursors and source-catalog offsets remain retrievable within their snapshot.
+Item reads retain full text instead of the old fixed prefix; tracker snapshots
+include exact definitions, manual state, source configuration and pending rules.
+
+Reader replies remain bounded to 4,800 UTF-8 bytes including their final JSON
+envelope. Text reads default to at most 4,000 characters and fill the available
+bytes without splitting characters. New references prefer readable JSON pointers
+such as `/definition` and `/fields/body/value`; historical `@/` ordinal paths still
+work, including the fallback for oversized keys. Array positions are not item IDs.
+Indexes prioritize actual identity fields, titles and source links when they fit.
+In-app source catalogs page directly within the same final-response byte bound,
+avoiding a second snapshot paging layer for ordinary metadata. An individually
+oversized source entry still uses the complete, durable snapshot fallback.
+
+Snapshots survive restart and manual compaction and belong to one account and
+conversation. The reader checks current read permission and cannot execute a tool.
+They describe historical data: reread the original tool for live changes and use
+fresh version/state tokens before patching. All source text remains untrusted.
+`list_components(query=...)` filters before its bounded metadata page; course
+queries likewise narrow discovery. Reuse known item/course/source IDs instead of
+repeating account-wide catalogs with different arguments.
+
+This protocol is enabled only when the selected provider's permitted catalog
+includes `read_tool_result`. MCP and reviewed gateway catalogs lacking it keep
+their existing response format; the app never silently expands a gateway allowlist.
+Benchmark harnesses with custom tool allowlists must include this reader or use
+the production catalog to exercise the new path. No schema migration is required.
+
 ## Tool selection and discovery
+
+Discovery reports group sizes and whether adding each group fits the current
+selection. Oversized selections report the required schema count, unchanged
+manual/discovered selections, and individual tool choices for recovery. The
+32-schema discovery ceiling remains an application limit, separate from model
+context capacity; reviewed gateway limits and allowlists are unchanged.
 
 The circular arrow beside the chat input opens a searchable list of all currently
 permitted groups and tools. `/tracker` (or another group/tool command) adds a

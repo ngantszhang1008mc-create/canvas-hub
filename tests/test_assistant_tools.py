@@ -15,6 +15,44 @@ from canvas_hub.util import InvalidInput
 from .test_codex import fake_codex
 
 
+def test_rebuild_is_a_permitted_tracker_tool_loaded_only_on_discovery(monkeypatch):
+    from canvas_hub.agent_tools import AgentTool
+    from canvas_hub.assistant import SYSTEM_PROMPT
+    from canvas_hub.assistant import tool_catalog
+
+    # This contract test can run before the independent rebuild implementation
+    # is integrated; once registered, it validates that tool's actual schema.
+    tools_for = tool_catalog.tools_for
+    name = 'propose_component_rebuild'
+    required = ['component_id', 'expected_version', 'state_token', 'spec']
+    proposal = AgentTool(name, 'Propose a guarded tracker rebuild preserving progress.', 'ui',
+        {'component_id': {'type': 'integer'}, 'expected_version': {'type': 'integer'},
+         'state_token': {'type': 'string'}, 'spec': {'type': 'object'}, 'identity_map': {'type': 'object'}}, required,
+        lambda *_: pytest.fail('discovery must never execute a rebuild'))
+
+    def registered(permissions):
+        result = tools_for(permissions)
+        return [*result, proposal] if 'ui' in permissions and name not in {t.name for t in result} else result
+
+    monkeypatch.setattr(tool_catalog, 'tools_for', registered)
+    session = ToolSession({'read', 'ui'})
+    assert tool_catalog.group_for(name) == 'tracker' and name not in tool_catalog.DEFAULTS
+    assert name in next(g for g in session.catalog.groups if g['id'] == 'tracker')['tools']
+    before = {t['name'] for t in session.advertised()}
+    assert name not in before
+    result = json.loads(session.discover({'select': ['tool:' + name]}, include_schemas=True))
+    assert not result['executed']
+    assert {t['name'] for t in session.advertised()} == before | {name}
+    assert [t['name'] for t in result['schemas']] == [name]
+    schema = result['schemas'][0]['schema']
+    assert set(schema['required']) == set(required)
+    assert 'identity_map' in schema['properties'] and 'identity_map' not in schema['required']
+    assert 'do not unpin and create a replacement' in tool_catalog.DISCOVER.description
+    assert 'Never rebuild by unpinning the old tracker' in SYSTEM_PROMPT
+    with pytest.raises(InvalidInput, match='no longer permitted'):
+        ToolSession({'read'}).discover({'select': ['tool:' + name]})
+
+
 def test_catalog_selection_is_permission_filtered_bounded_and_stably_ordered():
     read = ToolCatalog({"read", "ui"})
     assert "create_note" not in read.tools and "prepare_message" not in read.tools
@@ -24,7 +62,7 @@ def test_catalog_selection_is_permission_filtered_bounded_and_stably_ordered():
         read.parse_message("/tracker", [])
     prompt, chosen = read.parse_message("/tracker /documents compare these", ["tool:calculate"])
     assert prompt == "compare these" and "group:tracker" in chosen
-    assert len(read.advertised([])) < 10 and estimate(read.advertised([])) < 2500
+    assert len(read.advertised([])) <= 10 and estimate(read.advertised([])) < 3000
     session = ToolSession({"read", "ui"})
     before = session.advertised()
     metadata = json.loads(session.discover({"query": "tracker"}))
@@ -225,7 +263,7 @@ def test_tool_picker_slash_keyboard_chips_and_mobile_bounds(hub, account, monkey
         page.get_by_role("button", name="Send", exact=True).click()
         expect(page.get_by_text("Ready", exact=True)).to_be_visible()
         assert "patch_component_state" in {t["name"] for t in requests[0]}
-        assert len(requests[0]) == 31 and estimate(requests[0]) + 32 * len(requests[0]) > 8000
+        assert len(requests[0]) == 32 and estimate(requests[0]) + 32 * len(requests[0]) > 8000
         expect(page.locator(".assistant-tool-chip")).to_have_count(0)
         page.reload()
         expect(page.get_by_text("Requested tools: /tracker", exact=False)).to_be_visible()

@@ -59,7 +59,8 @@ class ContextService:
         # a model to reconstruct a long resource ID or a stale-write token.
         anchors, executions = [], []
         reference_keys = {"id", "note_id", "item_id", "course_id", "resource_id", "component_id", "source_id",
-                          "version", "expected_version", "state_token", "offset", "start_char", "end_char"}
+                          "version", "expected_version", "state_token", "offset", "start_char", "end_char",
+                          "read_id", "read_path", "path", "next_offset"}
 
         def refs(value):
             if isinstance(value, dict):
