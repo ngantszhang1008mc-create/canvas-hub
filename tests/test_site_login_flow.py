@@ -73,7 +73,13 @@ def test_batch_failure_to_basic_form_then_reviewed_analysis(hub, account, source
             # One rejected attempt remains a labelled form, not an Apache error window.
             box.get_by_label('Site username').fill('fixture-user')
             box.get_by_label('Site password').fill('wrong-fixture-password')
-            box.get_by_label('Site password').press('Enter')
+            # This first submit launches a separate isolated Chromium profile.
+            # Wait for the credential response, not a five-second DOM deadline
+            # that can expire during Windows browser startup.
+            with page.expect_response(lambda response: response.url.endswith('/site-connection/http_auth')
+                                      and response.request.method == 'POST', timeout=20000) as rejected:
+                box.get_by_label('Site password').press('Enter')
+            assert rejected.value.status == 200
             expect(box.get_by_role('alert')).to_contain_text('Sign-in was not accepted')
             expect(box.get_by_label('Site password')).to_have_value('')
             box.get_by_label('Site username').fill('fixture-user')

@@ -80,7 +80,9 @@ def test_table_links_follow_title_rows_through_sort_filter_details_and_reload(hu
         expect(page.locator(".drawer.open")).to_have_count(0)
         bound.get_by_role("button", name="Copy ▾").click()
         bound.get_by_role("menuitem", name="Copy as CSV").click()
-        assert page.evaluate("navigator.clipboard.readText()") == "Course,Item,Due\nGroup B,Beta task,2"
+        # Windows clipboard text uses CRLF; require identical CSV content.
+        copied = page.evaluate("navigator.clipboard.readText()").replace("\r\n", "\n")
+        assert copied == "Course,Item,Due\nGroup B,Beta task,2"
         bound.get_by_label("Filter rows").fill("")
         check_links()
         # Legacy content is preserved, but the mismatched Beta -> Alpha link is
