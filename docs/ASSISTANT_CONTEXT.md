@@ -30,7 +30,7 @@ configuration, not forwarded as provider request settings.
 | Field | Default |
 | --- | --- |
 | `capacity` | Exact supported endpoint/model metadata when known; otherwise application fallback: Anthropic/Codex 64,000, compatible endpoints 32,768 |
-| `response_tokens` | Anthropic 16,000; others 4,096 |
+| `response_tokens` | Anthropic 6,000 at resolved capacity ≤64,000, otherwise 16,000; others 4,096. Explicit output settings take precedence. |
 | `auto_compact` | `false` (manual compaction remains available) |
 | `auto_threshold_percent` | `80` |
 | `keep_turns` | `2` |
@@ -50,9 +50,23 @@ include provider-native reasoning, schemas, message framing and non-ASCII text;
 used. Explicit extra-provider output limits increase the reserve. Anthropic and
 compatible calls set an output bound; Codex's app-server retains control of its
 native output limit, so its reserve is a planning allowance. Actual provider usage
-may differ from estimates. Direct SDK retries are disabled; the narrow pre-acceptance
+may differ from estimates. Anthropic effort remains unchanged; unsupported explicit
+thinking/budget controls are rejected rather than silently ignored or truncated.
+When explicit context and provider output budgets differ, the larger planning
+reserve protects the input window while the provider's explicit output cap remains
+unchanged. Both values are reported. Direct SDK retries are disabled; the narrow pre-acceptance
 compatibility fallback is documented in [the usage contract](PROVIDER_USAGE.md).
 Compaction always uses a single attempt without capability negotiation.
+
+Estimation retains the conservative ASCII/UTF-8 heuristic; no exact tokenizer or
+universal CJK calibration is claimed. Recognized, explicit official Messages/Chat
+endpoints count decoded message text with structural framing instead of charging
+outer JSON transport escapes as extra text. Unknown/custom endpoints and implicit
+SDK routing retain serialized-projection estimates. The API exposes
+`estimator_provenance` (method, representation, format and absence of a tokenizer
+or paid counting call), and Context & usage displays the method. Existing usage
+observations can identify overestimation but do not justify applying one model's
+divisors to unrelated models.
 
 Errors and Context & usage show the effective budget after headroom. For example,
 64,000 capacity leaves 57,600 including the output reserve; an estimated 58,000
