@@ -2228,8 +2228,18 @@ const W = makeWorkspace({ h,mount,api,A,fmtDate,ago,componentView,
   startAction:(scope,action,panel)=>contextualAgent.start(scope,action,panel),
   approveSpec:async c=>{
     const diff = C.diffPair(JSON.stringify(c.spec,null,2),JSON.stringify(c.pending_spec.spec,null,2));
+    const migration = c.pending_spec.migration;
+    const blocked = !migration?.can_accept;
+    const migrationReview = h("section",null,h("h3",null,"Saved choices"),
+      h("p",null,blocked ? "This proposal has unresolved state or rule changes. Ask for a corrected proposal before approving." : `${migration.preserved_fields} saved fields preserved. The tracker ID and pin stay unchanged.`),
+      ...(migration?.unresolved || []).map(issue=>h("p",{class:"small"},JSON.stringify(issue))),
+      migration ? C.diffPair(JSON.stringify(c.state,null,2),JSON.stringify(migration.state,null,2)) : null,
+      migration ? h("details",null,h("summary",null,"Identity mapping"),h("pre",{class:"text"},JSON.stringify(migration.identity_map,null,2))) : null);
     const dialog=h("dialog",{class:"proposal-dialog"},h("h2",null,"Review study-tool changes"),diff,
-      h("div",{class:"row"},h("button",{class:"primary",onclick:async()=>{const result=await guard(()=>api(A(`/components/${c.id}/approve`),{method:"POST",body:{expected_version:c.version}}));if(result){dialog.close();dialog.remove();route();}}},"Approve changes"),
+      migrationReview,
+      c.pending_spec.source_config && JSON.stringify(c.source_config)!==JSON.stringify(c.pending_spec.source_config)
+        ? h("section",null,h("h3",null,"Source bindings"),C.diffPair(JSON.stringify(c.source_config,null,2),JSON.stringify(c.pending_spec.source_config,null,2))) : null,
+      h("div",{class:"row"},h("button",{class:"primary",disabled:blocked,onclick:async()=>{const result=await guard(()=>api(A(`/components/${c.id}/approve`),{method:"POST",body:{expected_version:c.version}}));if(result){dialog.close();dialog.remove();route();}}},"Approve changes"),
         h("button",{onclick:()=>{dialog.close();dialog.remove();}},"Cancel")));
     document.body.append(dialog);dialog.showModal();
   },

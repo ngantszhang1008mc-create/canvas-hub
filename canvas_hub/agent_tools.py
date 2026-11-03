@@ -675,9 +675,14 @@ def _component_display(ctx, view: dict, verb: str) -> dict:
     else:
         head = (f"{verb} checklist #{view['id']} '{view['title']}': {t['done_count']}/{t['count']} done"
                 + (f", {t['done_points']:g}/{t['points']:g} points" if t["points"] else ""))
-    return {"display": {"component": view["kind"], "component_id": view["id"], "view": view},
+    result = {"display": {"component": view["kind"], "component_id": view["id"], "view": view},
             "summary": head + ". The user can change it in place; read it back with get_component.",
             "component_id": view["id"], "pending_approval": bool(view.get("pending_spec"))}
+    if view.get("pending_spec"):
+        migration = view["pending_spec"].get("migration", {})
+        result["migration"] = {k: migration[k] for k in ("can_accept", "identity_map", "unresolved", "preserved_fields") if k in migration}
+        result["summary"] += " Definition proposal only; current tracker and saved choices remain in place until user approval."
+    return result
 
 
 def view_account(ctx, view: dict) -> int:
@@ -965,6 +970,16 @@ def h_list_components(ctx, a):
             'next_offset': offset + limit if len(rows) > limit else None}
 
 
+def h_propose_component_rebuild(ctx, a):
+    aid = _account(ctx, a)
+    current = _scoped_component(ctx, aid, a["component_id"])
+    if current["kind"] == "checklist" and (current["spec"].get("sync_todos") or a["spec"].get("sync_todos")):
+        _need_notes_for_todos(ctx)
+    view = ctx.api.hub.components.propose_rebuild(aid, current["id"], a["spec"],
+        expected_version=a["expected_version"], state_token=a["state_token"], identity_map=a.get("identity_map"))
+    return _component_display(ctx, view, "Proposed rebuild for")
+
+
 def h_update_component(ctx, a):
     aid = _account(ctx, a)
     svc = ctx.api.hub.components
@@ -976,6 +991,8 @@ def h_update_component(ctx, a):
         _need_notes_for_todos(ctx)
     if a.get("state") is not None:
         raise InvalidInput("State writes now require patch_component_state with expected_version and state_token from get_component_context. This legacy call made no changes.", code="component_state_api_v2")
+    if a.get("spec") is not None and a.get("pin") is not None and a["pin"] != v["pinned"]:
+        raise InvalidInput("A definition proposal must keep the existing tracker pinned as it is until review. For a rebuild use propose_component_rebuild.")
     if a.get("spec") is not None:
         v = svc.propose_spec(aid, v["id"], a["spec"])
     if a.get("pin") is not None:
@@ -1718,6 +1735,10 @@ TOOLS += [
               "when created) is never overwritten until the user approves the diff.", "ui",
               {"component_id": {"type": "integer"}, "spec": {"type": "object"}, "state": {"type": "object"},
                "pin": {"type": "boolean"}}, ["component_id"], h_update_component),
+    AgentTool("propose_component_rebuild", "Rebuild an existing tracker in place for user approval. Read its current definition and fresh version/state_token first. Stable IDs and unique source item identities preserve saved false/zero values; optionally map renamed IDs with identity_map rows/groups/scenarios (old ID to new ID). Unmapped, ambiguous or incompatible state blocks acceptance. Keep existing grading rules and source bindings; deliberate rule changes use a separate reviewed definition proposal. Never unpin and create a replacement.", "ui",
+              {"component_id": {"type": "integer"}, "expected_version": {"type": "integer"}, "state_token": {"type": "string"},
+               "spec": {"type": "object"}, "identity_map": {"type": "object", "description": "Optional {rows:{old_id:new_id},groups:{old_id:new_id},scenarios:{old_id:new_id}}. Groups are checklist sections or grade categories."}},
+              ["component_id", "expected_version", "state_token", "spec"], h_propose_component_rebuild),
     AgentTool("show_grades", "Show visible assignment scores as a chart (% of points); hidden grades are listed, not zero.",
               "ui", {"course_id": {"type": "string"}}, [], h_show_grades),
     AgentTool("show_choices", "Offer the user up to 6 quick-reply buttons; their click is sent as their next message.", "ui",

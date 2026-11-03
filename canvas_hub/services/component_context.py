@@ -9,7 +9,7 @@ from ..util import Conflict, InvalidInput
 class ComponentContext:
     @staticmethod
     def state_token(view):
-        return hashlib.sha256(json.dumps([view["version"], view["state"]], sort_keys=True,
+        return hashlib.sha256(json.dumps([view["id"], view["version"], view["state"]], sort_keys=True,
                                          separators=(",", ":")).encode()).hexdigest()
 
     def context_view(self, account_id, cid, *, row_ids=None, include_rows=False, offset=0, limit=20):

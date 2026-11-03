@@ -119,9 +119,9 @@ class ComponentService(ComponentSourceSync, ComponentContext):
                                      if k in ids and v is not None and v != ""}}
         ids = {r["id"] for s in spec["sections"] for r in s["rows"]}
         sids = {s["id"] for s in spec["sections"]}
-        return {"done": {k: True for k, v in (state.get("done") or {}).items() if k in ids and v},
+        return {"done": {k: bool(v) for k, v in (state.get("done") or {}).items() if k in ids},
                 "links": {k: int(v) for k, v in (state.get("links") or {}).items() if k in ids and v},
-                "collapsed": {k: True for k, v in (state.get("collapsed") or {}).items() if k in sids and v}}
+                "collapsed": {k: bool(v) for k, v in (state.get("collapsed") or {}).items() if k in sids}}
 
     # ---- read ------------------------------------------------------------------------
     def _row(self, account_id: int, cid: int) -> dict:
@@ -312,14 +312,18 @@ class ComponentService(ComponentSourceSync, ComponentContext):
         return self._save(account_id, row, spec, st, by, before)
 
     def update_spec(self, account_id: int, cid: int, spec: dict, *, by: str = "assistant") -> dict:
-        with self._lock:
+        with self._lock, self.db.tx():
             row = self._row(account_id, cid)
             if json.loads(row["source_config_json"]):
                 return self.propose_spec(account_id, cid, spec)
             clean = self.normalize(row["kind"], spec)
             self._validate_spec_items(account_id, clean)
             before = self._effective_state_json(account_id, row)
-            st = self._clean_state(row["kind"], clean, json.loads(before))   # ticks as they are now, e.g. when sync turns off
+            migration, _ = self._plan_spec_migration(row, clean, json.loads(before))
+            if not migration["can_accept"]:
+                raise Conflict("Definition edit cannot discard or reinterpret saved state. Use a guarded rebuild proposal with explicit identity mappings.",
+                               code="migration_unresolved")
+            st = migration["state"]
             if row["kind"] == "checklist" and clean.get("sync_todos"):
                 st = self._push_todos(account_id, clean, st, previous=json.loads(row["spec_json"]))
             return self._save(account_id, row, clean, st, by, before)
