@@ -140,3 +140,42 @@ def test_component_receipts_use_guarded_state_guidance_without_reader(hub, accou
     assert 'read it back with get_component.' not in summary
     assert 'partial coverage' in SYSTEM_PROMPT and 'do not infer a' in SYSTEM_PROMPT
     assert 'guess missing rules or chase unrelated courses' in SYSTEM_PROMPT
+
+
+def test_presence_change_is_rehydrated_before_next_provider_turn(hub, account):
+    aid = account['id']
+    item = source(hub, aid, 'Presence rule', 'RETAINED_OLD_RULE')
+    read = ContextSources(hub.db).read(aid, item['source_id'], version=item['version'])
+    request_context = {'scope': {'course_id': None, 'item_id': None}, 'warnings': [],
+                       'sources': [{**item, 'inline': True, 'text': read['text']}]}
+    original_context = deepcopy(request_context)
+    svc = AssistantService(hub, HubAPI(hub))
+    with hub.db.tx() as c:
+        cid = c.execute("INSERT INTO assistant_conversations(account_id,title,created_at,updated_at) VALUES (?,?,?,?)",
+                        (aid, 'Presence change', now_iso(), now_iso())).lastrowid
+    history = [{'role': 'user', 'text': 'Check this rule.'},
+               {'role': 'assistant', 'tool_calls': [{'id': 'read-once', 'name': 'read_context_source', 'input': {}}]},
+               {'role': 'tool', 'results': [{'id': 'read-once', 'name': 'read_context_source', 'content': json.dumps(read)}]}]
+    original_history = deepcopy(history)
+    cfg = {'provider': 'codex', 'context': {'capacity': 64000}}
+
+    def prepare():
+        projected, attempted = svc._prepare_context(cid, aid, cfg, 'system', history, [],
+            lambda cfg: pytest.fail('must not call a provider'), allow_compact=False, request_context=request_context)
+        assert not attempted and valid_groups(projected)
+        return json.loads(projected[0]['sent_text'].split('Workspace source context (this request only):\n')[1])
+
+    assert prepare()['sources'][0]['complete_read']
+    # Importer presence checks preserve the source index and its version.
+    with hub.db.tx() as c:
+        c.execute("UPDATE items SET presence='source_unavailable' WHERE id=?", (item['item_id'],))
+    assert ContextSources(hub.db).metadata(aid, item['source_id'])['version'] == item['version']
+    payload = prepare()
+    retained = payload['sources'][0]
+    assert retained['source_id'] == item['source_id'] and retained['version'] == item['version']
+    assert retained['presence'] == 'source_unavailable' and retained['version_status'] == 'stale_or_unavailable'
+    assert not retained['complete_read'] and retained['available_ranges'] == retained['supplied_ranges'] == []
+    assert retained['historical_ranges_in_history'] == [[0, len(read['text'])]]
+    assert any('currently source_unavailable' in warning for warning in payload['warnings'])
+    assert 'RETAINED_OLD_RULE' not in json.dumps(payload)
+    assert history == original_history and request_context == original_context

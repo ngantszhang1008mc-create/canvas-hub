@@ -28,11 +28,24 @@ def restore_source_context(hub, account_id, manifest):
     for source in context["sources"]:
         source.pop('text', None)
         try:
-            index.metadata(account_id, source['source_id'], version=source['version'])
-            source['version_status'] = 'current'
-            if not source.get("inline"):
+            # Presence and any selected inline bytes must share one DB snapshot.
+            with hub.db.tx():
+                metadata = index.metadata(account_id, source['source_id'], version=source['version'])
+                result = (index.read(account_id, source['source_id'], version=source['version'], limit=4000)
+                          if metadata['presence'] == 'observed' and source.get('inline') else None)
+            # Presence/revision can change without changing retained indexed
+            # text. Rehydrate live provenance, never silently restore that text
+            # as current evidence when the source is no longer observed.
+            source.update(metadata)
+            if metadata['presence'] != 'observed':
+                source['version_status'] = 'stale_or_unavailable'
+                context['warnings'].append(
+                    f"Source {source['source_id']} is currently {metadata['presence']}. Retained text is historical, "
+                    "not current rule evidence; revalidate source availability before relying on it.")
                 continue
-            result = index.read(account_id, source["source_id"], version=source["version"], limit=4000)
+            source['version_status'] = 'current'
+            if result is None:
+                continue
         except HubError:
             source['version_status'] = 'stale_or_unavailable'
             context["warnings"].append(
@@ -41,6 +54,7 @@ def restore_source_context(hub, account_id, manifest):
             continue
         if result["coverage"]["complete_read"]:
             source["text"] = result["text"]
+    context['warnings'] = list(dict.fromkeys(context['warnings']))
     return context
 
 

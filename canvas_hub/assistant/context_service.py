@@ -10,7 +10,7 @@ from .context import (Policy, SUMMARY_SYSTEM, context_error, data_version, live_
 from .providers import ProviderError, Stopped
 from .usage import stored_usage, usage_totals
 from .request_shape import stable_tools
-from .source_context import with_source_context
+from .source_context import restore_source_context, with_source_context
 
 
 class ContextService:
@@ -179,6 +179,10 @@ class ContextService:
     def _prepare_context(self, cid, account_id, cfg, system, transcript, tools, make_provider,
                          *, allow_compact=True, provider_pending=False, request_context=None):
         policy = Policy.for_config(cfg)
+        # A source can become unavailable between tool rounds with unchanged
+        # indexed bytes/version. Check live provenance before each dispatch.
+        if request_context:
+            request_context = restore_source_context(self.hub, account_id, request_context)
         transcript = self._context_projection(cid, account_id, transcript)
         projected = with_source_context(transcript, request_context)
         report = policy.measure(cfg, system, projected, tools)
@@ -197,6 +201,8 @@ class ContextService:
                     raise
                 with self.hub.db.tx() as c:
                     c.execute("UPDATE assistant_conversations SET context_notice=? WHERE id=?", (str(e), cid))
+            if request_context:
+                request_context = restore_source_context(self.hub, account_id, request_context)
             projected = with_source_context(transcript, request_context)
             report = policy.measure(cfg, system, projected, tools)
         self._context_reports[cid] = report
