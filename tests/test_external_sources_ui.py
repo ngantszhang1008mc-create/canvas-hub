@@ -48,7 +48,16 @@ def test_failed_read_automatically_offers_login_or_manual_connection(hub, accoun
             assert probes == [url] and not models
             page.reload()
             row.get_by_role('button', name=button, exact=True).click()
-            expect(panel).to_contain_text('HTTP Basic authentication' if scheme=='basic' else message)
+            if scheme=='basic':
+                # Verify the actionable Basic form and advance-send consent,
+                # not a technical phrase removed from the streamlined copy.
+                expect(panel.get_by_label('Site username',exact=True)).to_be_visible()
+                expect(panel.get_by_label('Site password',exact=True)).to_be_visible()
+                expect(panel.get_by_role('button',name='Sign in and inspect',exact=True)).to_be_visible()
+                expect(panel).to_contain_text('without a second review')
+                expect(panel.get_by_role('button',name='Agree and open sign-in window',exact=True)).to_have_count(0)
+            else:
+                expect(panel).to_contain_text(message)
             assert probes == [url] and not models
         finally:
             browser.close()

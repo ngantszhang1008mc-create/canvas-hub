@@ -145,8 +145,10 @@ authenticated course content is readable.
 Real authenticated verification is still pending. Credentials must be entered
 by the user in the protected app form, never copied from chat or exported in
 tasks/logs. This cloud executor has no supported user-facing HTTPS login/browser
-handoff, and its managed network currently permits HTTP proxy access but has no
-TCP grant for the app's DNS-pinned TLS transport. Do not bypass either boundary
+handoff. The official HTTPS proxy reaches the site, but this executor has no
+public TCP route compatible with the app's DNS-pinned TLS transport. Its optional
+8088 CONNECT path supports only granted private/VPN addresses; adding the public
+course hostname to TCP grants would not solve this. Do not bypass either boundary
 with a public tunnel, unverified proxy transport or disabled TLS verification.
 Provision an authenticated user-accessible test environment with the required
 transport, then verify this exact page with the user entering credentials there.
