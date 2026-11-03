@@ -218,6 +218,15 @@ class SourceAnalysis:
         if rid and self.hub.requests._get(aid, rid)['status'] == 'declined':
             self.login_detection.start(aid, sid, failure_id=rid)
 
+    def login_status(self, aid, source):
+        """Only expose a probe belonging to the current failed attempt (or manual check)."""
+        result = self.login_detection.get(aid, source['id'])
+        request = source.get('request') or {}
+        if result.get('failure_id') and not result.get('manual') and (
+                request.get('status') != 'declined' or request.get('id') != result['failure_id']):
+            return {'state':'not_checked'}
+        return result
+
     def _run_reserved(self, *args):
         try:
             self._run(*args)
@@ -354,6 +363,7 @@ class SourceAnalysis:
     def batch_disclosure(self, aid, course_id=None, item_id=None):
         scope = self._scope(aid, course_id, item_id)
         sources = self.eligible(self.sources.list(aid, course_id, item_id))
+        sources = [s for s in sources if self.login_status(aid, s).get('outcome') != 'login_required']
         if not sources:
             return {'available': False, 'message': 'No new or failed public links in this scope.', 'scope': scope}
         entries, disclosure = [], None

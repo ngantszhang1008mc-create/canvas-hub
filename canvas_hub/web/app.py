@@ -408,7 +408,13 @@ def create_app(api: HubAPI, *, token: str, port: int) -> FastAPI:
     def external_list(aid: int, course_id: str | None = None, item_id: int | None = None):
         service = external(aid)
         service.backfill(aid)
-        return {"sources": service.list(aid, course_id, item_id)}
+        sources = service.list(aid, course_id, item_id)
+        for source in sources:
+            if (source.get('request') or {}).get('status') == 'declined':
+                source_analysis.check_failed_source(aid, source['id'])
+            source['login_check'] = source_analysis.login_status(aid, source)
+            source['connection_state'] = site_connections.status(aid, source['id'])['state']
+        return {"sources": sources}
 
     @app.get("/api/accounts/{aid}/external-analysis/disclosure")
     def batch_disclosure(aid: int, course_id: str | None = None, item_id: int | None = None):
@@ -434,7 +440,9 @@ def create_app(api: HubAPI, *, token: str, port: int) -> FastAPI:
     @app.get("/api/accounts/{aid}/external-sources/{sid}")
     def external_get(aid: int, sid: int):
         source_analysis.check_failed_source(aid, sid)
-        return external(aid).get(aid, sid)
+        source = external(aid).get(aid, sid)
+        source['login_check'] = source_analysis.login_status(aid, source)
+        return source
 
     @app.get("/api/accounts/{aid}/external-sources/{sid}/disclosure")
     def external_disclosure(aid: int, sid: int):
@@ -455,7 +463,7 @@ def create_app(api: HubAPI, *, token: str, port: int) -> FastAPI:
     @app.post("/api/accounts/{aid}/external-sources/{sid}/site-connection/offer")
     async def site_connection_offer(aid: int, sid: int, request: Request):
         b = await body(request)
-        return site_connections.offer(aid, sid, b.get('identity_origins', []))
+        return site_connections.offer(aid, sid, b.get('identity_origins', []), method=b.get('method', 'browser'))
 
     @app.post("/api/accounts/{aid}/external-sources/{sid}/site-connection/start")
     async def site_connection_start(aid: int, sid: int, request: Request):

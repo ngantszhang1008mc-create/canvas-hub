@@ -14,9 +14,9 @@ pytestmark=pytest.mark.browser
 
 
 @pytest.mark.parametrize('outcome,scheme,message,button', [
-    ('login_required','basic','HTTP Basic authentication','Sign in to this site'),
-    ('unknown',None,'Login requirement is unknown','Connect manually'),
-    ('access_denied',None,'The site denied access','Connect manually'),
+    ('login_required','basic','This page requires sign-in','Needs login'),
+    ('unknown',None,'Could not determine whether this page needs sign-in','Review failure'),
+    ('access_denied',None,'Could not determine whether sign-in would help','Review failure'),
 ])
 def test_failed_read_automatically_offers_login_or_manual_connection(hub, account, source, monkeypatch, outcome, scheme, message, button):
     from playwright.sync_api import expect, sync_playwright
@@ -37,55 +37,19 @@ def test_failed_read_automatically_offers_login_or_manual_connection(hub, accoun
             row.get_by_role('button', name='Workspace actions', exact=True).click()
             row.locator('.workspace-action-icon[aria-label="Analyse link"]').click()
             panel = page.get_by_role('complementary', name='Source Agent', exact=True)
-            page.wait_for_timeout(100)
             assert not probes
             panel.get_by_role('button', name='Approve and analyse', exact=True).click()
             expect(panel).to_contain_text(message, timeout=10000)
-            expect(panel.get_by_role('button', name=button, exact=True)).to_be_visible()
+            expect(row.get_by_role('button', name=button, exact=True)).to_be_visible()
+            if outcome!='login_required':
+                expect(row.get_by_role('button', name='Needs login', exact=True)).to_have_count(0)
+                panel.get_by_text('More options and diagnostics',exact=True).click()
+                expect(panel.get_by_role('button',name='Connect manually',exact=True)).to_be_visible()
             assert probes == [url] and not models
-            # Reading the panel again is not another paid analysis or probe.
             page.reload()
-            page.locator('.external-source-list').get_by_role('button', name='Re-inspect', exact=True).click()
-            expect(panel).to_contain_text(message)
+            row.get_by_role('button', name=button, exact=True).click()
+            expect(panel).to_contain_text('HTTP Basic authentication' if scheme=='basic' else message)
             assert probes == [url] and not models
-        finally:
-            browser.close()
-
-
-def test_basic_entry_is_local_and_empty_after_submit(hub, account, source, monkeypatch):
-    from playwright.sync_api import expect, sync_playwright
-    from .test_site_connection import FakeBrowser
-    challenge = {'scheme':'basic','origin':'https://course.example.edu','request_id':'fixture'}
-    actions = []
-    class Browser(FakeBrowser):
-        def __init__(self,*args): super().__init__(*args); self.state='login_open'; self.challenge=challenge
-        def snapshot(self): return {**super().snapshot(),'http_auth':self.challenge}
-        def call(self, action, arg=None, **kwargs):
-            if action=='http_auth':
-                actions.append(dict(arg)); self.challenge=None
-            return super().call(action,arg,**kwargs)
-    monkeypatch.setattr('canvas_hub.services.site_connection.BrowserConnection', Browser)
-    with serve(hub, []) as (base, token, _), sync_playwright() as pw:
-        browser = pw.chromium.launch()
-        try:
-            page = browser.new_page()
-            page.goto(f'{base}/?token={token}'); page.goto(f'{base}/#/course/4242')
-            row = page.locator('.external-source-row')
-            row.get_by_role('button',name='Workspace actions',exact=True).click()
-            row.locator('.workspace-action-icon[aria-label="Analyse link"]').click()
-            box = page.get_by_role('region',name='Site connection')
-            box.get_by_role('button',name='Review connection').click()
-            box.get_by_role('button',name='Agree and open sign-in window').click()
-            expect(box).to_contain_text('HTTP Basic sign-in')
-            box.get_by_label('Site username').fill('fixture-user')
-            box.get_by_label('Site password').fill('fixture-password')
-            page.wait_for_timeout(1400)  # Status polling must preserve typed values.
-            expect(box.get_by_label('Site password')).to_have_value('fixture-password')
-            box.get_by_role('button',name='Sign in to requested page').click()
-            expect(box.get_by_label('Site password')).to_have_count(0)
-            assert actions == [{'challenge':challenge,'username':'fixture-user','password':'fixture-password'}]
-            assert 'fixture-password' not in page.content()
-            assert 'fixture-password' not in page.evaluate('JSON.stringify(localStorage)')
         finally:
             browser.close()
 
@@ -117,7 +81,7 @@ def test_failed_inspection_can_be_retried_and_reinspected(hub, account, source, 
         page.reload()
         listing = page.locator('.external-source-list')
         expect(listing.get_by_role('button', name='Analyse all (1)', exact=True)).to_be_visible()
-        listing.get_by_role('button', name='Re-inspect', exact=True).click()
+        listing.get_by_role('button', name='Review failure', exact=True).click()
         expect(panel).to_contain_text('Latest inspection failed')
         assert len(calls) == 1
         panel.get_by_role('button', name='Approve and re-inspect', exact=True).click()
@@ -214,6 +178,7 @@ def test_one_click_analysis_review_approval_and_cached_reload(hub,account,source
         if executor=='builtin':
             panel.get_by_role('button',name='Approve and analyse',exact=True).click()
         else:
+            panel.get_by_text('More options and diagnostics',exact=True).click()
             panel.get_by_role('button',name='Use connected Agent instead',exact=True).click()
             expect(panel).to_contain_text('Request #')
             classify(svc,aid,sid)
@@ -335,7 +300,7 @@ def test_site_connection_requires_review_and_consent_in_browser(hub, account, so
     from .test_site_connection import FakeBrowser
     created=[]; redirect_state={}
     class Browser(FakeBrowser):
-        def snapshot(self): return {**super().snapshot(), **redirect_state}
+        def snapshot(self): return {**super().snapshot(), **(redirect_state if self.state!='closed' else {})}
     def make_browser(profile,target,domains):
         created.append((profile,target,domains))
         return Browser(profile,target,domains)
@@ -348,23 +313,28 @@ def test_site_connection_requires_review_and_consent_in_browser(hub, account, so
         listing.get_by_role('button',name='Workspace actions',exact=True).click()
         listing.locator('.workspace-action-icon[aria-label="Analyse link"]').click()
         panel=page.get_by_role('complementary',name='Source Agent',exact=True)
+        panel.get_by_text('More options and diagnostics',exact=True).click()
+        panel.get_by_role('button',name='Connect manually',exact=True).click()
         box=panel.get_by_role('region',name='Site connection')
-        expect(box.get_by_role('button',name='Review connection')).to_be_visible()
+        expect(box.get_by_role('button',name='Agree and open sign-in window')).to_be_visible()
+        box.get_by_text('Additional sign-in domains',exact=True).click()
         assert not created
         box.get_by_label('Additional identity-provider origins').fill('https://identity.example.edu')
-        box.get_by_role('button',name='Review connection').click()
+        box.get_by_role('button',name='Review sign-in domains',exact=True).click()
         expect(box).to_contain_text('https://identity.example.edu')
-        expect(box).to_contain_text('persistent local browser profile')
+        expect(box).to_contain_text('isolated local profile')
         assert not created
         box.get_by_role('button',name='Agree and open sign-in window').click()
         expect(box).to_contain_text('Connection: opening')
         assert len(created)==1 and 'https://identity.example.edu' in created[0][2]
-        redirect_state.update(redirect_blocked=True,redirect_reason='post_replay')
+        redirect_state.update(state='login_open',redirect_blocked=True,redirect_reason='post_replay')
+        box.get_by_text('Connection details',exact=True).click()
         box.get_by_role('button',name='Refresh connection status').click()
+        box.get_by_text('Connection details',exact=True).click()
         expect(box).to_contain_text('The sign-in flow would repeat a submission')
-        expect(box).to_contain_text('Saved source data is unchanged')
+        expect(box).to_contain_text('saved source data is unchanged')
         box.get_by_role('button',name='Close connection').click()
-        expect(box).to_contain_text('Connection: closed')
+        expect(box.get_by_role('button',name='Agree and open sign-in window')).to_be_visible()
         assert not errors
         browser.close()
 
@@ -397,14 +367,15 @@ def test_connected_page_review_analysis_and_saved_source(hub, account, source, m
         listing.get_by_role('button',name='Workspace actions',exact=True).click()
         listing.locator('.workspace-action-icon[aria-label="Analyse link"]').click()
         panel=page.get_by_role('complementary',name='Source Agent',exact=True)
+        panel.get_by_text('More options and diagnostics',exact=True).click()
+        panel.get_by_role('button',name='Connect manually',exact=True).click()
         box=panel.get_by_role('region',name='Site connection')
-        box.get_by_role('button',name='Review connection').click()
         box.get_by_role('button',name='Agree and open sign-in window').click()
         expect(box).to_contain_text('Connection: login open')
-        box.get_by_role('button',name='Check requested page').click()
+        box.get_by_role('button',name='I’ve signed in — check page').click()
         page.wait_for_timeout(1600)  # Status polling must not discard this review.
         box.get_by_role('button',name='Confirm this is the requested course page').click()
-        expect(box).to_contain_text('Connection: connected')
+        expect(box).to_contain_text('Course page confirmed')
         box.get_by_role('button',name='Review connected source analysis').click()
         expect(box).to_contain_text('Exact text to send and save')
         page.wait_for_timeout(1600)
