@@ -35,6 +35,7 @@ from .model import CATEGORIES, ITEM_TYPES
 from .services.querylayer import VIEW_HELP
 from .services.deadlines import archived_sql
 from .util import HubError, InvalidInput
+from .table_display import TableLinks
 
 PERMISSIONS = ("read", "notes", "collect", "settings", "deadlines", "ui", "fulfil")
 MAX_RESULT_CHARS = 24000
@@ -1105,22 +1106,25 @@ def h_set_grading_rules(ctx, a):
     return ctx.api.propose_grading_rules(aid, str(a["course_id"]), rules)
 
 
-def _num_or_text(v):
-    return v if isinstance(v, (int, float)) and not isinstance(v, bool) else str(v)[:300]
-
-
 def h_show_table_v2(ctx, a):
     cols = [str(c)[:60] for c in a["columns"]][:12]
-    rows = [[_num_or_text(x) for x in r][:len(cols)] for r in a["rows"][:200] if isinstance(r, list)]
     types = [t if t in ("text", "number", "date") else "text" for t in (a.get("column_types") or [])][:len(cols)]
     totals = [c for c in (a.get("totals") or []) if c in cols]
     group_by = a.get("group_by") if a.get("group_by") in cols else None
-    details = [str(d)[:4000] for d in (a.get("details") or [])][:len(rows)]
-    item_ids = [int(x) if isinstance(x, int) else None for x in (a.get("item_ids") or [])][:len(rows)]
-    return _display("table", {"title": (a.get("title") or "")[:120], "columns": cols, "rows": rows, "column_types": types,
-                              "totals": totals, "group_by": group_by, "details": details, "item_ids": item_ids},
-                    f"Showed a table with {len(rows)} row(s) (sortable, filterable"
-                    + (f", totals of {', '.join(totals)}" if totals else "") + (f", grouped by {group_by}" if group_by else "") + ").")
+    linked = bool(a.get("item_ids")) or any(isinstance(r, dict) and r.get("item_id") is not None for r in a["rows"][:200])
+    resolver = TableLinks(ctx.api.hub.db, _account(ctx, a)) if linked and ctx is not None else TableLinks()
+    display = resolver.display({"component": "table", "title": (a.get("title") or "")[:120], "columns": cols,
+                                "rows": a["rows"], "column_types": types, "totals": totals, "group_by": group_by,
+                                "details": a.get("details"), "item_ids": a.get("item_ids")}, strict=True)
+    warnings = display.get("link_warnings", [])
+    result = _display("table", display, f"Showed a table with {len(display['rows'])} row(s) (sortable, filterable"
+                      + (f", totals of {', '.join(totals)}" if totals else "")
+                      + (f", grouped by {group_by}" if group_by else "") + ")."
+                      + (f" {len(warnings)} item-link notice(s); unverified links were omitted." if warnings else ""))
+    if warnings:
+        result["link_warnings"] = warnings[:8]
+        result["link_warning_count"] = len(warnings)
+    return result
 
 
 def h_show_chart_v2(ctx, a):
@@ -1578,15 +1582,25 @@ TOOLS += [
     AgentTool("show_items", "Show stored items (announcements, assignments, pages, files...) as cards.", "ui",
               {"item_ids": {"type": "array", "items": {"type": "integer"}}}, ["item_ids"], h_show_items),
     AgentTool("show_table", "Show a table (max 12 columns, 200 rows) the user can sort, filter, total, group and export. "
-              "Optional per-row detail text expands in place; item_ids open the full item in a side panel.", "ui",
+              "Use row objects to keep cells, item_id, source_url and detail together when sorting/grouping. "
+              "Item links are checked against stored account data; include the exact stored title or source_url in a visible cell. "
+              "Ambiguous, mismatched or unavailable links are omitted with a notice; never guess IDs.", "ui",
               {"title": {"type": "string"}, "columns": {"type": "array", "items": {"type": "string"}},
-               "rows": {"type": "array", "items": {"type": "array", "items": {"type": "string"}},
-                        "description": "cell values; numbers may be given as text"},
+               "rows": {"type": "array", "items": {"anyOf": [
+                   {"type": "object", "properties": {
+                       "cells": {"type": "array", "items": {"type": ["string", "number"]}},
+                       "item_id": {"type": "integer", "minimum": 1, "maximum": 9007199254740991,
+                                   "description": "Stored Canvas Hub item ID, bound to these cells"},
+                       "source_url": {"type": "string", "description": "Exact stored source URL; required for duplicate titles"},
+                       "detail": {"type": "string"}}, "required": ["cells"], "additionalProperties": False},
+                   {"type": "array", "items": {"type": ["string", "number"]}}]},
+                        "description": "Prefer {cells:[...], item_id:123, source_url:..., detail:...}; plain cell arrays remain supported"},
                "column_types": {"type": "array", "items": {"type": "string", "enum": ["text", "number", "date"]}},
                "totals": {"type": "array", "items": {"type": "string"}, "description": "column names to sum"},
                "group_by": {"type": "string", "description": "a column name"},
-               "details": {"type": "array", "items": {"type": "string"}, "description": "one expandable text per row"},
-               "item_ids": {"type": "array", "items": {"type": "integer"}, "description": "one Canvas Hub item id per row"}},
+               "details": {"type": "array", "items": {"type": "string"}, "description": "Legacy cell arrays only: expandable text at the same row index"},
+               "item_ids": {"type": "array", "items": {"type": ["integer", "null"]},
+                            "description": "Legacy cell arrays only: exactly one ID or null per row; all links are validated"}},
               ["columns", "rows"], h_show_table_v2),
     AgentTool("show_chart", "Show a chart of numbers you computed: bar (one series), grouped or stacked (several series, "
               "e.g. earned vs remaining vs lost per category), or waterfall (running total). Optional threshold line.", "ui",

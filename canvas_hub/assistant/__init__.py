@@ -29,6 +29,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from ..agent_tools import ToolContext, run_tool_display
+from ..table_display import TableLinks
 from ..util import HubError, InvalidInput, NotFound, now_iso
 from .providers import ANTHROPIC_DEFAULT_MODEL, RESERVED_PARAMS, ProviderError, Stopped, make_provider
 from .context import Policy, validate_settings
@@ -528,6 +529,7 @@ class AssistantService(ContextService, GatewaySettings):
             transcript, draft = self._transcript(cid), self._live.get(cid)
         msgs = []
         archived_ids = self.hub.deadlines.archived_ids(account_id)
+        table_links = TableLinks(self.hub.db, account_id)
         for m in transcript:
             if m["seq"] <= after:
                 continue
@@ -542,7 +544,7 @@ class AssistantService(ContextService, GatewaySettings):
             else:
                 v["results"] = [{"id": r["id"], "name": r["name"], "is_error": r.get("is_error"),
                                  "preview": r["content"][:1500],
-                                 "display": self._visible_display(r.get("display"), archived_ids)} for r in m["results"]]
+                                 "display": table_links.display(self._visible_display(r.get("display"), archived_ids))} for r in m["results"]]
             msgs.append(v)
         out = {"conversation": conv, "messages": msgs, "context": self.context_status(account_id, cid, transcript)}
         if draft:
