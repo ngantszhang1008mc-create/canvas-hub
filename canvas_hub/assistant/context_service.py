@@ -30,7 +30,7 @@ class ContextService:
             turn = provider.complete(system, transcript, stable_tools(tools), on_text=on_text)
             usage = turn.usage
             model = turn.model or model
-            status = "completed"
+            status = "incomplete" if turn.incomplete_reason else "completed"
             return turn, attempt
         except Stopped:
             status = "cancelled"

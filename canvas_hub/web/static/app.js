@@ -1412,6 +1412,9 @@ function renderMessages(list, msgs, ctx = {}) {
       if (plain.length) parts.push(h("div", { class: "steps" }, plain.map((c) => stepRow(c, results[c.id]))));
       for (const c of m.tool_calls || []) if (results[c.id] && results[c.id].display) parts.push(componentView(results[c.id].display, ctx, c.id));
       if (m.stop === "refusal") parts.push(h("div", { class: "small muted" }, "The model declined to continue."));
+      if (m.incomplete_reason || m.stop === "truncated") parts.unshift(h("div", { class: "small bad-text", role: "note" },
+        m.incomplete_reason === "empty_reply" ? "No final answer was returned. Review retained tool results before sending a follow-up."
+          : "Incomplete reply: the output limit was reached. Review retained tool results before sending a follow-up."));
       if (parts.length) out.push(h("div", { class: "msg assistant" }, parts));
     }
   }
@@ -1541,6 +1544,10 @@ VIEWS.assistant = async (main, parts, params) => {
     } else typers.delete("live");
     const st = d.conversation.run_state;
     const contextBlocked = (d.conversation.run_error || '').startsWith('Context budget exceeded');
+    const newest = [...all].reverse();
+    const lastReply = newest.find(m => m.role === "assistant"), lastUser = newest.find(m => m.role === "user");
+    const replyStopped = /^The provider (reached its output limit|returned no answer or tool call)/.test(d.conversation.run_error || "");
+    const incompleteError = replyStopped && lastReply && lastReply.seq > (lastUser?.seq || 0) ? lastReply.incomplete_reason : null;
     const busy = st === "running" || st === "cancelling";
     sendBtn.disabled = busy || settingsUnavailable || catalogLoading || sending; stopBtn.hidden = !busy;
     toolPicker.setBusy(busy || settingsUnavailable || catalogLoading || sending);
@@ -1559,8 +1566,15 @@ VIEWS.assistant = async (main, parts, params) => {
       budget ? h("p", null, `Last request estimate: ${budget.estimated_tokens} input tokens; ${budget.response_reserved} reserved for output/reasoning. ${budget.request_max_tokens != null && budget.request_max_tokens !== budget.response_reserved ? `Provider output cap: ${budget.request_max_tokens}. ` : ""}Capacity: ${budget.capacity} (${budget.capacity_source}). Usable budget after 10% safety margin: ${budget.effective_capacity ?? Math.floor(budget.capacity * 0.9)}. Method: ${budget.estimator || "unreported"}.`) : null,
       d.conversation.context_notice ? h("p", null, d.conversation.context_notice) : null);
     mount(status, busy ? h("span", { class: "working" }, st === "cancelling" ? "Stopping…" : "Working…")
-      : st === "error" ? h("div", { class: "banner bad", style: "margin:0" }, h("div", { class: "b-body" }, h("div", { class: "b-title" }, "The assistant stopped"), h("div", { class: "small" }, d.conversation.run_error || ""),
-        !settingsUnavailable && !contextBlocked ? h("div", null, h("button", { onclick: retry }, "Retry answer"), h("span", { class: "small" }, " Retry makes a new provider request with tools disabled. If more tools are needed, review previous results and send a new message.")) : null)) : null);
+      : st === "error" ? h("div", { class: "banner bad", style: "margin:0" }, h("div", { class: "b-body" }, h("div", { class: "b-title" }, "The assistant stopped"),
+        incompleteError ? h("div", { class: "small" }, h("details", null,
+          h("summary", null, incompleteError === "output_limit" ? "Output limit reached — details" : "Empty reply — details"),
+          h("div", null, d.conversation.run_error || "")), h("p", null, "Review saved results before continuing tool work."))
+          : h("div", { class: "small" }, d.conversation.run_error || ""),
+        !settingsUnavailable && !contextBlocked ? h("div", null, h("button", { onclick: retry }, "Retry answer"),
+          incompleteError ? h("a", { class: "btn ghost sm", href: `#/assistant/settings?p=${encodeURIComponent(setupSel.value || cfg.active_profile)}` }, "Output settings") : null,
+          h("span", { class: "small" }, incompleteError ? " New request; tools disabled. Charges may apply."
+            : " Retry makes a new provider request with tools disabled. If more tools are needed, review previous results and send a new message.")) : null)) : null);
     const seq = all.length ? all[all.length - 1].seq : 0;
     scroller.scrollTop = atBottom && (seq !== lastSeq || stick || busy) ? scroller.scrollHeight : prevTop;
     lastSeq = seq; stick = false;
@@ -1802,9 +1816,14 @@ function assistantSettingsCard(cfg, prof) {
   const autoCompact = h("input", { type: "checkbox", checked: cur.context?.auto_compact === true });
   const capacity = h("input", { type: "number", min: 4096, max: 2000000, step: 1,
     value: cur.context?.capacity || "", placeholder: "Application safety default", "aria-label": "Context token capacity" });
+  const responseTokens = h("input", { type: "number", min: 512, max: 128000, step: 1,
+    value: cur.context?.response_tokens || "", placeholder: "Automatic", "aria-label": "Reply token limit" });
+  const responseField = h("label", null, "Reply token limit, including reasoning (optional)", responseTokens,
+    h("p", { class: "tiny muted" }, "Reasoning and answer share this limit. Higher limits can use more API quota. Extra request max_tokens or max_completion_tokens takes precedence; clearing this field restores the application default."));
   const contextField = h("div", { class: "field", style: "grid-column:1/-1" },
     h("label", null, autoCompact, " Automatically compact older turns near the context budget"),
     h("label", null, "Context token capacity (optional)", capacity),
+    responseField,
     h("p", { class: "tiny muted" }, "Set this to a capacity verified for your model and endpoint. Exact supported endpoints use documented model limits; others use conservative application defaults. Compaction uses model quota; original history stays saved. Replies, reasoning and a 10% safety margin have reserved space."));
   const isGateway = () => presetSel.value === "allowance_gateway"
     || cfg.presets.some((p) => p.id === presetSel.value && p.provider === "allowance_gateway");
@@ -1916,6 +1935,7 @@ function assistantSettingsCard(cfg, prof) {
     const isCodex = p && p.provider === "codex";
     const gateway = isGateway();
     extraField.hidden = !p || isAnthropic || isCodex || gateway;
+    responseField.hidden = !!isCodex;
     baseField.hidden = !!isCodex;
     keyField.hidden = !!isCodex || gateway;
     gatewayField.hidden = !gateway; reasoningHint.hidden = gateway;
@@ -1965,6 +1985,9 @@ function assistantSettingsCard(cfg, prof) {
     const body = { profile_id: cur.id, name: name.value, preset: presetSel.value, model: model.value };
     body.context = { ...(cur.context || {}), auto_compact: autoCompact.checked };
     if (capacity.value.trim()) body.context.capacity = Number(capacity.value); else delete body.context.capacity;
+    if (!isCodex) {
+      if (responseTokens.value.trim()) body.context.response_tokens = Number(responseTokens.value); else delete body.context.response_tokens;
+    }
     if (gateway) Object.assign(body, { base_url: base.value, gateway_mode: gatewayMode.value, gateway_consent: gatewayConsent.checked,
       ...(gatewayToolsChanged && sameGateway() ? { gateway_tools: [...gatewaySelectedTools] } : {}) });
     else if (!isCodex) Object.assign(body, { base_url: base.value, extra_params: extraParams, ...(key.value ? { api_key: key.value } : {}) });
