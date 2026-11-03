@@ -1,5 +1,16 @@
 # Local development only. Generate a fresh >=32-character random value.
 # No working admin or upstream credential is committed.
 ADMIN_SECRET=
-# Required for POLICY.mode=production; never set for offline mock development.
+# Required only when production POLICY includes the OpenAI adapter.
+# Never set real upstream credentials for offline mock development.
 # OPENAI_API_KEY=
+# New API production configuration: operator-owned HTTPS origin, no path.
+# NEW_API_BASE_URL=https://relay.example.invalid
+# Shared mode (default): one ordinary service user's relay token.
+# NEW_API_IDENTITY_MODE=shared
+# NEW_API_RELAY_KEY=
+# Per-user mode instead: omit NEW_API_RELAY_KEY entirely.
+# Store the complete ref-to-token JSON map as a server secret, never in vars.
+# NEW_API_IDENTITY_MODE=per_user
+# NEW_API_RELAY_KEYS={"opaque_reference":"<relay-token>"}
+# No New API management/admin credential is used by the gateway.

@@ -30,6 +30,14 @@ NAME = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 CALL_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 MODEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$")
 TOKEN = re.compile(r"^ses_[A-Za-z0-9_-]{43}$")
+GATEWAY_CONSENT_VERSION = 2
+
+
+def gateway_consent_valid(cfg):
+    # Earlier production disclosures named only OpenAI. Preserve the session,
+    # but require acceptance of the relay/DeepSeek disclosure before reuse.
+    return cfg.get('gateway_consent') is True and (cfg.get('gateway_mode') != 'production'
+            or cfg.get('gateway_consent_version') == GATEWAY_CONSENT_VERSION)
 
 
 class GatewayError(ProviderError):
@@ -134,7 +142,7 @@ def _metadata(cfg, method, path, body=None, *, session=True):
 
 
 def enroll(cfg, invitation):
-    if cfg.get('gateway_consent') is not True:
+    if not gateway_consent_valid(cfg):
         raise GatewayError('Review and accept the gateway disclosure before connecting.')
     if not isinstance(invitation, str) or not re.fullmatch(r'inv_[A-Za-z0-9_-]{43}', invitation):
         raise GatewayError('Enter a valid operator-issued invitation.')
@@ -187,7 +195,7 @@ def authorize(cfg):
 
 def prepare_config(cfg):
     authorize(cfg)
-    if cfg.get('gateway_consent') is not True:
+    if not gateway_consent_valid(cfg):
         raise GatewayError('Accept the gateway disclosure in Assistant settings first.')
     if cfg.get('api_key') or cfg.get('extra_params') or cfg.get('thinking') or cfg.get('effort'):
         raise GatewayError('Gateway setups do not accept BYOK keys, reasoning settings or extra provider options.')
@@ -328,7 +336,18 @@ class AllowanceGatewayProvider:
     def _terminal_usage(self, terminal):
         if terminal.get('finish_reason') not in ('stop', 'tool_calls', 'length') or terminal.get('model') != self.model['id']:
             raise GatewayError('Gateway terminal model or finish reason is unsupported.')
+        if terminal.get('accounting') not in (None, 'authoritative_usage', 'full_reservation'):
+            raise GatewayError('Gateway accounting mode is unsupported; no tool was executed.')
         usage = terminal.get('usage')
+        if terminal.get('accounting') == 'full_reservation':
+            # A relay may provide estimates rather than authoritative metering.
+            # Its successful response consumes the entire reserved allowance;
+            # missing token counts remain unknown in local telemetry.
+            reserved = terminal.get('reserved_microusd')
+            if ('usage' not in terminal or usage is not None or not isinstance(reserved, str)
+                    or not re.fullmatch(r'\d{1,24}', reserved) or terminal.get('charged_microusd') != reserved):
+                raise GatewayError('Gateway conservative charge is invalid; no tool was executed.')
+            return None
         valid = lambda n: type(n) is int and 0 <= n <= 9007199254740991
         if not isinstance(usage, dict) or any(not valid(usage.get(k)) for k in ('input_tokens', 'output_tokens')):
             raise GatewayError('Gateway terminal usage is missing or invalid; no tool was executed.')
@@ -359,6 +378,8 @@ class AllowanceGatewayProvider:
             headers = {'Authorization': 'Bearer ' + self.cfg['gateway_token'], 'Content-Type': 'application/json',
                        'Accept': 'application/x-ndjson', 'Accept-Encoding': 'identity', 'Idempotency-Key': record['key'],
                        'X-Gateway-Mode': self.cfg['gateway_mode']}
+            if self.cfg['gateway_mode'] == 'production' and gateway_consent_valid(self.cfg):
+                headers['X-Gateway-Consent-Version'] = str(GATEWAY_CONSENT_VERSION)
             timeout = httpx.Timeout(60, connect=10, write=10, pool=10)
             async with httpx.AsyncClient(timeout=timeout, follow_redirects=False, trust_env=False) as client:
                 authorize(self.cfg)
@@ -475,10 +496,12 @@ class AllowanceGatewayProvider:
         elif calls and finish != 'length':
             raise GatewayError('Gateway did not authorize completion of its tool calls.')
         record.update(state='completed', usage=usage, finish_reason=finish,
-                      reserved_microusd=terminal.get('reserved_microusd'), charged_microusd=terminal.get('charged_microusd'))
+                      reserved_microusd=terminal.get('reserved_microusd'), charged_microusd=terminal.get('charged_microusd'),
+                      accounting=terminal.get('accounting'))
         record.pop('body', None)
         self._journal(record)
-        usage = {**usage, 'cache_read_input_tokens': usage.get('cached_input_tokens'),
-                 'cache_creation_input_tokens': usage.get('cache_write_input_tokens')}
+        usage = ({**usage, 'cache_read_input_tokens': usage.get('cached_input_tokens'),
+                  'cache_creation_input_tokens': usage.get('cache_write_input_tokens')} if usage is not None else {})
         return Turn(text=text, tool_calls=complete_calls, stop={'stop': 'end', 'tool_calls': 'tool_use', 'length': 'truncated'}[finish],
-                    model=self.model['id'], usage=usage, raw={'provider': self.name, 'request_id': record['request_id']})
+                    model=self.model['id'], usage=usage, raw={'provider': self.name, 'request_id': record['request_id'],
+                                                           'accounting': terminal.get('accounting')})

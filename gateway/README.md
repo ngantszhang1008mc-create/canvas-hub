@@ -5,8 +5,8 @@ allowance. It handles invitations, sessions, an approved model contract, streami
 and a transactional usage ledger. Canvas collection, local databases, browser
 sessions, and tool execution remain in the existing local application.
 
-The production adapter implements OpenAI Responses for the approved `gpt-6-luna`
-model. Development uses an explicit offline mock mode. Production defaults have
+Production adapters implement OpenAI Responses for `gpt-6-luna` and a server-only
+New API relay for `deepseek-flash`. Development uses an explicit offline mock mode. Production defaults have
 zero allowance and require server-side configuration and secrets before serving
 requests. No live model call or deployment was performed to validate this change.
 The local app includes an opt-in **Allowance gateway** provider with invitation
@@ -26,6 +26,10 @@ redemption, allowance display, and the same local tool permissions as other setu
   the local client. No automatic provider retry or paid fallback.
 - A bounded OpenAI HTTP/SSE adapter with cached-input/cache-write accounting,
   long-context price snapshots, and output totals that include reasoning once.
+- A bounded New API Chat Completions adapter with conservative full-reservation
+  charges, shared or manually bound per-user relay credentials, and renewed
+  client disclosure. New API can manage upstream channels and user/token quotas;
+  Canvas retains its own allowance ledger and invitation flow.
 - Offline functional tests against the Workers runtime and its SQLite storage.
 
 Allowance defaults are zero and do not establish a monetary entitlement. Mock
@@ -42,6 +46,8 @@ floors, which operators must review before enabling paid traffic.
   provider mapping and explicit mock setup for the combined test version.
 - [OpenAI adapter](docs/openai-provider.md): supported requests, authoritative
   usage, conservative reservation, and official references.
+- [New API adapter](docs/new-api-provider.md): DeepSeek channels, identity
+  bindings, conservative charges and required relay controls.
 - [Security and cost boundaries](docs/security.md): data transit, accounting
   assumptions, tool permissions, and production limitations.
 
@@ -60,8 +66,8 @@ Cloudflare Worker
 one fixed SQLite Durable Object
   | validate auth/model, atomically reserve all budgets
   v
-provider adapter (explicit mock or approved OpenAI Responses)
-  | text / function-call fragments + authoritative final usage
+provider adapter (mock, OpenAI Responses or New API / DeepSeek)
+  | text / function-call fragments + validated completion
   v
 settlement + streamed result to local process
   |
@@ -81,11 +87,19 @@ the [Workers test guidance](https://developers.cloudflare.com/workers/testing/vi
 
 ## Supported provider and remaining rollout work
 
-The real adapter is limited to global Standard Responses requests for Luna,
+The OpenAI adapter is limited to global Standard Responses requests for Luna,
 text/function input, and fixed reasoning effort `none`. It reserves the reviewed
 full context bound and enforced output cap; the client cannot supply native
 options or an upstream URL. Keep `OPENAI_API_KEY` in a server-side secret binding.
 Upstream HTTP/SSE tests are mocked with unmatched network disabled.
+
+The New API adapter accepts only the reviewed DeepSeek model with thinking
+disabled and charges the full reservation for each successful round. The
+example 1,024-output-token request consumes $0.315802 of Canvas allowance, even
+when the upstream bill is lower. New API usage is not authoritative billing;
+the relay must have retries and request overrides disabled. This is a conditional
+admission bound, not a strict upstream invoice cap. Per-user identity bindings
+are manual; balances and account creation do not automatically synchronize.
 
 Cloudflare/infrastructure spending is outside the model allowance ceiling. A
 paid rollout also needs operator access controls, provider billing safeguards,

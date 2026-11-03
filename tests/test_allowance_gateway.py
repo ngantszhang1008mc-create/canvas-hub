@@ -433,3 +433,60 @@ def test_failed_gateway_attempt_counts_only_valid_terminal_usage_once(hub, accou
     assert len(gateway.requests) == total['requests'] == 1
     assert total['input_tokens'] == (100 if terminal == 'reported' else 0)
     assert total['unreported_requests'] == (0 if terminal == 'reported' else 1)
+
+
+def test_new_api_full_reservation_completion_keeps_token_usage_unknown(hub, gateway):
+    service, pid = setup(HubAPI(hub), gateway)
+    provider = AllowanceGatewayProvider(service._load(pid))
+    def answer(request):
+        events = gateway.events(request, 'Synthetic relay answer', [('list_components', {})])
+        events[-1].update(accounting='full_reservation', usage=None, charged_microusd='1000')
+        return events
+    gateway.action = answer
+    turn = provider.complete('Synthetic', [{'role': 'user', 'sent_text': 'List trackers'}], [{'name': 'list_components'}])
+    assert turn.text == 'Synthetic relay answer' and turn.tool_calls[0].name == 'list_components'
+    assert turn.usage == {} and provider.last_usage['input_tokens'] is None and provider.last_usage['output_tokens'] is None
+    record = json.loads(next((hub.paths.runtime / 'gateway-attempts').glob('*.json')).read_text())
+    assert record['state'] == 'completed' and record['accounting'] == 'full_reservation'
+    assert record['usage'] is None and record['charged_microusd'] == record['reserved_microusd'] == '1000'
+
+
+@pytest.mark.parametrize('accounting', [None, 'authoritative_usage', 'full_reservation'])
+def test_new_api_null_usage_requires_an_explicit_full_charge(hub, gateway, accounting):
+    service, pid = setup(HubAPI(hub), gateway)
+    provider = AllowanceGatewayProvider(service._load(pid))
+    def answer(request):
+        events = gateway.events(request, '', [('list_components', {})])
+        # Even the explicit conservative mode cannot claim a discounted charge
+        # without authoritative metering. The fixture's charge is only 120/1000.
+        events[-1].update(accounting=accounting, usage=None)
+        return events
+    gateway.action = answer
+    with pytest.raises(GatewayError, match='no tool was executed'):
+        provider.complete('Synthetic', [{'role': 'user', 'sent_text': 'List trackers'}], [{'name': 'list_components'}])
+    assert provider.last_usage is None and len(gateway.requests) == 1
+
+
+def test_legacy_production_consent_requires_renewal_without_losing_session(hub, gateway, monkeypatch):
+    service, pid = setup(HubAPI(hub), gateway)
+    store = service._load_store()
+    prof = next(p for p in store['profiles'] if p['id'] == pid)
+    prof.update(gateway_mode='production', base_url='https://gateway.example.test')
+    prof.pop('gateway_consent_version', None)
+    service._save_store(store)
+    public = next(p for p in service.public_config()['profiles'] if p['id'] == pid)
+    assert public['gateway_session_saved'] and not public['gateway_consent']
+    with pytest.raises(GatewayError):
+        AllowanceGatewayProvider(service._load(pid))
+    assert not gateway.requests and service._load(pid)['gateway_token'] == SESSION
+    with pytest.raises(InvalidInput, match='unknown settings'):
+        service.update_config({'profile_id': pid, 'gateway_consent_version': 2})
+    service.update_config({'profile_id': pid, 'gateway_consent': True})
+    renewed = service._load(pid)
+    assert renewed['gateway_consent_version'] == 2 and renewed['gateway_token'] == SESSION
+    assert service._gateway_public(renewed)['gateway_consent']
+    # Route the synthetic production fixture to the local fake gateway only.
+    gateway.mode = 'production'
+    monkeypatch.setattr('canvas_hub.assistant.gateway.base_url', lambda *_: gateway.url)
+    AllowanceGatewayProvider(renewed).complete('Synthetic', [{'role': 'user', 'sent_text': 'Hello'}], [])
+    assert gateway.requests[-1]['headers']['X-Gateway-Consent-Version'] == '2'

@@ -1829,7 +1829,7 @@ function assistantSettingsCard(cfg, prof) {
     || cfg.presets.some((p) => p.id === presetSel.value && p.provider === "allowance_gateway");
   const gatewayMode = h("select", { "aria-label": "Gateway mode" },
     h("option", { value: "mock", selected: cur.gateway_mode !== "production" }, "Mock — synthetic responses"),
-    h("option", { value: "production", selected: cur.gateway_mode === "production" }, "Production — OpenAI"));
+    h("option", { value: "production", selected: cur.gateway_mode === "production" }, "Production — operator-funded models"));
   const gatewayConsent = h("input", { type: "checkbox", checked: cur.gateway_consent === true });
   const invitation = h("input", { type: "password", autocomplete: "off", autocapitalize: "off", spellcheck: "false", maxlength: 128,
     placeholder: "Invitation from your gateway operator" });
@@ -1846,7 +1846,7 @@ function assistantSettingsCard(cfg, prof) {
   const gatewayField = h("div", { class: "field", style: "grid-column:1/-1", hidden: true },
     h("label", { class: "field" }, h("span", null, "Gateway mode (must match your operator's gateway)"), gatewayMode),
     h("label", { class: "check" }, gatewayConsent,
-      "I allow selected conversation and course excerpts to pass through this gateway. Production mode also sends them to OpenAI. Tools still run under local permissions. Canvas Hub will not switch to an API-key provider automatically."),
+      "I allow selected conversation and course excerpts to pass through this gateway. Production mode sends them to OpenAI or through the operator's New API relay to DeepSeek, according to the selected model. New API requests consume the full reserved allowance; token usage and the provider's actual bill may differ. Tools still run under local permissions. Canvas Hub will not switch to an API-key provider automatically."),
     gatewaySession,
     h("label", { class: "field" }, h("span", null, "Invitation"), invitation),
     h("div", { class: "row" }, enrollBtn, removeSessionBtn),
@@ -1907,7 +1907,7 @@ function assistantSettingsCard(cfg, prof) {
             h("td", null, microUsd(amount.remaining_microusd)), h("td", null, microUsd(amount.held_microusd)),
             h("td", null, microUsd(amount.spent_microusd)), h("td", null, utcTime(amount.resets_at)));
         })))),
-      h("p", { class: "tiny muted" }, "1,000,000 micro-USD = US$1. Held amounts are reservations, not final charges. Checking allowance does not generate a model response."));
+      h("p", { class: "tiny muted" }, "1,000,000 micro-USD = US$1. Held amounts are reservations. Completed New API requests consume the full reservation as a conservative allowance charge, not a measured provider bill. Interrupted requests may keep their holds. Checking allowance does not generate a model response."));
     updateButtons();
   };
   const adoptProfile = (response, syncFields = true) => {

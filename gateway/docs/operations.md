@@ -1,7 +1,7 @@
 # Operator guide
 
-This version includes a real OpenAI Responses adapter and an explicit offline
-mock mode. It can be developed and tested without a Cloudflare account, provider
+This version includes OpenAI Responses and New API/DeepSeek adapters plus an
+explicit offline mock mode. It can be developed and tested without a Cloudflare account, provider
 account, or paid API call. These instructions describe a future deployment path;
 this change does not deploy or create accounts.
 
@@ -42,13 +42,16 @@ development server binds only to `127.0.0.1`; use its printed port. Keep its
 storage and `.dev.vars` out of version control. Removing local Wrangler storage
 also removes local accounts, spending records, and idempotency protection.
 
-All four budget fields in both checked-in policies are zero. For a local mock
+All four budget fields in the checked-in policies are zero. For a local mock
 exercise, explicitly set positive synthetic values in `wrangler.jsonc` under
 `env.mock.vars.POLICY` before starting the server; keep them out of production.
 The default `vars.POLICY` is production and cannot run without `OPENAI_API_KEY`.
 `policy.example.json` is the standalone mock example and
-`policy.production.example.json` is the reviewed Luna example; Wrangler does not
-automatically read either file. Tests supply explicit mock configuration and
+`policy.production.example.json` is the reviewed Luna example.
+`policy.new-api.example.json` is the New API/DeepSeek example; explicitly copy it
+into the intended `POLICY` binding to select that adapter. Wrangler does not
+automatically read these files. A New API-only policy requires `NEW_API_BASE_URL`
+and its selected relay-key configuration, not `OPENAI_API_KEY`. Tests supply explicit mock configuration and
 mocked production upstream responses, never a live key.
 
 ## Policy
@@ -92,7 +95,7 @@ automatically restoring an uncertain allowance. Authoritative completion can
 settle it; this version has no administrative button that refunds uncertain
 holds. Do not treat a user reset as such a refund.
 
-Production model entries use `provider:"openai_responses"`,
+OpenAI production model entries use `provider:"openai_responses"`,
 `native_model:"gpt-6-luna"`, and the reviewed full `max_input_tokens:1050000` bound.
 `pricing` contains `unit:"microusd_per_million_tokens"`,
 `long_context_threshold_tokens:272000`, and `short`/`long` rate sets. Each rate set
@@ -104,13 +107,24 @@ and versioned limits through `GET /v1/allowance`; a larger catalog or request is
 rejected rather than silently shortened. Historical call/result records do not
 need to remain in the tools selected for the current turn.
 
-Reservations cover the full input bound at the most expensive category plus the
+OpenAI reservations cover the full input bound at the most expensive category plus the
 accepted output bound at the highest output rate. The 12-hour cache-write rate is
 included conservatively, even though requests explicitly select 30-minute writes.
 Reported 12-hour writes are fully priced and trigger the breach circuit breaker.
 A request retains its price snapshot and accounting periods through settlement,
 including across policy changes and UTC boundaries. See the
 [adapter notes](openai-provider.md) for exact usage arithmetic.
+
+New API entries use `provider:"new_api"`, `native_model:"deepseek-flash"`, the
+full `max_input_tokens:1048576` bound, and a gateway output cap from 1 to 128,000.
+Input/output rate floors are respectively 300,000 and 1,200,000 micro-USD per
+million tokens. Success consumes the full reservation without reporting token
+usage; at the example 1,024 output cap that is $0.315802 per model round.
+Failures retain uncertain holds. The immutable accounting mode is stored with
+the request, so later policy changes cannot convert it to usage-based charging.
+Read the [New API guide](new-api-provider.md) before configuring paid traffic;
+its relay/proxy restrictions are prerequisites for the conditional cost bound,
+not proof of a strict upstream invoice cap.
 
 ## Administration
 
@@ -127,6 +141,7 @@ HTTP client configuration or an in-memory script that reads the local secret.
 | `POST /admin/users/:id/limits` | `{"daily_microusd":<integer>,"monthly_microusd":<integer>}` |
 | `POST /admin/users/:id/reset` | `{"daily":true,"monthly":false}`; both booleans required, at least one true |
 | `POST /admin/users/:id/revoke` | `{}`; permanently disable the account and revoke its sessions |
+| `POST /admin/users/:id/new-api` | `{"relay_key_ref":"opaque_reference"}`; bind a preconfigured per-user relay key reference, only in `per_user` mode |
 | `POST /admin/sessions/:id/revoke` | `{}`; revoke one session |
 | `POST /admin/pause` | `{"paused":true}` or `{"paused":false}` |
 
@@ -137,6 +152,15 @@ earlier sessions. No mutation accepts arbitrary operator notes or prompt data.
 An overrun or invalid authoritative usage trips a persistent breach flag; the
 pause endpoint cannot clear it. Repair and reconcile the cause before a reviewed
 code/operational recovery.
+
+New API identity is shared by default through the `NEW_API_RELAY_KEY` secret.
+For individual New API user quotas/reports, set
+`NEW_API_IDENTITY_MODE="per_user"`, keep a `NEW_API_RELAY_KEYS` JSON secret map,
+and bind each Canvas account through the route above. Omit the shared key in
+this mode. Missing or removed references cannot dispatch and never fall back.
+Accounts/tokens are preprovisioned manually; keep both New API account logins
+and relay tokens private to the operator. Canvas balances and invitations are
+not synchronized from New API. See the [identity workflow](new-api-provider.md#server-configuration-and-identities).
 
 Deliver issued invitations through an already authorized private channel. No
 email or messaging service is built in. Expired sessions should receive a grant
@@ -155,8 +179,10 @@ charge. Do not manually delete uncertain requests or edit totals in SQL.
 2. Use a dedicated Worker and preserve its Durable Object class, namespace, and
    fixed ledger name across releases. Keep migrations additive. A new namespace
    is a fresh spending ledger, not a harmless deployment rename.
-3. Add `ADMIN_SECRET` and `OPENAI_API_KEY` with Wrangler's secret mechanism or the Cloudflare
-   dashboard. The production adapter receives its provider key only this way;
+3. Add `ADMIN_SECRET` and the chosen adapter's key secrets with Wrangler's secret
+   mechanism or the Cloudflare dashboard: `OPENAI_API_KEY` for OpenAI, or
+   `NEW_API_RELAY_KEY` / `NEW_API_RELAY_KEYS` for New API's chosen identity mode.
+   Provider credentials reach the adapter only this way;
    never add it to `vars`, source, a client bundle, or a public repository.
 4. Protect operator access with an appropriate identity boundary and MFA. Disable
    request body/header logging and any tracing that captures conversation data.
@@ -167,7 +193,9 @@ charge. Do not manually delete uncertain requests or edit totals in SQL.
    production policy, secrets, and positive user/global budgets are all required.
 6. Deploy only after a separate deployment decision. Verify the fixed ledger,
    configured budgets, TLS, secret bindings, and restricted operator access before
-   issuing real invitations.
+   issuing real invitations. New API also requires the pinned relay review,
+   effective `RetryTimes:"0"`, channel `http_protocol:"http1"`, no intermediary
+   retries or request overrides, and the revised client disclosure.
 
 For an authorized future deployment, typical secret/deployment commands are
 `npx wrangler secret put ADMIN_SECRET`, `npx wrangler secret put OPENAI_API_KEY`,
@@ -178,8 +206,10 @@ for environment-specific bindings.
 
 ## Recovery
 
-The SQLite ledger adds nullable `pricing_json` and `usage_details_json` columns
-on startup within a transaction. This additive migration preserves existing
+The SQLite ledger adds nullable `pricing_json` and `usage_details_json`, an
+`accounting_mode` defaulting to `authoritative_usage` on old request rows, and a
+nullable `new_api_key_ref` on user rows on startup within a transaction.
+These additive migrations preserve existing
 accounts, holds, totals, and request keys; old requests retain their stored
 input/output rates. Keep the existing `v1` Durable Object class migration and
 singleton identity. No new namespace or manual SQL migration is needed.
