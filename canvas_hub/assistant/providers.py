@@ -26,6 +26,7 @@ from urllib.parse import urlsplit
 
 from .request_shape import stable_json, stable_object, stable_tools
 from .usage import normalize_usage
+from .model_capacity import verified_capacity
 
 ANTHROPIC_DEFAULT_MODEL = "claude-opus-5-5"
 # Models that accept the server-side refusal fallback ("default" routing) on the Claude API.
@@ -73,6 +74,63 @@ def anthropic_output_tokens(cfg: dict) -> int:
     return cfg.get("_response_tokens", settings.get("response_tokens", default))
 
 
+def compatible_output_tokens(cfg: dict) -> int:
+    """Resolve a bounded API reply cap, including reasoning, without overriding user limits."""
+    extra, settings = cfg.get("extra_params") or {}, cfg.get("context") or {}
+    limits = [extra[k] for k in ("max_tokens", "max_completion_tokens") if k in extra]
+    configured = limits + [settings[k] for k in ("response_tokens",) if k in settings]
+    if "_response_tokens" in cfg:
+        configured.append(cfg["_response_tokens"])
+    if any(type(v) is not int or v < 1 for v in configured):
+        raise ProviderError("Reply token limits must be positive integers; no request was sent.")
+    if len(limits) == 2 and limits[0] != limits[1]:
+        raise ProviderError("max_tokens and max_completion_tokens conflict. Choose one reply token limit; no request was sent.")
+    if limits:
+        return limits[0]
+    if "_response_tokens" in cfg:
+        return cfg["_response_tokens"]
+    if "response_tokens" in settings:
+        return settings["response_tokens"]
+    default = 4096
+    capability = verified_capacity(cfg)
+    if capability:
+        options = {**extra, **thinking_params(cfg.get("preset"), cfg.get("thinking") or "")}
+        mode = options["thinking"].get("type") if isinstance(options.get("thinking"), dict) else None
+        thinking = mode == "enabled" or (mode is None and options.get("reasoning_effort") not in ("none", "off"))
+        if thinking:
+            # An application spending bound, not the much larger vendor maximum.
+            # DeepSeek defaults to thinking; reasoning and text share max_tokens.
+            # https://api-docs.deepseek.com/api/create-chat-completion/
+            default = min(16384, max(4096, settings.get("capacity", capability[0]) // 4))
+    return default
+
+
+def incomplete_reply(text, stop, tool_calls) -> str | None:
+    if stop == "truncated":
+        return "output_limit"
+    if stop != "refusal" and not tool_calls and not (text or "").strip():
+        return "empty_reply"
+    return None
+
+
+def incomplete_reply_message(turn) -> str:
+    if turn.incomplete_reason == "output_limit":
+        message = "The provider reached its output limit before finishing. "
+        usage = turn.usage or {}
+        output, reasoning = usage.get("output_tokens"), usage.get("reasoning_output_tokens")
+        if type(output) is int:
+            message += f"Reported output: {output} tokens"
+            if type(reasoning) is int:
+                message += f" (including {reasoning} reasoning tokens)"
+            message += ". "
+        message += ("Partial text is saved as incomplete. " if turn.text.strip() else "No final answer was returned. ")
+        message += "Adjust Reply token limit in Assistant settings or lower reasoning before retrying; a higher limit can use more quota. "
+    else:
+        message = "The provider returned no answer or tool call. Check the provider and output-format settings before retrying. "
+    return message + ("Earlier tool results are saved; no tools from this incomplete reply were executed. "
+                      "Retry answer makes a new request with tools disabled. Review previous results before sending a new message that needs tools.")
+
+
 @dataclass
 class ToolCall:
     id: str
@@ -89,6 +147,10 @@ class Turn:
     raw: dict | None = None             # provider-native assistant content to replay verbatim
     model: str | None = None
     usage: dict | None = None
+
+    @property
+    def incomplete_reason(self) -> str | None:
+        return incomplete_reply(self.text, self.stop, self.tool_calls)
 
 
 def _neutral_assistant(msg: dict) -> tuple[str, list[dict]]:
@@ -227,7 +289,7 @@ class OpenAICompatibleProvider:
         # picked in the chat for this message takes precedence.
         self.extra_body = dict(cfg.get("extra_params") or {})
         self.extra_body.update(thinking_params(cfg.get("preset"), cfg.get("thinking") or ""))
-        self.response_tokens = cfg.get("_response_tokens")
+        self.response_tokens = compatible_output_tokens(cfg)
         self.output_limit_key = "max_completion_tokens" if cfg.get("preset") == "openai" else "max_tokens"
         self.single_attempt = cfg.get("_single_attempt", False)
         self.no_streaming = False
