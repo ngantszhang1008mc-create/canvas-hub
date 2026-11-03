@@ -97,7 +97,9 @@ def test_manual_compaction_preserves_history_pairs_usage_restart_and_invalidatio
         c.execute("INSERT INTO items(account_id,item_type,source_key,title,first_observed_at,last_observed_at) VALUES (?,'page','new-source','Changed source',?,?)",
                   (account['id'], now_iso(), now_iso()))
     assert resumed.get_conversation(account['id'], cid)['context']['stale']
-    assert resumed._context_projection(cid, account["id"], before) == before
+    stale = resumed._context_projection(cid, account["id"], before)
+    assert stale[0]['context_summary'] and 'Source evidence is stale' in stale[0]['sent_text']
+    assert stale[1:] == retained[1:] and resumed._transcript(cid) == before
 
 
 @pytest.mark.parametrize("outcome", ["invalid", "failure", "cancel", "changed", "live_changed"])

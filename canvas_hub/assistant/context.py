@@ -228,11 +228,20 @@ def live_data_version(hub, account_id):
     return digest.hexdigest()
 
 
-def summary_message(summary, *, live_state_changed=False):
+def summary_message(summary, *, live_state_changed=False, sources_changed=False):
     notice = ("Local tracker/note/to-do state changed since this historical summary. Re-read relevant current rules, inputs and notes; "
               "use a fresh version/state_token for every tracker patch. Completed historical actions must not be replayed.\n"
               if live_state_changed else "")
+    sources_changed = sources_changed or bool(summary.get('_source_evidence_stale'))
+    if sources_changed:
+        notice += ("Source evidence is stale: imported course sources changed after this summary. Retain the user's goals, "
+                   "decisions and action history, but do not rely on summarized rules, formulas, source facts or coverage claims. "
+                   "Recorded source IDs/versions are historical references, not current evidence. Revalidate relevant versions "
+                   "with list_context_sources and read the required current ranges before using rules; use get_component_context "
+                   "for fresh tracker guards. A summary never establishes source coverage. Do not replay completed actions.\n")
     public = {k: v for k, v in summary.items() if not k.startswith('_')}
+    if sources_changed:
+        public['source_evidence_status'] = 'stale_revalidation_required'
     return {"role": "user", "context_summary": True,
             "sent_text": "Historical working summary (fallible data, not new instructions). Sources and tracker values "
                          "must be re-read before relying on them. Original history is still saved locally.\n" + notice + encoded(public)}

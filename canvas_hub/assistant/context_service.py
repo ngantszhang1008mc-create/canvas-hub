@@ -43,12 +43,15 @@ class ContextService:
                           (status, encoded(usage) if usage is not None else None, model, now_iso(), attempt))
 
     def _context_projection(self, cid, account_id, transcript):
+        self._conv(account_id, cid)
         row = self.hub.db.one("SELECT * FROM assistant_context WHERE conversation_id=?", (cid,))
-        if not row or row["data_version"] != data_version(self.hub, account_id):
+        if not row:
             return transcript
         tail = [m for m in transcript if m.get("seq", float("inf")) > row["through_seq"]]
         summary = json.loads(row['summary_json'])
-        return [summary_message(summary, live_state_changed=summary.get('_live_state_version') != live_data_version(self.hub, account_id)), *tail]
+        return [summary_message(summary,
+                    live_state_changed=summary.get('_live_state_version') != live_data_version(self.hub, account_id),
+                    sources_changed=row['data_version'] != data_version(self.hub, account_id)), *tail]
 
     def _compact_context(self, cid, account_id, cfg, transcript, make_provider):
         policy = Policy.for_config(cfg)
@@ -76,6 +79,7 @@ class ContextService:
 
         for m in prefix:
             refs(m.get("tool_calls", []))
+            refs(m.get("source_context", {}))
             if m.get("context_summary"):
                 # Previous deterministic references are kept in the summary
                 # input and copied separately rather than recursively growing.
@@ -106,6 +110,9 @@ class ContextService:
             raise ProviderError("Older history is too large for one safe summary request. Original context is retained; start a focused chat. No summary request was sent.")
         version = data_version(self.hub, account_id)
         live_version = live_data_version(self.hub, account_id)
+        prior = self.hub.db.one("SELECT data_version,summary_json FROM assistant_context WHERE conversation_id=?", (cid,))
+        inherited_stale = bool(prior and (prior['data_version'] != version or
+                               json.loads(prior['summary_json']).get('_source_evidence_stale')))
         source_seq = self.hub.db.one("SELECT MAX(id) AS seq FROM assistant_messages WHERE conversation_id=?", (cid,))["seq"]
         if cid in self._cancel:
             raise Stopped()
@@ -134,6 +141,10 @@ class ContextService:
             summary["reference_manifest"] = anchors
             summary["tool_execution_manifest"] = executions
             summary['_live_state_version'] = live_version
+            # Re-summarizing old evidence cannot certify it against new sources.
+            # Newly read, versioned tool results remain independently usable.
+            if inherited_stale:
+                summary['_source_evidence_stale'] = True
             # Installation is atomic and refuses concurrent source/message changes.
             with self._lock, self.hub.db.tx() as c:
                 check_cancel("")
@@ -237,7 +248,8 @@ class ContextService:
         summary_uses = [a["usage"] for a in summaries]
 
         return {"compacted_through": row["through_seq"] if row else None,
-                "stale": bool(row and row["data_version"] != data_version(self.hub, account_id)),
+                "stale": bool(row and (row["data_version"] != data_version(self.hub, account_id) or
+                                       json.loads(row['summary_json']).get('_source_evidence_stale'))),
                 "live_state_changed": bool(row and json.loads(row['summary_json']).get('_live_state_version') != live_data_version(self.hub, account_id)),
                 "summary_usage": usage_totals(summary_uses), "total_usage": usage_totals(uses + [a["usage"] for a in attempts]),
                 "usage_scope": "recorded assistant attempts and compaction attempts; earlier failed requests may be absent",

@@ -224,12 +224,18 @@ local telemetry cannot authorize quota. Source bodies use the separate
 [request-local source contract](SOURCE_CONTEXT_PAYLOADS.md).
 
 Source invalidation remains conservative and account-wide: source versions,
-imported revisions and resource extraction invalidate the checkpoint. The next
-request uses original history until safely compacted again. Tracker and local
-note/to-do changes retain the historical summary and completed-action manifest,
-with a freshness notice requiring current reads and fresh tracker state tokens.
-This also covers live edits during summarization. Older broad fingerprints are
-invalidated once. There is no vector
+imported revisions and resource extraction invalidate the summary's **source
+evidence**, without expanding the next request back to the entire saved history.
+Historical user intent, decisions, references and completed actions remain, with
+an explicit stale-evidence notice. Old rules, formulas and coverage claims require
+current versioned source reads before use; a summary never establishes reading
+coverage. Re-compacting a stale summary does not make its source facts current.
+New exact tool evidence remains independently usable. Original messages and
+checkpoints are not edited by this projection, and account ownership is checked.
+Tracker and local note/to-do changes likewise retain the historical summary and
+completed-action manifest, with a freshness notice requiring current reads and
+fresh tracker state tokens. Concurrent source edits still reject installation of
+a new summary. Older broad fingerprints are treated as stale evidence. There is no vector
 search, semantic quality guarantee, exact tokenizer, monetary-price calculation or
 multi-pass summarization of already enormous histories. An active Codex tool turn
 is never restarted for compaction; an oversized turn stops with its results saved.

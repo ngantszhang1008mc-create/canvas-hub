@@ -27,7 +27,10 @@ The shared Assistant changes are limited to:
   follow-up, with a 6,000-character total bound. A named large source stays a
   versioned reference; unrelated small text is not substituted. Remaining
   sources/ranges require deliberate reads, and changed versions are never
-  silently substituted. No source bodies are appended to permanent history.
+  silently substituted. Every retained reference is checked for account ownership
+  and its exact recorded version using metadata only. All manifest IDs/versions
+  remain present; this check does not load every source's body or establish
+  reading coverage. No source bodies are appended to permanent history.
 - `ContextService._prepare_context(..., request_context=None)` projects source
   evidence after the existing history projection and before budget measurement.
   If an existing compaction policy changes that projection, source coverage is
@@ -62,6 +65,8 @@ For each version, temporary context records ranges present in retained tool
 results and ranges supplied inline. Overlapping ranges merge for coverage, and
 already-present small-source ranges are not repeated. Errors, truncated JSON,
 short text for a claimed range, and stale versions establish no coverage.
+When a restored reference has changed or disappeared, its old tool text remains
+verbatim in history but is labelled historical and excluded from current coverage.
 Codex-dispatched reads use their recorded `executed_tool` name for the same coverage
 checks, so an indirect read does not duplicate the inline source body.
 Intentional rereads still work. Shared attachments retain all selected item
@@ -72,6 +77,12 @@ It does not certify original images, diagrams, PDF layout, collection coverage,
 or all course requirements. Full grading/assignment interpretation still requires
 all relevant ranges, attachments, structured fields, and evidence gaps to be
 checked. Search hits alone do not establish comprehensive coverage.
+Task-scoped questions start with relevant sources/search hits and read the
+necessary original ranges rather than paging every unrelated file. Limited
+coverage must be stated, not passed off as a complete rule. A missing formula,
+image or exception is an explicit evidence gap: request the original and preserve
+existing rules pending review, rather than inferring a formula from endpoints or
+chasing unrelated courses.
 
 ## External classification
 

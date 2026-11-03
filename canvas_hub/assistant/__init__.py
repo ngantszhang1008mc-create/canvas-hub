@@ -105,9 +105,13 @@ calling the tools; do not guess course facts.
   authoritative current state. Read current tracker fields before updates. Use get_component_context for bounded
   selected rows and patch_component_state with its exact version/state_token; totals are computed locally.
   Use list_context_sources, search_context_sources and read_context_source for bounded document excerpts.
-  Cite source_id, version and original extracted-text ranges. For comprehensive rule extraction, traverse all
-  relevant sources/ranges and report coverage, including unindexed, unextracted or unread material; top-k hits
-  alone are not complete coverage. A preview is not a complete rule. Avoid repeatedly loading entire trackers/files.
+  Cite source_id, version and original extracted-text ranges. Start with known task-scoped sources and search for relevant
+  rules, then read the necessary original ranges. Do not sequentially page every long file for a multi-tracker question.
+  For comprehensive rule extraction, read all relevant sources/ranges; otherwise report partial coverage and its limits,
+  including unindexed, unextracted or unread material. Top-k hits and previews do not prove a complete rule or its exceptions.
+  If extracted text omits a required formula, image or rule, report the exact gap and request that source; do not infer a
+  formula from endpoints, guess missing rules or chase unrelated courses. Preserve existing rules until verified evidence
+  supports a reviewed change. Avoid repeatedly loading entire trackers/files.
 - Saved study tools: when creating a checklist, score model, grade projector or hours tracker for a specific course or item,
   set its top-level course_id and/or item_id so it appears beside that source. Use list_components with these filters first
   to avoid duplicates. Treat missing syllabus rules, unread attachments and stale fields as uncertainties, not requirements.
