@@ -33,6 +33,16 @@ def test_gateway_opt_in_context_and_source_flow(hub, account, source, gateway, w
             page.goto(f'{base}/?token={token}')
             page.goto(f'{base}/#/assistant/settings?p={pid}')
             card = page.locator('.card').filter(has=page.get_by_role('heading', name='Offline allowance', exact=True))
+            check = card.get_by_role('button', name='Check allowance', exact=True)
+            def check_allowance():
+                # The tool count reflects the draft checkbox selection immediately.
+                # Wait for the saved config and the complete allowance operation
+                # before reading persisted settings or using the refreshed catalog.
+                with page.expect_response(lambda response: response.url == base+'/api/assistant/config'
+                                          and response.request.method == 'PUT') as saved:
+                    check.click()
+                assert saved.value.status == 200
+                expect(check).to_be_enabled()
             expect(card.get_by_label('Automatically compact older turns', exact=False)).not_to_be_checked()
             expect(card.get_by_role('button', name='Connect with invitation')).to_be_disabled()
             card.get_by_label('I allow selected conversation and course excerpts', exact=False).check()
@@ -45,13 +55,13 @@ def test_gateway_opt_in_context_and_source_flow(hub, account, source, gateway, w
             expect(card).to_contain_text('9000000 micro-USD')
             assert len(gateway.enrollments) == 1 and not gateway.requests
             gateway.tools = ['get_component_context', 'patch_component_state']
-            card.get_by_role('button', name='Check allowance', exact=True).click()
+            check_allowance()
             expect(card).to_contain_text('Reported allowance')
             card.get_by_text('3 enabled tools · model limits', exact=True).click()
             stale = card.get_by_label('list_components (unavailable; uncheck to remove)', exact=True)
             expect(stale).to_be_checked()
             stale.uncheck()
-            card.get_by_role('button', name='Check allowance', exact=True).click()
+            check_allowance()
             expect(card).to_contain_text('2 enabled tools · model limits')
             assert service._load(pid)['gateway_tools'] == gateway.tools
             assert not gateway.requests and SESSION not in page.content()
