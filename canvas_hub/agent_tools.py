@@ -977,7 +977,14 @@ def h_propose_component_rebuild(ctx, a):
         _need_notes_for_todos(ctx)
     view = ctx.api.hub.components.propose_rebuild(aid, current["id"], a["spec"],
         expected_version=a["expected_version"], state_token=a["state_token"], identity_map=a.get("identity_map"))
-    return _component_display(ctx, view, "Proposed rebuild for")
+    result = _component_display(ctx, view, "Proposed rebuild for")
+    # A proposal is identified by the same component/version reviewed on accept.
+    # Keep a compact receipt visible even when its full migration needs paging.
+    result["proposal_id"] = f"component:{view['id']}:version:{view['version']}"
+    migration = result["migration"]
+    migration["mapped_counts"] = {key: len(value) for key, value in migration["identity_map"].items()}
+    migration["unresolved_count"] = len(migration["unresolved"])
+    return result
 
 
 def h_update_component(ctx, a):
