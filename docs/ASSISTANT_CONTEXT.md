@@ -30,7 +30,7 @@ configuration, not forwarded as provider request settings.
 | Field | Default |
 | --- | --- |
 | `capacity` | Exact supported endpoint/model metadata when known; otherwise application fallback: Anthropic/Codex 64,000, compatible endpoints 32,768 |
-| `response_tokens` | Anthropic 6,000 at resolved capacity ≤64,000, otherwise 16,000; others 4,096. Explicit output settings take precedence. |
+| `response_tokens` | Anthropic 6,000 at resolved capacity ≤64,000, otherwise 16,000; verified DeepSeek thinking up to 16,384; others 4,096. Explicit output settings take precedence. |
 | `auto_compact` | `false` (manual compaction remains available) |
 | `auto_threshold_percent` | `80` |
 | `keep_turns` | `2` |
@@ -47,7 +47,7 @@ Unknown models/endpoints use **application fallback budgets, not advertised limi
 endpoint's capacity and configure it, especially for small local models. Estimates
 include provider-native reasoning, schemas, message framing and non-ASCII text;
 10% headroom and response/reasoning space are reserved. No paid tokenizer call is
-used. Explicit extra-provider output limits increase the reserve. Anthropic and
+used. Explicit extra-provider output limits are included in the reserve. Anthropic and
 compatible calls set an output bound; Codex's app-server retains control of its
 native output limit, so its reserve is a planning allowance. Actual provider usage
 may differ from estimates. Anthropic effort remains unchanged; unsupported explicit
@@ -57,6 +57,34 @@ reserve protects the input window while the provider's explicit output cap remai
 unchanged. Both values are reported. Direct SDK retries are disabled; the narrow pre-acceptance
 compatibility fallback is documented in [the usage contract](PROVIDER_USAGE.md).
 Compaction always uses a single attempt without capability negotiation.
+
+**Reply token limit** in Assistant settings controls the shared reasoning/answer
+allowance for API replies. For the exact verified DeepSeek endpoint/models above,
+thinking (including the provider's default thinking mode) uses an application
+default of 16,384, bounded to a quarter of an explicitly smaller context capacity
+with a floor of 4,096. Non-thinking mode and unverified endpoints retain 4,096.
+This is a local spending bound, not the vendor maximum or a guarantee of completion.
+Explicit `context.response_tokens`, `max_tokens`, and `max_completion_tokens` remain
+unchanged; a conflicting pair of extra output limits is rejected before dispatch.
+Reasoning effort is not a reserved answer budget: even low effort can consume the
+whole output allowance. See the [DeepSeek request contract](https://api-docs.deepseek.com/api/create-chat-completion/).
+
+## Incomplete replies and continuation
+
+A provider output-limit stop or empty/whitespace-only terminal answer is recorded
+as incomplete, with its reported usage counted once. The conversation stops with
+an explanation instead of appearing successful. Partial text, native reasoning,
+and earlier tool outcomes remain saved. No tool call in a truncated reply executes,
+even if its arguments parse; explicit error results close those tool-call pairs.
+There is no automatic continuation, retry or budget escalation.
+
+Review completed results first. Adjust **Reply token limit** or the selected
+reasoning effort if needed; higher limits can consume more API quota. **Retry
+answer** makes one new request with tools disabled and does not repeat completed
+actions. If further tools are needed, send a new message asking to check current
+state and continue only the unfinished work. Historical truncated replies also
+keep a visible warning after a later message succeeds. No history is automatically
+compacted or masked by this recovery path.
 
 Estimation retains the conservative ASCII/UTF-8 heuristic; no exact tokenizer or
 universal CJK calibration is claimed. Recognized, explicit official Messages/Chat

@@ -31,7 +31,8 @@ from zoneinfo import ZoneInfo
 from ..agent_tools import ToolContext, run_tool_display
 from ..table_display import TableLinks
 from ..util import HubError, InvalidInput, NotFound, now_iso
-from .providers import ANTHROPIC_DEFAULT_MODEL, RESERVED_PARAMS, ProviderError, Stopped, make_provider
+from .providers import (ANTHROPIC_DEFAULT_MODEL, RESERVED_PARAMS, ProviderError, Stopped, make_provider,
+                        incomplete_reply, incomplete_reply_message)
 from .context import Policy, validate_settings
 from .context_service import ContextService
 from .source_context import source_manifest, restore_source_context, followup_source_context
@@ -544,6 +545,7 @@ class AssistantService(ContextService, GatewaySettings):
                          tool_selection=m.get("tool_selection") or [])
             elif m["role"] == "assistant":
                 v.update(text=m.get("text"), model=m.get("model"), stop=m.get("stop"),
+                         incomplete_reason=m.get("incomplete_reason") or incomplete_reply(m.get("text"), m.get("stop"), m.get("tool_calls")),
                          tool_calls=[{"id": c["id"], "name": c["name"], "input": c.get("input"), "input_error": c.get("input_error")}
                                      for c in m.get("tool_calls") or []])
             else:
@@ -883,10 +885,22 @@ class AssistantService(ContextService, GatewaySettings):
                 with self._live_lock:
                     self._append(cid, "assistant", {
                         "text": turn.text, "stop": turn.stop, "model": turn.model, "usage": turn.usage, "raw": turn.raw,
+                        "incomplete_reason": turn.incomplete_reason,
                         "usage_request_id": usage_request_id,
                         "tool_calls": [{"id": c.id, "name": c.name, "input": c.input, "input_error": c.input_error}
                                        for c in turn.tool_calls]})
                     self._live.pop(cid, None)
+                if turn.incomplete_reason:
+                    # Reject the whole incomplete batch, even parseable calls. Close
+                    # its transcript pairs without executing or replaying any tool.
+                    if turn.tool_calls:
+                        self._append(cid, "tool", {"results": [
+                            {"id": call.id, "name": call.name, "is_error": True,
+                             "content": json.dumps({"error": "response_incomplete", "executed": False,
+                                 "message": "This reply was incomplete; this tool call was not executed."})}
+                            for call in turn.tool_calls]})
+                    final_state, final_error = "error", incomplete_reply_message(turn)
+                    break
                 if turn.stop == "refusal" or not turn.tool_calls:
                     break
                 results = []

@@ -16,7 +16,8 @@ from dataclasses import dataclass
 from urllib.parse import urlsplit
 
 from ..util import InvalidInput
-from .providers import AnthropicProvider, OpenAICompatibleProvider, ProviderError, anthropic_output_tokens
+from .providers import (AnthropicProvider, OpenAICompatibleProvider, ProviderError,
+                        anthropic_output_tokens, compatible_output_tokens)
 from .model_capacity import verified_capacity
 
 DOCUMENT_TOOLS = {"read_document", "search_context_sources", "read_context_source"}
@@ -170,6 +171,8 @@ class Policy:
         extra = cfg.get("extra_params") or {}
         if cfg.get("provider") == "anthropic":
             response = max(settings.get("response_tokens", 0), anthropic_output_tokens(cfg))
+        elif cfg.get("provider") == "openai_compatible":
+            response = max(settings.get("response_tokens", 0), compatible_output_tokens(cfg))
         else:
             response = settings.get("response_tokens", response)
             for name in ("max_tokens", "max_completion_tokens"):
@@ -238,7 +241,8 @@ class Policy:
                 "schema_tokens": estimate(tools), "system_tokens": estimate(system),
                 "framing_tokens": 512 + 32 * len(tools), "largest_tool_results": largest,
                 "response_reserved": self.response_tokens, "capacity": self.capacity,
-                "request_max_tokens": anthropic_output_tokens(cfg) if provider == "anthropic" else None,
+                "request_max_tokens": (anthropic_output_tokens(cfg) if provider == "anthropic" else
+                                       compatible_output_tokens(cfg) if provider == "openai_compatible" else None),
                 "capacity_source": self.capacity_source,
                 "estimator": "conservative UTF-8 heuristic, " + ("decoded message text plus framing" if message_format
                               else "serialized projection fallback") + "; not exact",
