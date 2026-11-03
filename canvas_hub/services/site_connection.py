@@ -513,6 +513,8 @@ class BrowserConnection:
         pending = self._basic_pending
         if self._cancel_requested.is_set() or not isinstance(arg, dict) or not pending or arg.get('challenge') != self.snapshot().get('http_auth'):
             raise Conflict('The authentication challenge changed; reopen the requested page')
+        if getattr(self, '_login_method', 'browser') == 'basic' and pending[0] != self.target:
+            raise Conflict('The Basic sign-in page changed; no credentials were sent')
         username, password = arg.get('username'), arg.get('password')
         if (not isinstance(username, str) or not isinstance(password, str) or not 1 <= len(username) <= 1024
                 or not 1 <= len(password) <= 4096 or ':' in username
@@ -637,13 +639,15 @@ class SiteConnections:
             c.execute('INSERT OR IGNORE INTO external_source_origins SELECT ?,item_id FROM external_source_origins WHERE source_id=?', (new_sid, sid))
         return service.get(aid, new_sid)
 
-    def offer(self, aid, sid, extra_origins):
+    def offer(self, aid, sid, extra_origins, *, method='browser'):
         source = self._source(aid, sid)
         target, secret = clean_url(source['url'])
         if secret or source['access_needed'] or urlsplit(target).scheme != 'https':
             raise InvalidInput('This site requires a safe HTTPS source URL')
         if not isinstance(extra_origins, list) or len(extra_origins) > 5:
             raise InvalidInput('Specify at most five identity-provider origins')
+        if method not in ('browser', 'basic') or (method == 'basic' and extra_origins):
+            raise InvalidInput('Choose browser sign-in or Basic sign-in for this site only')
         p = urlsplit(target)
         site = origin(f'{p.scheme}://{p.netloc}/')
         domains = sorted(set([site] + [origin(x) for x in extra_origins]))
@@ -654,8 +658,8 @@ class SiteConnections:
             self.offers = {k: v for k, v in self.offers.items() if v['expires'] > now}
             if len(self.offers) >= 100:
                 raise Conflict('Too many outstanding connection offers')
-            self.offers[token] = {'aid':aid, 'sid':sid, 'owner':self._owner(aid), 'target':target, 'site':site, 'domains':domains, 'expires':now+300}
-        return {'token':token, 'site':site, 'origins':domains, 'expires_in_seconds':300}
+            self.offers[token] = {'aid':aid, 'sid':sid, 'owner':self._owner(aid), 'target':target, 'site':site, 'domains':domains, 'method':method, 'expires':now+300}
+        return {'token':token, 'site':site, 'origins':domains, 'method':method, 'expires_in_seconds':300}
 
     def start(self, aid, sid, token, consent):
         source = self._source(aid, sid)
@@ -680,8 +684,12 @@ class SiteConnections:
             profile = self.hub.paths.browser_profiles / 'external-sites' / f'account-{aid}' / profile_key
             # Consume the offer before any browser or profile is created.
             del self.offers[token]
-            session = self.browser_factory(profile, offer['target'], offer['domains'])
+            # Basic entry stays in the local form; do not expose the deliberately
+            # suppressed native challenge as a misleading browser error window.
+            options = {'headless': True} if offer['method'] == 'basic' else {}
+            session = self.browser_factory(profile, offer['target'], offer['domains'], **options)
             session._owner_hash = offer['owner']
+            session._login_method = offer['method']
             self.sessions[key] = session
             return session.snapshot()
 
@@ -698,7 +706,8 @@ class SiteConnections:
         if urlsplit(source['url']).scheme != 'https':
             return {'state':'not_supported', 'message':'Site connections require HTTPS. Public link analysis is still available.'}
         session = self._session(aid, sid)
-        return session.snapshot() if session else {'state':'not_connected'}
+        return {**session.snapshot(), 'method':session._login_method,
+                'origins':sorted(session.domains)} if session else {'state':'not_connected'}
 
     def action(self, aid, sid, action, arg=None):
         session = self._session(aid, sid)

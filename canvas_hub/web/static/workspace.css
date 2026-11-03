@@ -202,6 +202,17 @@ button.workspace-attention-link:hover { color: var(--accent); background: transp
 .external-agent-content { display:grid; gap:12px; }
 .external-agent-content pre { white-space:pre-wrap; overflow-wrap:anywhere; max-height:360px; overflow:auto; }
 .external-agent-content .row { flex-wrap:wrap; }
+.site-login { display:grid; gap:12px; min-width:0; }
+.site-login h3,.site-login p { margin:0; }
+.site-login-form { display:grid; gap:14px; }
+.site-login-form label { display:grid; gap:6px; font-weight:600; }
+.site-login input { width:100%; min-width:0; box-sizing:border-box; }
+.site-login button { min-height:44px; white-space:normal; }
+.site-login-details,.external-source-diagnostics { border-top:1px solid var(--rule); padding-top:12px; }
+.site-login-details > :not(summary),.external-source-diagnostics > :not(summary) { margin-top:12px; }
+.site-login-details button,.external-source-diagnostics button { display:block; max-width:100%; }
+.site-login-back { justify-self:start; }
+.site-login-preview { max-height:280px; }
 .external-proposal { border:1px solid var(--rule); border-radius:12px; padding:12px; }
 .external-agent:not(.workspace-context .external-agent) { margin-top:20px; }
 .workspace-context.external-open .workspace-content .cols-2 { grid-template-columns:minmax(0,1fr); }

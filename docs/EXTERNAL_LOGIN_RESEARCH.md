@@ -5,6 +5,29 @@ not import a personal browser profile, send
 cookies or credentials to an Assistant, or run automatic authenticated
 crawling.
 
+## User flow
+
+1. Select **Analyse all** in the course or item’s External sources and approve
+   the displayed URLs and provider usage once.
+2. Failed links are checked anonymously for authentication. A confirmed challenge
+   produces **Needs login** beside that link in the current course. Unknown or
+   generic access failures show **Review failure**, without claiming login is needed.
+   Links already identified as requiring login are excluded from another public batch.
+3. Select **Needs login**. A Basic challenge opens a labelled local username and
+   password form; submitting it explicitly creates an isolated, headless connection
+   and checks the exact HTTPS page. No misleading native challenge window opens.
+   Browser/SSO sign-in instead shows one instruction and one next action: approve
+   the displayed domains, sign in in the isolated window, then check the course page.
+4. Confirm the retrieved course page, review the exact text and provider usage,
+   then approve analysis. Signing in alone never sends content to a model.
+
+Connection details, manual retries and alternate methods are collapsed. Unsupported
+popups or redirects remain blocked and are explained in the current step; opening
+this UI is not permission to broaden network access. Closing or leaving the form
+clears its fields and prevents an operation still waiting for the connection from
+submitting credentials; an already sent request cannot be recalled.
+An already opened local connection remains available until explicitly closed.
+
 Failed source inspections automatically schedule one anonymous check using a
 fresh browser, without saved sessions, screenshots or model calls. The check has
 a 20-second process deadline, bounded requests/bytes and at most two active
@@ -13,9 +36,9 @@ failed inspection gets one check when reopened after an app restart. Busy or
 failed checks remain unknown and offer an explicit manual retry. A 401 with an
 authentication challenge, a rendered login form, and an authentication redirect
 with a matching login page provide evidence of login; a generic 403, timeout,
-enrollment chooser or bot challenge does not. The panel shows differentiated
-results, a sign-in button for positive evidence, and a manual connection option
-for unknown results.
+enrollment chooser or bot challenge does not. Results appear on the matching
+source row. Unknown results retain an explicit manual connection option under
+**More options and diagnostics**.
 
 The source panel also discloses a source origin and identity-provider origins
 entered by the user. Only after that disclosure and explicit consent does it create a
@@ -52,14 +75,15 @@ receive credentials. A Basic 401 challenge in an approved top-level document
 offers a local username/password form. The local app receives these values via
 its authenticated, origin-checked POST endpoint; it never requests them in chat.
 The pinned transport holds an authorization value only in memory for that exact
-document GET while the window is open. It does not put credentials into
+document GET while the connection is open (including the headless Basic flow). It does not put credentials into
 Chromium, its profile, application storage, logs, exports or model requests, and
 does not forward them to assets, POSTs or redirect destinations. A rejected
 credential clears that authorization value; closing the window also clears
 queued credential entries. Reflected credential strings are removed from local
 review text. Other HTTP authentication schemes remain unsupported.
 
-Checking the requested page is a separate action: it makes a single GET for the
+Checking the requested page follows sign-in (automatically after Basic entry,
+or explicitly after browser sign-in): it makes a single GET for the
 exact source URL with page scripts, subresources and redirects disabled. It
 shows bounded text only in the local UI, including legacy pages without a
 `main` or `article` element. A user must confirm it is the requested
