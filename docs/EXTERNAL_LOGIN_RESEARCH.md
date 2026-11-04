@@ -19,19 +19,27 @@ crawling.
    generic access failures show **Review failure**, without claiming login is needed.
    Links already identified as requiring login are excluded from another public batch.
 3. Select **Needs login**. A Basic challenge opens a labelled local username and
-   password form; submitting it explicitly creates an isolated, headless connection
-   and checks the exact HTTPS page. No misleading native challenge window opens.
+   password form. **Sign in and inspect** discloses the exact HTTPS page, existing
+   Assistant provider/model, quota use and local storage before submission. It
+   authorizes one automatic inspection after access is verified. Loading, rejection
+   and success are shown in the app; success says **Inspection has started**.
+   No native challenge window opens and no second approval is required for this
+   explicitly authorized Basic flow. Linked pages are not fetched.
    Browser/SSO sign-in instead shows one instruction and one next action: approve
    the displayed domains, sign in in the isolated window, then check the course page.
-4. Confirm the retrieved course page, review the exact text and provider usage,
-   then approve analysis. Signing in alone never sends content to a model.
+4. Browser/SSO connections retain course-page confirmation and exact-text/provider
+   approval. Their full login flow remains unverified; Basic auto-inspection does
+   not claim support for those sites.
 
 Connection details, manual retries and alternate methods are collapsed. Unsupported
 popups or redirects remain blocked and are explained in the current step; opening
 this UI is not permission to broaden network access. Closing or leaving the form
 clears its fields and prevents an operation still waiting for the connection from
 submitting credentials; an already sent request cannot be recalled.
-An already opened local connection remains available until explicitly closed.
+Leaving a pending Basic sign-in/inspection cancels its continuation and closes
+the connection. **Cancel sign-in and inspection** does the same. A dispatched
+model request may already have used quota; cancelled results are not published.
+An idle connection remains available until explicitly closed.
 
 Failed source inspections automatically schedule one anonymous check using a
 fresh browser, without saved sessions, screenshots or model calls. The check has
@@ -76,7 +84,9 @@ the UI polls connection status without resetting unchanged credential fields.
 HTTP source links offer an explicitly confirmed, separate HTTPS source with the
 same host/path/query. This does not overwrite the HTTP evidence, establish that
 HTTPS is available, or automatically open a profile. Only HTTPS connections can
-receive credentials. A Basic 401 challenge in an approved top-level document
+receive credentials. After explicit HTTPS-address approval, a fresh anonymous
+check chooses the appropriate login step; an unknown result stays unknown.
+A Basic 401 challenge in an approved top-level document
 offers a local username/password form. The local app receives these values via
 its authenticated, origin-checked POST endpoint; it never requests them in chat.
 The pinned transport holds an authorization value only in memory for that exact
@@ -91,7 +101,7 @@ Checking the requested page follows sign-in (automatically after Basic entry,
 or explicitly after browser sign-in): it makes a single GET for the
 exact source URL with page scripts, subresources and redirects disabled. It
 shows bounded text only in the local UI, including legacy pages without a
-`main` or `article` element. A user must confirm it is the requested
+`main` or `article` element. A browser/SSO user must confirm it is the requested
 course page; a generic sign-in or enrollment chooser is not proof of course
 access. Failure or expiry does not alter saved source data or tracker state.
 After confirmation, a separate action re-reads the exact page and presents the
@@ -106,9 +116,43 @@ The snapshot can be selected as a tracker review source; changes require the
 existing user review and do not automatically change grading rules or manual
 state. Snapshots are local course data and are included in data backups.
 
+For **Sign in and inspect**, the user instead approves sending this exact page
+before credential entry. The server accepts only a verified Basic connection to
+that URL, removes reflected credentials and common sensitive patterns, then
+rechecks unchanged text before dispatch. This is advance authorization, **not**
+a claim that the user reviewed the retrieved text: saved provenance is
+`connected_local_authorized`; the older reviewed flow retains
+`connected_local_reviewed`. Automatic filtering cannot identify all private
+information, so this distinction and the advance-send consent are visible in the
+form. The one-use attempt is bound to account identity, source, provider setup
+and a five-minute expiry. Duplicate clicks, cancellation, changed setup/content
+or lost access cannot replay a paid attempt; retry requires another explicit
+sign-in/inspection action. Saved data is preserved on failure.
+
 No public adapter is created for an authenticated snapshot and no authenticated
 background crawling is enabled. The existing public Analyze link flow remains
-separate. Every connected-page analysis requires a fresh explicit approval.
+separate. Every connected-page analysis requires a fresh explicit approval,
+either in advance for Basic or after reviewing the text for browser/SSO.
+
+## COMP1023 validation checkpoint
+
+An anonymous cloud diagnostic on 2026-11-03 observed HTTP 302 from
+`http://course.cse.ust.hk/comp1023/` and HTTP 401 with a Basic challenge from
+`https://course.cse.ust.hk/comp1023/`. It used no credentials, did not follow
+redirects, and did not invoke a model. This confirms the login method, not that
+authenticated course content is readable.
+
+Real authenticated verification is still pending. Credentials must be entered
+by the user in the protected app form, never copied from chat or exported in
+tasks/logs. This cloud executor has no supported user-facing HTTPS login/browser
+handoff. The official HTTPS proxy reaches the site, but this executor has no
+public TCP route compatible with the app's DNS-pinned TLS transport. Its optional
+8088 CONNECT path supports only granted private/VPN addresses; adding the public
+course hostname to TCP grants would not solve this. Do not bypass either boundary
+with a public tunnel, unverified proxy transport or disabled TLS verification.
+Provision an authenticated user-accessible test environment with the required
+transport, then verify this exact page with the user entering credentials there.
+Main's inspection freeze remains in place until that review is complete.
 
 Synthetic tests cover bounded GET SSO redirects, relative locations, actual
 document origin, per-origin cookies, POST-to-GET without credential forwarding,

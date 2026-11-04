@@ -481,13 +481,28 @@ def create_app(api: HubAPI, *, token: str, port: int) -> FastAPI:
     @app.post("/api/accounts/{aid}/external-sources/{sid}/site-connection/{action}")
     async def site_connection_action(aid: int, sid: int, action: str, request: Request):
         b = await body(request)
-        if action == 'analysis_snapshot':
+        if action in ('analysis_snapshot', 'authorized_snapshot'):
             raise InvalidInput('Use the connected source review flow')
         return await run_in_threadpool(lambda: site_connections.action(aid, sid, action, b.get('request')))
 
     @app.post("/api/accounts/{aid}/external-sources/{sid}/connected-disclosure")
     def connected_disclosure(aid: int, sid: int):
         return source_analysis.connected_disclosure(aid, sid, site_connections)
+
+    @app.get("/api/accounts/{aid}/external-sources/{sid}/login-inspection")
+    def login_inspection_disclosure(aid: int, sid: int):
+        return source_analysis.login_disclosure(aid, sid)
+
+    @app.post("/api/accounts/{aid}/external-sources/{sid}/login-inspection")
+    async def login_inspection_start(aid: int, sid: int, request: Request):
+        b = await body(request)
+        return await run_in_threadpool(lambda: source_analysis.inspect_after_login(
+            aid, sid, b.get('token'), site_connections, consent=b.get('consent') is True))
+
+    @app.post("/api/accounts/{aid}/external-sources/{sid}/login-inspection/cancel")
+    async def login_inspection_cancel(aid: int, sid: int, request: Request):
+        b = await body(request)
+        return source_analysis.cancel_login_inspection(aid, sid, b.get('token'))
 
     @app.post("/api/accounts/{aid}/external-sources/{sid}/analyze-connected")
     async def analyze_connected(aid: int, sid: int, request: Request):

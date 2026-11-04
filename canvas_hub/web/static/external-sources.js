@@ -22,6 +22,7 @@ export function makeExternalSources(env) {
     const route = location.hash;
     const target = panelShell(main);
     let disclosure;
+    let inspectionNotice;
     let generation = 0;
     const version = {}; versions.set(target,version);
     const alive = () => target.isConnected && !target.hidden && versions.get(target)===version && location.hash===route && A(`/external-sources/${source.id}`)===aidPath;
@@ -43,8 +44,9 @@ export function makeExternalSources(env) {
       const current=()=>alive()&&generation===drawGeneration;
       target.querySelector('.workspace-agent-heading h2').textContent=mode==='login'?'Site sign-in':'Source Agent';
       const c=source.classification, req=source.request;
+      const signedInSource=['connected_local_reviewed','connected_local_authorized'].includes(c?.access_mode);
       const proposal=source.adapters.find(a=>a.revision===source.proposed_revision);
-      const status=h('p',{role:'status'},source.status.replaceAll('_',' '));
+      const status=h('p',{role:'status'},signedInSource&&source.status==='enabled'?'Inspection complete':source.status.replaceAll('_',' '));
       mount(content,h('h3',null,source.title),h('a',{href:source.url,target:'_blank',rel:'noopener noreferrer'},source.url));
       if(source.inspection?.enabled===false) {
         target.querySelector('.workspace-agent-heading h2').textContent='Saved source';
@@ -59,10 +61,11 @@ export function makeExternalSources(env) {
         const box=h('section',{class:'site-login','aria-label':'Site connection'});
         content.append(box,h('button',{class:'site-login-back',onclick:()=>show(main,source)},'Back to source review'));
         await showSiteLogin({h,mount,api,root:box,path:aidPath,source,current,
-          analyse:token=>action('/analyze-connected',{token,consent:true}),reopen:next=>show(main,next,'login')});
+          analyse:token=>action('/analyze-connected',{token,consent:true}),reopen:next=>show(main,next,'login'),
+          inspected:async(next,notice)=>{if(!current())return;source=next;inspectionNotice=notice;mode='review';disclosure=null;await draw();window.dispatchEvent(new Event('external-sources-updated'));}});
         return;
       }
-      content.append(status,
+      content.append(inspectionNotice?h('p',{role:'status'},inspectionNotice):null,status,
         c ? h('div',null,note(`${c.roles.join(' · ')} · ${Math.round(c.confidence*100)}% confidence`),h('p',null,c.summary||'')) : null);
       if (source.analysis_running || (req && ['open','claimed'].includes(req.status))) {
         content.append(note(!req ? 'Finishing the previous attempt.' : req.claimed_by==='Canvas Hub built-in Assistant' ? `Request #${req.id} · Assistant is reading and analysing. Cancel discards the result; a model request already sent may still use API quota.` : `Request #${req.id} · ${req.status}. Connect an MCP Agent with --allow-fulfil and ask it to claim this request and submit_source_analysis.`),
@@ -99,7 +102,9 @@ export function makeExternalSources(env) {
             catch(err){if(current()){advanced.append(h('p',{role:'alert'},err.message));e.currentTarget.disabled=false;}}
           }},'Check login requirement'),
           h('button',{onclick:()=>show(main,source,'login')},needsLogin?'Open sign-in':'Connect manually'));
-        const publicReview=needsLogin?advanced:content;
+        if(signedInSource)content.append(note('Saved signed-in page. A new inspection needs a current connection and fresh approval.'),
+          h('button',{onclick:()=>show(main,source,'login')},'Review signed-in source'));
+        const publicReview=needsLogin||signedInSource?advanced:content;
         if (!disclosure) disclosure=await api(aidPath+'/disclosure');
         if(!alive())return;
         const repeat=!!req||!!c||source.decision!=='undecided';
@@ -123,7 +128,7 @@ export function makeExternalSources(env) {
             h('button',{onclick:()=>action('/decision',{approve:false,revision:proposal.revision,spec_hash:proposal.spec_hash})},'Decline adapter'))));
       } else if(source.decision!=='declined') content.append(h('button',{onclick:()=>action('/decision',{approve:false})},source.enabled_revision?'Disable adapter':'Keep classification only'));
       if(source.enabled_revision && ['enabled','stale'].includes(source.status)) content.append(h('button',{onclick:()=>action('/refresh')},'Refresh without Agent'));
-      if(source.last_success_at) content.append(note(`Last successful adapter read ${source.last_success_at}`));
+      if(source.last_success_at) content.append(note(`Last successful ${signedInSource?'inspection':'adapter read'} ${source.last_success_at}`));
       if(source.records.length) content.append(h('h3',null,'Stored observations'),h('ul',null,source.records.map(r=>h('li',null,h('a',{href:`#/item/${r.id}`},r.title)))));
       if(source.conflicts?.length) content.append(h('div',{role:'status'},h('h3',null,'Deadline conflicts'),source.conflicts.map(c=>h('p',null,`${c.title}: ${c.external_due} / ${c.other_due}. Both sources are retained; check the original evidence.`))));
       if(source.origins.length) content.append(h('details',null,h('summary',null,'Source context'),source.origins.map(o=>h('p',null,h('a',{href:`#/item/${o.id}`},o.title)))));
@@ -226,10 +231,9 @@ export function makeExternalSources(env) {
     list.append(h('summary',{class:'external-source-heading'},h('span',null,'External sources'),all),batchArea);
     for(const source of result.sources) {
       const failed=source.request?.status==='declined';
-      const needsLogin=failed&&source.login_check?.outcome==='login_required';
+      const needsLogin=source.login_check?.outcome==='login_required'&&!source.analysis_running;
       const connected=source.connection_state==='connected';
-      const recovery=failed?(source.login_check?.state==='running'?'Checking sign-in requirement…':needsLogin?
-        (connected?'Course page confirmed — ready for analysis':'Needs login'):source.login_check?.outcome==='readable'?
+      const recovery=needsLogin?(connected?'Course page readable — ready for analysis':'Needs login'):failed?(source.login_check?.state==='running'?'Checking sign-in requirement…':source.login_check?.outcome==='readable'?
         'Analysis failed · public page is readable':'Analysis failed · could not determine login requirement'):null;
       list.append(h('div',{class:'external-source-row'},h('div',{class:'external-source-info'},h('a',{href:source.url,target:'_blank',rel:'noopener noreferrer'},source.title),
         h('p',{class:'small muted',role:failed?'status':null},recovery||`${source.status.replaceAll('_',' ')}${source.classification?' · '+source.classification.roles.join(', '):''}${source.last_success_at?' · read '+source.last_success_at:''}`)),
