@@ -57,7 +57,7 @@ class LoginDetection:
                 external_inspection.require_enabled()
                 result = self.detector(source['url'])
                 # Do not return screenshots, raw URLs, page text or exceptions to UI.
-                allowed = ('initial_host', 'final_host', 'http_status', 'outcome', 'evidence', 'course_access', 'auth_scheme')
+                allowed = ('initial_host', 'final_host', 'http_status', 'outcome', 'evidence', 'course_access', 'auth_scheme', 'diagnostics')
                 state = {'state': 'finished', **{k: result[k] for k in allowed if k in result}}
             except Exception:
                 state = {'state': 'finished', 'outcome': 'unsupported_unavailable', 'evidence': ['probe_error'], 'course_access': 'unknown'}

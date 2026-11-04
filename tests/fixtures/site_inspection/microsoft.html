@@ -1,0 +1,15 @@
+<!doctype html><title>Sign in to your account</title>
+<link rel="stylesheet" href="https://aadcdn.msauth.net/ests/2.1/content/cdnbundles/login.fixture.css">
+<script>var $Config={"urlPost":"/common/login","urlGetCredentialType":"/common/GetCredentialType?mkt=en-US"};</script>
+<script src="https://aadcdn.msauth.net/shared/1.0/content/js/login.fixture.js"></script>
+<main id="login"></main>
+<script>
+document.addEventListener('DOMContentLoaded',()=>{
+ if(!window.fixtureCDN) return;
+  document.querySelector('#login').innerHTML='<label>Email <input autocomplete="username"></label><button>Next</button>';
+  fetch('/common/instrumentation/dssostatus?client-request-id=private-fixture',{method:'POST',body:'private-telemetry'}).catch(()=>{});
+  fetch('/common/GetCredentialType?mkt=en-US',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:'private-fixture@example.edu',flowToken:'private-flow-fixture'})}).then(()=>{
+    document.querySelector('#login').innerHTML='<form method="post" action="/common/login"><input type="password"></form>';
+  }).catch(()=>{});
+});
+</script>

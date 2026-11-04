@@ -305,11 +305,16 @@ def test_batch_cancel_ui_and_item_scope(hub,account,source,monkeypatch):
 
 
 def test_site_connection_requires_review_and_consent_in_browser(hub, account, source, monkeypatch):
+    import threading
     from playwright.sync_api import expect, sync_playwright
     from .test_site_connection import FakeBrowser
-    created=[]; redirect_state={}
+    created=[]; redirect_state={}; closing=threading.Event(); release=threading.Event()
     class Browser(FakeBrowser):
-        def snapshot(self): return {**super().snapshot(), **(redirect_state if self.state!='closed' else {})}
+        def snapshot(self): return {**super().snapshot(), **(redirect_state if self.state not in ('closing','closed') else {})}
+        def call(self, action, arg=None, **kw):
+            if action=='cancel':
+                self.state='closing'; closing.set(); release.wait(5)
+            return super().call(action,arg,**kw)
     def make_browser(profile,target,domains):
         created.append((profile,target,domains))
         return Browser(profile,target,domains)
@@ -343,6 +348,11 @@ def test_site_connection_requires_review_and_consent_in_browser(hub, account, so
         expect(box).to_contain_text('The sign-in flow would repeat a submission')
         expect(box).to_contain_text('saved source data is unchanged')
         box.get_by_role('button',name='Close connection').click()
+        assert closing.wait(2)
+        expect(box).to_contain_text('Closing site connection')
+        expect(box.get_by_role('button',name='Agree and open sign-in window')).to_have_count(0)
+        expect(box.get_by_role('button',name='Reopen sign-in page')).to_have_count(0)
+        release.set()
         expect(box.get_by_role('button',name='Agree and open sign-in window')).to_be_visible()
         assert not errors
         browser.close()

@@ -20,6 +20,11 @@ export async function showSiteLogin(env) {
     finally {busy=false;controls.filter(el=>el.isConnected).forEach(el=>el.disabled=false);}
   }
   const button=(label,fn,primary=false)=>h('button',{type:'button',class:primary?'primary':'',onclick:()=>run(fn)},label);
+  async function closeConnection() {
+    await render({...await api(cp),state:'closing'});
+    try {await api(cp+'/cancel',{method:'POST',body:{}});}
+    finally {if(current()){await render(await api(cp));changed();}}
+  }
   function details(state) {
     const box=h('details',{class:'site-login-details'},h('summary',null,'Connection details'),
       note(`Connection: ${state.state.replaceAll('_',' ')}`),note('Only approved HTTPS origins can receive requests. Saved source data stays unchanged if sign-in fails.'));
@@ -32,12 +37,16 @@ export async function showSiteLogin(env) {
     if(state.blocked_origins?.length)box.append(note(`Blocked origins: ${state.blocked_origins.join(', ')}`));
     if(state.blocked_submission_origin)box.append(note(`A submission to ${state.blocked_submission_origin} could not be verified and was blocked.`));
     if(state.http_status)box.append(note(`HTTP status: ${state.http_status}`));
+    if(state.extraction_limitation==='dynamic_content_not_verified')box.append(note('The static page contains too little readable text and may require JavaScript. Dynamic course content has not been verified.'));
+    if(state.diagnostics?.length)box.append(h('details',null,h('summary',null,'Request diagnostics'),
+      note('Only origins, endpoint labels and decisions are shown. Paths with unknown values, query strings, credentials and request bodies are withheld.'),
+      h('ul',null,...state.diagnostics.map(d=>h('li',null,`${d.method} ${d.origin} · ${d.endpoint} · ${d.resource_type}: ${d.reason.replaceAll('_',' ')}${d.http_status?' (HTTP '+d.http_status+')':''}${d.count>1?' ×'+d.count:''}`)))));
     box.append(button('Refresh connection status',async()=>render(await api(cp))));
-    if(!['not_connected','closed','error','not_supported'].includes(state.state)) {
+    if(!['not_connected','closed','error','not_supported','closing'].includes(state.state)) {
       box.append(button('Reopen sign-in page',async()=>{await api(cp+'/retry_login',{method:'POST',body:{}});if(current())await render(await api(cp));}),
-        button('Close connection',async()=>{await api(cp+'/cancel',{method:'POST',body:{}});if(current()){await render(await api(cp));changed();}}));
+        button('Close connection',closeConnection));
     }
-    if(state.method==='basic'||state.http_auth?.scheme==='basic')box.append(button('Use browser sign-in instead',()=>browserOffer([],true)));
+    if(state.state!=='closing'&&(state.method==='basic'||state.http_auth?.scheme==='basic'))box.append(button('Use browser sign-in instead',()=>browserOffer([],true)));
     return box;
   }
   async function browserOffer(origins=[],restart=false) {
@@ -48,8 +57,9 @@ export async function showSiteLogin(env) {
     mount(root,title('Open the site’s sign-in window'),
       note('Sign in with your site account in a separate window. Canvas Hub creates an isolated local profile for this account and site.'),
       note(`Allow requests to: ${offer.origins.join(', ')}. Sign-in submissions require a separate one-time approval. No page text is sent to the Assistant at this step.`),
+      offer.static_origins?.length?note(`Declared sign-in scripts and styles may load without credentials from: ${offer.static_origins.join(', ')}.`):null,
       button(restart?'Agree and reopen sign-in window':'Agree and open sign-in window',async()=>{
-        if(restart)await api(cp+'/cancel',{method:'POST',body:{}});
+        if(restart)await closeConnection();
         if(!current())return;
         await api(cp+'/start',{method:'POST',body:{token:offer.token,consent:true}});
         if(current()){await render(await api(cp));focusStep();}
@@ -187,7 +197,7 @@ export async function showSiteLogin(env) {
         },true));return;
     }
     const inactive=['not_connected','closed','error'].includes(state.state);
-    const basic=state.http_auth?.scheme==='basic'||(inactive&&(state.method==='basic'||source.login_check?.auth_scheme==='basic'));
+    const basic=state.state!=='closing'&&(state.http_auth?.scheme==='basic'||(inactive&&(state.method==='basic'||source.login_check?.auth_scheme==='basic')));
     if(basic)await basicForm(state,notice);
     else if(inactive) {
       await browserOffer();
@@ -199,18 +209,19 @@ export async function showSiteLogin(env) {
       if(current()&&(notice||state.failure_reason))root.prepend(h('p',{role:'alert'},notice||'The sign-in window could not open or has closed. Check your browser installation and try again.'));
       return;
     } else {
-      let heading='Sign in in the site window', instruction=approvedPost?'Submit the sign-in form again in the site window. Then check the course page.':'Complete sign-in and any MFA in the separate site window. Then check the course page.';
+      let heading='Sign in in the site window', instruction=approvedPost?'The approved sign-in request was released once. Complete sign-in in the site window, then check the course page.':'Complete sign-in and any MFA in the separate site window. Then check the course page.';
       let label='I’ve signed in — check page', next=verify;
       if(state.state==='opening'){heading='Opening sign-in';instruction='Wait for the isolated site connection to open.';label=null;}
+      else if(state.state==='closing'){heading='Closing site connection';instruction='Waiting for the isolated browser to finish closing before this profile can reopen.';label=null;}
       else if(state.state==='connected'){heading='Course page confirmed';instruction='You can now review the page text and Assistant usage before analysis.';label='Review connected source analysis';next=reviewAnalysis;}
       else if(state.http_auth){heading='Sign-in method is unsupported';instruction='This site requested an unsupported HTTP authentication method. No credentials were sent.';label=null;}
       else if(state.method==='basic'){heading='Check the requested course page';instruction='The local connection is open. Check whether this exact page is readable before continuing.';label='Check requested page';}
-      else if(state.pending_post){heading='Allow the sign-in submission';instruction=`The sign-in form is waiting to submit to ${state.pending_post.origin}. Approve once, then submit it again in the site window.`;label='Approve one sign-in submission';next=async()=>{await api(cp+'/approve_post',{method:'POST',body:{request:state.pending_post}});approvedPost=true;if(current())await render(await api(cp));};}
+      else if(state.pending_post){heading='Allow the sign-in submission';instruction=`${state.pending_post.endpoint||'The sign-in form'} is waiting to submit to ${state.pending_post.origin}. Approval releases this exact request once. It expires after one minute.`;label='Approve one sign-in submission';next=async()=>{await api(cp+'/approve_post',{method:'POST',body:{request:state.pending_post}});approvedPost=true;if(current())await render(await api(cp));};}
       else if(state.blocked_origins?.length){heading='Review the sign-in destination';instruction='The site needs another domain. Only approve identity-provider domains you recognize; the window will reopen.';label='Review sign-in domains';next=()=>browserOffer([...new Set([...(state.origins||[]),...state.blocked_origins])].filter(x=>x!==site),true);}
       else if(state.popup_blocked){heading='This sign-in popup is unsupported';instruction='Try a sign-in option in the same site window, then check the page. Popup-only sign-in cannot be completed here.';}
       else if(state.redirect_blocked){heading='Sign-in could not continue safely';instruction='This redirect is unsupported. Check connection details; saved source data is unchanged.';label='Retry sign-in';next=async()=>{await api(cp+'/retry_login',{method:'POST',body:{}});if(current())await render(await api(cp));};}
       mount(root,title(heading),note(instruction),notice?h('p',{role:'alert'},notice):null,
-        label?button(label,next,true):state.state==='opening'?h('p',{role:'status'},'Waiting for connection status…'):null,details(state));
+        label?button(label,next,true):['opening','closing'].includes(state.state)?h('p',{role:'status'},'Waiting for connection status…'):null,details(state));
     }
     const seen=JSON.stringify(state);
     // Never remount unchanged input fields, content confirmation or provider review.

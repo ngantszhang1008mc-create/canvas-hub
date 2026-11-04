@@ -1,0 +1,13 @@
+<!doctype html><title>Piazza</title>
+<link rel="stylesheet" href="/css/splash/login_only.css">
+<script src="https://dvngeac8rg9mb.cloudfront.net/javascripts/jquery-1.7.1.min.js"></script>
+<script src="/piazzza_js/ajax.js"></script>
+<main id="login"></main>
+<script>
+document.addEventListener('DOMContentLoaded',()=>{
+ if(!window.fixtureCDN) return;
+ document.querySelector('#login').innerHTML='<label>Email <input autocomplete="username"></label><input type="password"><button>Log in</button>';
+ fetch('/logic/api?method=generic.report_js_error&aid=fixture',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({method:'generic.report_js_error',params:{message:'private-telemetry'}})}).catch(()=>{});
+ fetch('/logic/api?method=user.login&aid=fixture',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({method:'user.login',params:{email:'private-fixture@example.edu',pass:'private-pass-fixture'}})}).catch(()=>{});
+});
+</script>

@@ -6,6 +6,7 @@ This module never sends a page, cookie, or profile to an Assistant provider.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import base64
 import http.client
 import os
@@ -20,15 +21,15 @@ from dataclasses import dataclass
 from http.cookies import SimpleCookie
 from urllib.parse import quote, urljoin, urlsplit, urlunsplit
 
-from ..external_urls import clean_url, public_address, MUTATION
+from ..external_urls import clean_url, public_address
 from .. import external_inspection
 from ..util import Conflict, InvalidInput
 from .external_reader import _PinnedHTTPS, _DNS, MAX_BYTES
+from .site_policy import MIME, STATIC, auth_action, diagnostic, document_policy
 
 MAX_REQUEST = 200_000
 MAX_REDIRECTS = 5
 REDIRECT_SECONDS = 20
-POST_PATH = re.compile(r'/(?:login|log-in|signin|sign-in|auth|authorize|oauth|saml|session|token|mfa|verify|challenge|adfs)(?:/|$)', re.I)
 
 
 def origin(raw):
@@ -149,12 +150,16 @@ class BrowserConnection:
         self.lock = threading.Lock()
         self.state = {'state': 'opening', 'blocked_origins': [], 'pending_post': None,
                       'blocked_submission_origin':None, 'redirect_blocked':False, 'redirect_reason':None,
-                      'http_auth':None, 'popup_blocked':False, 'failure_reason':None, 'http_status':None}
+                      'http_auth':None, 'popup_blocked':False, 'failure_reason':None, 'http_status':None,
+                      'diagnostics': []}
+        self._policies = {}
+        self._post_key = secrets.token_bytes(32)
         self._basic_auth = {}
         self._basic_pending = None
         self._credential_redactions = set()
-        self._post_approval = None
         self._post_pending = None
+        self._post_route = None
+        self._post_deadline = 0
         self._request_count = 0
         self._verify_mode = False
         self._review_token = None
@@ -179,20 +184,49 @@ class BrowserConnection:
 
     def call(self, action, arg=None, timeout=35):
         if action == 'cancel':
+            deadline = time.monotonic() + timeout
             self._cancel_requested.set()
+            if not self._closed.is_set():
+                self.update(state='closing')
+            if self._closed.wait(timeout):
+                self.thread.join(max(0, deadline - time.monotonic()))
+                if not self.thread.is_alive():
+                    return {'state': self.snapshot()['state']}
+            raise Conflict('The site browser did not respond; check connection status before retrying')
         future = Future()
         with self.lock:
-            if self._closed.is_set() or (action != 'cancel' and self._cancel_requested.is_set()):
+            if self._closed.is_set() or self._cancel_requested.is_set():
                 raise Conflict('The site connection is closing or closed')
             self.events.put((action, arg, future))
         try:
             return future.result(timeout=timeout)
         except TimeoutError:
-            # Stale queued actions must not run, but closing intent must survive
-            # a slow in-flight request even after its caller stops waiting.
-            if action != 'cancel':
-                future.cancel()
+            # Stale queued actions must not run after their caller stops waiting.
+            future.cancel()
             raise Conflict('The site browser did not respond; check connection status before retrying')
+
+    def _record(self, request, reason, **fields):
+        entry = diagnostic(request, reason, **fields)
+        with self.lock:
+            entries = list(self.state.get('diagnostics', []))
+            existing = next((e for e in entries if all(e.get(k) == v for k, v in entry.items())), None)
+            if existing:
+                entries[entries.index(existing)] = {**existing, 'count': existing['count'] + 1}
+            else:
+                entries = (entries + [{**entry, 'count': 1}])[-24:]
+            self.state['diagnostics'] = entries
+
+    def _deny(self, route, reason, **fields):
+        self._record(route.request, reason, **fields)
+        route.abort()
+
+    def _discard_post(self):
+        pending, self._post_route = getattr(self, '_post_route', None), None
+        if pending:
+            try: pending[0].abort()
+            except Exception: pass
+        self._post_pending = None
+        self.update(pending_post=None)
 
     def _allowed_origin(self, host):
         if host in self.domains:
@@ -257,13 +291,13 @@ class BrowserConnection:
                 # No copied POST body, authorization, CSRF or source headers.
                 # Every new GET re-enters _route and pinned_request, including
                 # fresh DNS validation before any destination connection.
-                page.goto(navigation.url, wait_until='domcontentloaded', timeout=min(15000, max(1, int(remaining * 1000))))
+                page.goto(navigation.url, wait_until='commit', timeout=min(15000, max(1, int(remaining * 1000))))
             except Exception:
                 pass  # An intercepted redirect is intentionally aborted.
             finally:
                 self._redirect_expected = None
 
-    def _route(self, route, context):
+    def _route(self, route, context, *, approval=None):
         if not external_inspection.ENABLED:
             route.abort()
             return
@@ -274,55 +308,81 @@ class BrowserConnection:
                 route.abort(); return
             host = request_origin(request.url)
             if self._verify_mode and (request.method != 'GET' or request.url != self.target or request.resource_type != 'document'):
-                route.abort(); return
-            if not self._allowed_origin(host):
-                route.abort(); return
-            # Approved identity origins can receive their own documents and
-            # assets, but a page cannot use fetch/scripts/images to send data
-            # to a different approved origin. Cross-origin document navigation
-            # remains necessary for explicit SSO, with POSTs approved separately.
-            if request.resource_type == 'document' and request.frame.parent_frame is not None:
-                route.abort(); return
-            if request.resource_type == 'document' and getattr(self, '_page', None) is not None and request.frame.page != self._page:
-                self.update(popup_blocked=True)
-                route.abort(); return  # Popups cannot redirect the owned window.
-            if request.resource_type != 'document' and request_origin(request.frame.url) != host:
-                route.abort(); return
-            p = urlsplit(request.url)
+                self._deny(route, 'static_verification'); return
             clean_url(request.url)  # Validate decoded paths, public host and mutation queries.
+            method = request.method.upper()
+            kind = request.resource_type
+            frame_url = request.frame.url
+            policy = getattr(self, '_policies', {}).get(frame_url, {})
+            static = method == 'GET' and (request.url, kind) in policy.get('static', ())
+            if kind == 'document' and request.frame.parent_frame is not None:
+                self._deny(route, 'embedded_document'); return
+            if kind == 'document' and getattr(self, '_page', None) is not None and request.frame.page != self._page:
+                self.update(popup_blocked=True)
+                self._deny(route, 'popup'); return
+            if not static:
+                if kind != 'document' and request_origin(frame_url) != host:
+                    self._deny(route, 'cross_origin_resource'); return
+                if not self._allowed_origin(host):
+                    self._deny(route, 'unapproved_origin'); return
             self._request_count += 1
             if self._request_count > 300:
-                route.abort(); return
-            method = request.method.upper()
+                self._deny(route, 'request_limit'); return
             if method not in ('GET', 'POST'):
-                route.abort(); return
-            if request.resource_type == 'document':
+                self._deny(route, 'unsupported_method'); return
+            if kind == 'document':
+                if method == 'GET' and getattr(self, '_post_route', None):
+                    self._discard_post()
                 expected = getattr(self, '_redirect_expected', None)
                 self._redirect_expected = None
                 if expected:
                     if method != 'GET' or _navigation_url(request.url) != expected.url:
-                        # A changed navigation must not silently start a new
-                        # chain and escape the hop/deadline limits.
-                        self._block_redirect('navigation_changed'); route.abort(); return
+                        self._block_redirect('navigation_changed'); self._deny(route, 'navigation_changed'); return
                     navigation = expected
                     if time.monotonic() >= navigation.deadline:
-                        self._block_redirect('timeout'); route.abort(); return
+                        self._block_redirect('timeout'); self._deny(route, 'redirect_timeout'); return
+            data, label = None, None
             if method == 'POST':
-                identity = (host, p.path)
+                headers = request.all_headers()
+                content_type = headers.get('content-type', '').split(';', 1)[0].lower()
+                length = headers.get('content-length', '')
+                if length and (not length.isascii() or not length.isdecimal() or int(length) > MAX_REQUEST):
+                    self._deny(route, 'submission_size'); return
+                data = request.post_data_buffer or b''
+                if len(data) > MAX_REQUEST:
+                    self._deny(route, 'submission_size'); return
+                label = auth_action(policy, request.url, kind, content_type, data)
+                if not label:
+                    self.update(blocked_submission_origin=host)
+                    self._deny(route, 'unverified_submission'); return
+                # Bind approval to exact URL (including query), initiating page,
+                # kind, media type and body. Keep only a keyed digest in memory.
+                identity = hmac.new(self._post_key, ('\0'.join((frame_url, request.url, kind, content_type))).encode() + b'\0' + data, 'sha256').digest()
+                if approval is None:
+                    self._discard_post()
+                allowed = bool(approval is not None and hmac.compare_digest(approval, identity)
+                               and self._post_route and self._post_route[0] is route
+                               and time.monotonic() < self._post_deadline)
+                if approval is not None and not allowed:
+                    self._discard_post()
+                    self._deny(route, 'approval_invalidated', endpoint=label); return
                 with self.lock:
-                    allowed = bool(self._post_approval and self._post_approval[:2] == identity and time.monotonic() < self._post_approval[2])
                     if allowed:
-                        self._post_approval = None
                         self._post_pending = None
+                        self._post_route = None
                         self.state['pending_post'] = None
-                    elif POST_PATH.search(p.path):
-                        token = secrets.token_urlsafe(18)
-                        self._post_pending = (host, p.path, token)
-                        self.state['pending_post'] = {'origin': host, 'request_id': token}
                     else:
-                        self.state['blocked_submission_origin'] = host
+                        token = secrets.token_urlsafe(18)
+                        self._post_pending = (identity, token)
+                        self._post_route = (route, context)
+                        self._post_deadline = time.monotonic() + 60
+                        self.state['pending_post'] = {'origin': host, 'request_id': token, 'endpoint': label,
+                                                      'method': 'POST', 'resource_type': kind}
                 if not allowed:
-                    route.abort(); return
+                    # Hold this exact request in the browser for at most one
+                    # minute. Approval resumes it once; no credential replay or
+                    # second form submission with changed CSRF/nonce values.
+                    self._record(request, 'approval_required', endpoint=label); return
             headers = request.all_headers()
             if navigation and len(navigation.seen) > 1:
                 # These are the NEW destination request's cookies, selected by
@@ -335,19 +395,27 @@ class BrowserConnection:
             basic = getattr(self, '_basic_auth', {}).get(request.url)
             if basic and method == 'GET' and request.resource_type == 'document' and not (navigation and len(navigation.seen) > 1):
                 headers = {**headers, 'authorization': basic}
-            if method == 'POST':
-                content_type = headers.get('content-type', '').split(';', 1)[0].lower()
-                if content_type not in ('application/x-www-form-urlencoded', 'application/json'):
-                    route.abort(); return
-                length = headers.get('content-length', '')
-                if length and (not length.isascii() or not length.isdecimal() or int(length) > MAX_REQUEST):
-                    route.abort(); return
-            data = request.post_data_buffer if method == 'POST' else None
-            if data and len(data) > MAX_REQUEST:
-                route.abort(); return
+            if static:
+                # Even an already approved CDN never receives session headers,
+                # cookies, auth, referrers or CSRF values and cannot set cookies.
+                headers = {k: v for k, v in headers.items() if k.lower() in ('accept', 'accept-language', 'user-agent')}
+            if getattr(self, '_cancel_requested', None) and self._cancel_requested.is_set():
+                self._deny(route, 'connection_closing'); return
             status, headers, cookies, body = self.transport(request.url, method, headers, data)
             headers = {k.lower(): v for k, v in headers.items()}
             challenge = headers.pop('www-authenticate', '')
+            if static:
+                if status != 200 or headers.get('content-type', '').split(';', 1)[0].lower() not in MIME[kind]:
+                    self._deny(route, 'static_response_rejected', endpoint='Declared static resource', status=status); return
+                self._record(request, 'static_allowed', endpoint='Declared static resource', status=status)
+                route.fulfill(status=status, headers={k: v for k, v in headers.items() if k in
+                              ('content-type', 'cache-control', 'access-control-allow-origin')}, body=body)
+                return
+            if method == 'POST':
+                self._record(request, 'approved_once', endpoint=label, status=status)
+            if kind == 'document' and status == 200:
+                html = headers.get('content-type', '').split(';', 1)[0].lower() in ('text/html', 'application/xhtml+xml')
+                self._policies = {request.url: document_policy(request.url, body) if html else {}}
             if request.resource_type == 'document':
                 self.update(http_status=status, failure_reason=None)
                 if status == 401 and challenge:
@@ -377,12 +445,16 @@ class BrowserConnection:
             _set_cookies(context, request.url, cookies)
             route.fulfill(status=status, headers=headers, body=body)
         except Exception:
+            self._record(request, 'unsafe_or_failed_request')
             if request.resource_type == 'document':
                 self.update(failure_reason='request_failed')
             if navigation and len(navigation.seen) > 1:
                 self._block_redirect('request_failed')
             try: route.abort()
             except Exception: pass
+        finally:
+            if approval is not None and self._post_route and self._post_route[0] is route:
+                self._discard_post()
 
     def _run(self):
         launched = False
@@ -425,8 +497,14 @@ class BrowserConnection:
                 # A restored profile cannot send traffic before interception exists.
                 context.set_offline(False)
                 self._navigate(page, self.target)
-                self.update(state='login_open')
+                if not self._cancel_requested.is_set():
+                    self.update(state='login_open')
                 while True:
+                    if self._cancel_requested.is_set():
+                        break
+                    if self._post_route and time.monotonic() >= self._post_deadline:
+                        self._record(self._post_route[0].request, 'approval_expired')
+                        self._discard_post()
                     try:
                         action, arg, future = self.events.get_nowait()
                     except queue.Empty:
@@ -440,23 +518,24 @@ class BrowserConnection:
                     try:
                         if not future.set_running_or_notify_cancel():
                             continue
-                        if action != 'cancel':
-                            external_inspection.require_enabled()
-                        if action == 'cancel':
-                            future.set_result({'state':'closed'}); break
+                        external_inspection.require_enabled()
                         if action == 'approve_post':
                             with self.lock:
                                 current = self.state['pending_post']
                                 if not current or current != arg:
                                     raise Conflict('The login submission changed; review it again')
-                                self._post_approval = (*self._post_pending[:2], time.monotonic()+60)
-                                self.state['pending_post'] = None
+                                if not self._post_route or time.monotonic() >= self._post_deadline:
+                                    raise Conflict('The login submission expired; try sign-in again')
+                                approval = self._post_pending[0]
+                            pending = self._post_route
+                            self._route(*pending, approval=approval)
                             future.set_result({'state':'approved_once'})
                         elif action == 'verify':
                             future.set_result(self._verify(page))
                         elif action == 'http_auth':
                             future.set_result(self._enter_http_auth(page, arg))
                         elif action == 'retry_login':
+                            self._discard_post()
                             self._review_token = None
                             self._confirmed_digest = None
                             self.update(state='login_open', redirect_blocked=False, redirect_reason=None,
@@ -507,10 +586,7 @@ class BrowserConnection:
                 context.close()
         except Exception:
             self.update(state='error', failure_reason='browser_unavailable' if not launched else 'browser_closed')
-            return
         finally:
-            with self.lock:
-                self._closed.set()
             # Pending credential submissions must not survive a closed browser.
             while True:
                 try:
@@ -524,8 +600,16 @@ class BrowserConnection:
             self._basic_auth.clear()
             self._basic_pending = None
             self._credential_redactions.clear()
-            self.update(http_auth=None)
-        self.update(state='closed')
+            self._policies.clear()
+            self._post_route = None
+            self._post_pending = None
+            self._post_key = b''
+            self.update(http_auth=None, pending_post=None)
+            if self.snapshot()['state'] != 'error':
+                self.update(state='closed')
+            # This is published only after Chromium and Playwright have exited,
+            # credentials are discarded and all queued callers are completed.
+            self._closed.set()
 
     def _enter_http_auth(self, page, arg):
         pending = self._basic_pending
@@ -555,7 +639,7 @@ class BrowserConnection:
         self._review_token = None
         self._verified_digest = None
         self._basic_pending = None
-        self.update(http_status=None, http_auth=None)
+        self.update(http_status=None, http_auth=None, extraction_mode='static_document', extraction_limitation=None)
         def failure_state():
             state = self.snapshot()
             if state.get('http_status') in (401, 403):
@@ -580,8 +664,9 @@ class BrowserConnection:
                 const area = document.querySelector('main,article') || document.body;
                 if (!area) return {form:!!document.querySelector('input[type=password],form[action*="login" i]'), chooser:false, text:''};
                 const walker = document.createTreeWalker(area,NodeFilter.SHOW_TEXT);
-                let text='', count=0, node;
-                while ((node=walker.nextNode()) && count++ < 5000 && text.length < 200000) {
+                let text='', count=0, node, truncated=false, lastPre=null;
+                while ((node=walker.nextNode())) {
+                  if(count++ >= 20000){truncated=true;break;}
                   const el=node.parentElement;
                   if (!el || el.closest('form,input,textarea,select,script,style,iframe,object,noscript,[hidden],[aria-hidden="true"]')) continue;
                   let visible=true;
@@ -589,19 +674,36 @@ class BrowserConnection:
                     const style=getComputedStyle(p);
                     if(style.display==='none'||style.visibility==='hidden'||style.opacity==='0'){visible=false;break;}
                   }
-                  if(visible) text += node.nodeValue + '\\n';
+                  if(visible) {
+                    const preserve = value => /^(pre|pre-wrap|break-spaces)$/.test(value);
+                    let pre = preserve(getComputedStyle(el).whiteSpace) ? el : null;
+                    if(pre) while(pre.parentElement && pre.parentElement!==area.parentElement && preserve(getComputedStyle(pre.parentElement).whiteSpace)) pre=pre.parentElement;
+                    const value=pre ? node.nodeValue.replace(/\\r\\n?/g,'\\n') : node.nodeValue.replace(/\\s+/g,' ').trim();
+                    if(pre) {
+                      if(pre!==lastPre && text && !text.endsWith('\\n')) text+='\\n';
+                      text+=value;
+                    } else {
+                      if(!value) continue;
+                      if(lastPre && !text.endsWith('\\n')) text+='\\n';
+                      text+=value+'\\n';
+                    }
+                    lastPre=pre;
+                    if(text.length>199900){text=text.slice(0,199900);truncated=true;break;}
+                  }
                 }
-                text=text.trim().slice(0,200000);
+                text=text.replace(/^[\\r\\n]+|[\\r\\n]+$/g,'');
+                if(truncated) text += '\\n[Source snapshot truncated: additional page text was omitted.]';
                 const form = !!document.querySelector('input[type=password],form[action*="login" i]');
                 const chooser = /join classes|add another class/i.test(document.body?.innerText || '') && /log[ -]?in|sign[ -]?in/i.test(document.body?.innerText || '');
-                return {form, chooser, text};
+                return {form, chooser, text, truncated, scripted:!!document.querySelector('script')};
             }''')
             if evidence['form'] or evidence['chooser'] or len(evidence['text']) < 100:
                 # A login-only page may be an expired session. An optional
                 # form beside substantive text, or an enrollment chooser,
                 # does not establish that authentication is required.
                 state = 'reconnect_needed' if evidence['form'] and len(evidence['text']) < 100 else 'access_unverified'
-                self.update(state=state)
+                self.update(state=state, extraction_limitation='dynamic_content_not_verified'
+                            if evidence.get('scripted') and not evidence['form'] and len(evidence['text']) < 100 else None)
                 return {'state':state}
             self.update(state='content_visible')
             for secret in sorted(self._credential_redactions, key=len, reverse=True):
@@ -634,6 +736,11 @@ class SiteConnections:
         self.lock = threading.RLock()
         self.offers = {}
         self.sessions = {}
+
+    @staticmethod
+    def _active(session):
+        return (session.snapshot()['state'] not in ('closed', 'error')
+                or bool(getattr(session, 'thread', None) and session.thread.is_alive()))
 
     def _source(self, aid, sid):
         self.hub.identity.get_account(aid)
@@ -679,7 +786,8 @@ class SiteConnections:
             if len(self.offers) >= 100:
                 raise Conflict('Too many outstanding connection offers')
             self.offers[token] = {'aid':aid, 'sid':sid, 'owner':self._owner(aid), 'target':target, 'site':site, 'domains':domains, 'method':method, 'expires':now+300}
-        return {'token':token, 'site':site, 'origins':domains, 'method':method, 'expires_in_seconds':300}
+        return {'token':token, 'site':site, 'origins':domains, 'method':method, 'expires_in_seconds':300,
+                'static_origins': sorted({cdn for domain in domains for cdn in STATIC.get(domain, {})}) if method == 'browser' else []}
 
     def start(self, aid, sid, token, consent):
         external_inspection.require_enabled()
@@ -696,9 +804,9 @@ class SiteConnections:
                 raise Conflict('Source changed; review the connection again')
             key = (aid, offer['site'])
             existing = self.sessions.get(key)
-            if existing and existing.snapshot()['state'] not in ('closed', 'error'):
+            if existing and self._active(existing):
                 raise Conflict('A site connection is already open for this account')
-            if sum(s.snapshot()['state'] not in ('closed', 'error') for s in self.sessions.values()) >= 2:
+            if sum(self._active(s) for s in self.sessions.values()) >= 2:
                 raise Conflict('Close another site connection before opening a new one')
             account = self.hub.identity.get_account(aid)
             profile_key = hashlib.sha256((account['origin'] + '\0' + account['canvas_user_id'] + '\0' + offer['site']).encode()).hexdigest()

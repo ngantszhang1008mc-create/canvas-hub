@@ -19,6 +19,7 @@ import signal
 from urllib.parse import parse_qsl, unquote, urljoin, urlsplit
 
 from playwright.sync_api import sync_playwright, TimeoutError as BrowserTimeout
+from .site_policy import MIME, diagnostic, document_policy
 
 MAX_BYTES = 1_000_000
 SENSITIVE = re.compile(r'token|secret|signature|password|credential|authorization|api.?key|^sig$|^key$|^code$|^saml|^ticket$|^verifier$|^x-amz-|^x-goog-', re.I)
@@ -102,7 +103,7 @@ def classify(status, auth_challenge, signals, error=None):
 
 
 def _inspect(url, timeout_ms=20000, capture=False):
-    result = {'initial_host': urlsplit(url).hostname, 'final_host': None, 'http_status': None, 'outcome': 'unknown', 'evidence': [], 'course_access': 'unknown'}
+    result = {'initial_host': urlsplit(url).hostname, 'final_host': None, 'http_status': None, 'outcome': 'unknown', 'evidence': [], 'course_access': 'unknown', 'diagnostics': []}
     state = {'status': None, 'auth': False, 'error': None, 'host': None, 'n': 0, 'redirect_auth': False}
     try:
         target = url
@@ -141,29 +142,39 @@ def _inspect(url, timeout_ms=20000, capture=False):
         context.route_web_socket('**/*', lambda ws: ws.close())
         context.add_init_script("Object.defineProperty(window, 'RTCPeerConnection', {value: undefined}); Object.defineProperty(window, 'webkitRTCPeerConnection', {value: undefined});")
         page = context.new_page()
+        policy = document_policy(target, body)
         def intercept(route):
             req = route.request
+            def deny(reason):
+                if len(result['diagnostics']) < 24:
+                    result['diagnostics'].append(diagnostic(req, reason))
+                route.abort()
             if req.method != 'GET' or req.resource_type not in ('document', 'script', 'stylesheet'):
-                route.abort(); return
+                deny('anonymous_request_scope'); return
             if req.resource_type == 'document' and req.url != target:
-                route.abort(); return
+                deny('anonymous_navigation'); return
             host = urlsplit(req.url).hostname
-            if req.resource_type != 'document' and (urlsplit(req.url).scheme, host, urlsplit(req.url).port) != (urlsplit(target).scheme, state['host'], urlsplit(target).port):
-                route.abort(); return
+            static = (req.url, req.resource_type) in policy['static']
+            if req.resource_type != 'document' and not static and (urlsplit(req.url).scheme, host, urlsplit(req.url).port) != (urlsplit(target).scheme, state['host'], urlsplit(target).port):
+                deny('cross_origin_resource'); return
             state['n'] += 1
-            if state['n'] > 6:
-                route.abort(); return
+            if state['n'] > 32:
+                deny('request_limit'); return
             try:
                 if req.resource_type == 'document':
                     response_status, response_headers, response_body = status, headers, body
                 else:
                     response_status, response_headers, response_body = fetch(req.url)
                     if response_status in (301, 302, 303, 307, 308):
-                        route.abort(); return
+                        deny('subresource_redirect'); return
+                    if static:
+                        content_type = next((v for k, v in response_headers.items() if k.lower() == 'content-type'), '').split(';', 1)[0].lower()
+                        if response_status != 200 or content_type not in MIME[req.resource_type]:
+                            deny('static_response_rejected'); return
                 route.fulfill(status=response_status, headers=response_headers, body=response_body)
             except Exception as exc:
                 if req.resource_type == 'document': state['error'] = type(exc).__name__
-                route.abort()
+                deny('unsafe_or_failed_request')
         context.route('**/*', intercept)
         try:
             page.goto(target, wait_until='domcontentloaded', timeout=timeout_ms)

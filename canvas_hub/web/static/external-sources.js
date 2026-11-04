@@ -95,6 +95,8 @@ export function makeExternalSources(env) {
         if(source.error)advanced.append(note(source.error));
         if(req?.result_note)advanced.append(note(req.result_note));
         if(probe.final_host)advanced.append(note(`Checked host: ${probe.final_host}. Course access is not verified.`));
+        if(probe.diagnostics?.length)advanced.append(h('details',null,h('summary',null,'Anonymous request diagnostics'),
+          h('ul',null,...probe.diagnostics.map(d=>h('li',null,`${d.method} ${d.origin} · ${d.endpoint} · ${d.resource_type}: ${d.reason.replaceAll('_',' ')}`)))));
         advanced.append(note('Failed inspections check for sign-in anonymously, without saved sessions or a model call.'),
           h('button',{onclick:async e=>{
             e.currentTarget.disabled=true;

@@ -9,6 +9,7 @@ from urllib.parse import unquote
 from ..util import InvalidInput
 
 MAX_TEXT = 100_000
+TRUNCATION_MARKER = '\n[Source snapshot truncated: additional page text was omitted.]'
 SENSITIVE_LINE = re.compile(
     r'(?i)\b(password|passcode|one.time.code|otp|mfa.code|api[ _-]?key|access[ _-]?token|'
     r'refresh[ _-]?token|session[ _-]?(?:id|token|key)|authorization|cookie|client[ _-]?secret|'
@@ -36,8 +37,13 @@ def sanitize_connected_text(text):
         line = URL.sub('[link removed]', raw)
         line = EMAIL.sub('[email removed]', line)
         line = LONG_TOKEN.sub('[token removed]', line)
-        lines.append(line)
-    result = '\n'.join(lines).strip()[:MAX_TEXT]
+        # Strip trailing/blank-line padding, but retain leading indentation in
+        # code. Ordinary HTML text is folded during DOM extraction, where the
+        # preformatted context is still known.
+        lines.append(line.rstrip() if line.strip() else '')
+    result = re.sub(r'\n{3,}', '\n\n', '\n'.join(lines)).strip('\r\n')
+    if len(result) > MAX_TEXT:
+        result = result[:MAX_TEXT - len(TRUNCATION_MARKER)].rstrip() + TRUNCATION_MARKER
     if len(re.sub(r'\[[^\]]+ removed\]|\s', '', result)) < 100:
         raise InvalidInput('Not enough reviewable course text remains after removing sensitive content')
     return result

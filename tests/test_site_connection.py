@@ -175,6 +175,7 @@ def test_route_enforces_origin_single_post_and_verification_scope():
     session.domains={'https://course.example.edu'}
     session.lock=threading.Lock();session.state={'blocked_origins':[],'pending_post':None,'blocked_submission_origin':None}
     session._request_count=0;session._verify_mode=False;session._post_approval=None;session._post_pending=None;session.transport=transport
+    session._post_key=b'synthetic-key';session._post_route=None
     other=Route(Request('https://identity.example.edu/login'))
     session._route(other,Context())
     assert other.aborted and not seen and session.snapshot()['blocked_origins']==['https://identity.example.edu']
@@ -185,17 +186,21 @@ def test_route_enforces_origin_single_post_and_verification_scope():
     cross_asset=Route(Request('https://identity.example.edu/asset.js',kind='script'))
     session._route(cross_asset,Context())
     assert cross_asset.aborted and len(seen)==1
+    session._policies={'https://course.example.edu/course':{'forms':{'https://course.example.edu/login'}}}
     post=Route(Request('https://course.example.edu/login','POST',body=b'password=fixture'))
     session._route(post,Context())
     pending=session.snapshot()['pending_post']
-    assert post.aborted and pending['origin']=='https://course.example.edu' and 'password' not in str(pending)
-    session._post_approval=(*session._post_pending[:2],time.monotonic()+60)
-    second=Route(Request('https://course.example.edu/login','POST',body=b'password=fixture'))
-    session._route(second,Context())
+    assert not post.aborted and not post.fulfilled and pending['origin']=='https://course.example.edu' and 'password' not in str(pending)
+    approval=session._post_pending[0]
+    second=post
+    session._route(second,Context(),approval=approval)
     assert second.fulfilled and len(seen)==2
+    session._policies={'https://course.example.edu/course':{'forms':{'https://course.example.edu/login'}}}
     third=Route(Request('https://course.example.edu/login','POST',body=b'password=fixture'))
     session._route(third,Context())
-    assert third.aborted and len(seen)==2
+    assert not third.fulfilled and len(seen)==2
+    session._discard_post()
+    assert third.aborted
     mutation=Route(Request('https://course.example.edu/%64elete'))
     session._route(mutation,Context())
     assert mutation.aborted

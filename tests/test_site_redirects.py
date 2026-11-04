@@ -112,7 +112,6 @@ def test_approved_post_redirect_is_new_get_without_source_credentials(tmp_path):
         state = wait(session, lambda s: s['pending_post'] is not None)
         assert not any(method == 'POST' for _, method, _, _ in calls)
         session.call('approve_post', state['pending_post'])
-        session.call('retry_login')
         assert arrived.wait(5)
         assert sum(method == 'POST' for _, method, _, _ in calls) == 1
 
@@ -163,6 +162,9 @@ def routed_session(transport):
     session.state = {'blocked_origins': [], 'pending_post': None}
     session._request_count, session._verify_mode = 0, False
     session._post_approval = session._post_pending = None
+    session._post_key = b'synthetic-key'
+    session._post_route = None
+    session._policies = {TARGET: {'forms': {TARGET}}}
     session._redirect_expected = session._redirect_next = None
     session.transport = transport
     return session
@@ -181,9 +183,12 @@ def test_redirect_cannot_replay_post_load_assets_or_change_verification(status, 
         return status, {'location': IDENTITY + '/login'}, ['secret=fixture; Secure'], b''
     session = routed_session(transport)
     session._verify_mode = verify
-    session._post_approval = (COURSE, '/course', time.monotonic() + 60)
     route = Route(method=method, kind=kind)
-    session._route(route, SimpleNamespace(add_cookies=cookies.extend))
+    approval = None
+    if method == 'POST':
+        session._route(route, SimpleNamespace(add_cookies=cookies.extend))
+        approval = session._post_pending[0]
+    session._route(route, SimpleNamespace(add_cookies=cookies.extend), approval=approval)
     assert route.aborted and not route.fulfilled and not cookies
     assert calls == [TARGET] and session._redirect_next is None
     assert session.snapshot()['redirect_reason'] == reason
