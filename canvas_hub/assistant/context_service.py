@@ -106,7 +106,7 @@ class ContextService:
         request = [{"role": "user", "sent_text": encoded({"max_summary_tokens": policy.summary_tokens,
                                                            "conversation": [neutral_message(m) for m in prefix]})}]
         input_tokens = estimate(SUMMARY_SYSTEM) + estimate(request) + 512
-        if input_tokens + policy.summary_tokens > int(policy.capacity * .9):
+        if not policy.limit_disabled and input_tokens + policy.summary_tokens > int(policy.capacity * .9):
             raise ProviderError("Older history is too large for one safe summary request. Original context is retained; start a focused chat. No summary request was sent.")
         version = data_version(self.hub, account_id)
         live_version = live_data_version(self.hub, account_id)
@@ -186,7 +186,7 @@ class ContextService:
         transcript = self._context_projection(cid, account_id, transcript)
         projected = with_source_context(transcript, request_context)
         report = policy.measure(cfg, system, projected, tools)
-        if report["overhead_tokens"] + report["response_reserved"] >= int(policy.capacity * .9):
+        if not policy.limit_disabled and report["overhead_tokens"] + report["response_reserved"] >= int(policy.capacity * .9):
             self._context_reports[cid] = report
             raise context_error(report)
         attempted = False

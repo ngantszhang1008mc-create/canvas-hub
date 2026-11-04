@@ -30,6 +30,14 @@ NAME = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 CALL_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 MODEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$")
 TOKEN = re.compile(r"^ses_[A-Za-z0-9_-]{43}$")
+GATEWAY_CONSENT_VERSION = 2
+
+
+def gateway_consent_valid(cfg):
+    # Earlier production disclosures named only OpenAI. Preserve the session,
+    # but require acceptance of the relay/DeepSeek disclosure before reuse.
+    return cfg.get('gateway_consent') is True and (cfg.get('gateway_mode') != 'production'
+            or cfg.get('gateway_consent_version') == GATEWAY_CONSENT_VERSION)
 
 
 class GatewayError(ProviderError):
@@ -134,7 +142,7 @@ def _metadata(cfg, method, path, body=None, *, session=True):
 
 
 def enroll(cfg, invitation):
-    if cfg.get('gateway_consent') is not True:
+    if not gateway_consent_valid(cfg):
         raise GatewayError('Review and accept the gateway disclosure before connecting.')
     if not isinstance(invitation, str) or not re.fullmatch(r'inv_[A-Za-z0-9_-]{43}', invitation):
         raise GatewayError('Enter a valid operator-issued invitation.')
@@ -150,6 +158,12 @@ def allowance(cfg):
     caps = data.get('capabilities') or {}
     if data.get('mode') != cfg.get('gateway_mode'):
         raise GatewayError('Gateway mode differs from this setup. No model request was sent.')
+    if data.get('allowance_source', 'canvas_gateway') != 'canvas_gateway':
+        raise GatewayError('Gateway allowance source is unsupported.')
+    user_id = _request_id(data.get('user_id')) if 'user_id' in data else _request_id(cfg.get('gateway_user_id'))
+    if ('user_id' in data and not user_id) or (user_id and cfg.get('gateway_user_id')
+            and user_id != _request_id(cfg['gateway_user_id'])):
+        raise GatewayError('Gateway allowance account does not match this saved session.')
     limits = {'max_tools': 128, 'max_tool_calls_per_response': 32, 'max_messages': 128, 'max_body_bytes': 1048576}
     if (not isinstance(caps, dict) or caps.get('protocol_version') != 1 or caps.get('mode_header') != 'X-Gateway-Mode'
             or any(type(caps.get(k)) is not int or not 1 <= caps[k] <= maximum for k, maximum in limits.items())):
@@ -160,7 +174,7 @@ def allowance(cfg):
             or any(not isinstance(n, str) or not NAME.fullmatch(n) for n in tools) or len(set(tools)) != len(tools)
             or not isinstance(models, list) or not 1 <= len(models) <= 128):
         raise GatewayError('Gateway capabilities are invalid.')
-    seen = set()
+    seen, clean_models = set(), []
     for model in models:
         if (not isinstance(model, dict) or not isinstance(model.get('id'), str) or not MODEL.fullmatch(model['id'])
                 or model['id'] in seen or type(model.get('min_output_tokens')) is not int
@@ -168,6 +182,27 @@ def allowance(cfg):
                 or not 1 <= model['min_output_tokens'] <= model['max_output_tokens'] <= 128000):
             raise GatewayError('Gateway model capabilities are invalid.')
         seen.add(model['id'])
+        clean = {k: model[k] for k in ('id', 'min_output_tokens', 'max_output_tokens')}
+        if 'accounting' in model:
+            if model['accounting'] not in ('authoritative_usage', 'full_reservation'):
+                raise GatewayError('Gateway model accounting is unsupported.')
+            clean['accounting'] = model['accounting']
+        if 'reservation' in model:
+            reservation = model['reservation']
+            if (not isinstance(reservation, dict) or any(not isinstance(reservation.get(k), str)
+                    or not re.fullmatch(r'\d{1,24}', reservation[k]) for k in ('min_microusd', 'max_microusd'))
+                    or int(reservation['min_microusd']) > int(reservation['max_microusd'])):
+                raise GatewayError('Gateway model reservation bounds are invalid.')
+            clean['reservation'] = {k: reservation[k] for k in ('min_microusd', 'max_microusd')}
+        if 'new_api' in model:
+            relay = model['new_api']
+            states = {'shared': ('shared', 'credential_missing'), 'per_user': ('bound', 'unbound', 'credential_missing')}
+            if (not isinstance(relay, dict) or not isinstance(relay.get('identity_mode'), str)
+                    or relay['identity_mode'] not in states or relay.get('binding_status') not in states[relay['identity_mode']]
+                    or model.get('accounting') != 'full_reservation'):
+                raise GatewayError('Gateway relay configuration metadata is invalid.')
+            clean['new_api'] = {k: relay[k] for k in ('identity_mode', 'binding_status')}
+        clean_models.append(clean)
     windows = {}
     for kind in ('daily', 'monthly'):
         window = data.get(kind) or {}
@@ -175,7 +210,9 @@ def allowance(cfg):
                for k in ('limit_microusd', 'spent_microusd', 'held_microusd', 'remaining_microusd')) or type(window.get('resets_at')) is not int):
             raise GatewayError('Gateway allowance metadata is invalid.')
         windows[kind] = {k: window[k] for k in ('limit_microusd', 'spent_microusd', 'held_microusd', 'remaining_microusd', 'resets_at')}
-    return {**windows, 'mode': data['mode'], 'tools': tools, 'models': models, 'capabilities': caps,
+    return {**windows, 'mode': data['mode'], 'tools': tools, 'models': clean_models,
+            'capabilities': {k: caps[k] for k in ('protocol_version', 'mode_header', *limits)},
+            'allowance_source': 'canvas_gateway', **({'user_id': user_id} if user_id else {}),
             'gateway_paused': data.get('gateway_paused') is True, 'reset_timezone': 'UTC'}
 
 
@@ -187,7 +224,7 @@ def authorize(cfg):
 
 def prepare_config(cfg):
     authorize(cfg)
-    if cfg.get('gateway_consent') is not True:
+    if not gateway_consent_valid(cfg):
         raise GatewayError('Accept the gateway disclosure in Assistant settings first.')
     if cfg.get('api_key') or cfg.get('extra_params') or cfg.get('thinking') or cfg.get('effort'):
         raise GatewayError('Gateway setups do not accept BYOK keys, reasoning settings or extra provider options.')
@@ -195,6 +232,10 @@ def prepare_config(cfg):
     model = next((m for m in info['models'] if m['id'] == cfg.get('model')), None)
     if not model:
         raise GatewayError('Choose an advertised gateway model alias in Assistant settings.')
+    relay_status = model.get('new_api', {}).get('binding_status')
+    if relay_status in ('unbound', 'credential_missing'):
+        raise GatewayError('This model needs an operator-configured New API account link or relay credential. '
+                           'Contact your gateway operator with your Canvas gateway account ID; no model request was sent.')
     chosen = cfg.get('gateway_tools') or []
     if not isinstance(chosen, list) or any(n not in info['tools'] for n in chosen):
         raise GatewayError('Gateway tool policy changed. Check allowance and review the available tools before retrying.')
@@ -328,7 +369,18 @@ class AllowanceGatewayProvider:
     def _terminal_usage(self, terminal):
         if terminal.get('finish_reason') not in ('stop', 'tool_calls', 'length') or terminal.get('model') != self.model['id']:
             raise GatewayError('Gateway terminal model or finish reason is unsupported.')
+        if terminal.get('accounting') not in (None, 'authoritative_usage', 'full_reservation'):
+            raise GatewayError('Gateway accounting mode is unsupported; no tool was executed.')
         usage = terminal.get('usage')
+        if terminal.get('accounting') == 'full_reservation':
+            # A relay may provide estimates rather than authoritative metering.
+            # Its successful response consumes the entire reserved allowance;
+            # missing token counts remain unknown in local telemetry.
+            reserved = terminal.get('reserved_microusd')
+            if ('usage' not in terminal or usage is not None or not isinstance(reserved, str)
+                    or not re.fullmatch(r'\d{1,24}', reserved) or terminal.get('charged_microusd') != reserved):
+                raise GatewayError('Gateway conservative charge is invalid; no tool was executed.')
+            return None
         valid = lambda n: type(n) is int and 0 <= n <= 9007199254740991
         if not isinstance(usage, dict) or any(not valid(usage.get(k)) for k in ('input_tokens', 'output_tokens')):
             raise GatewayError('Gateway terminal usage is missing or invalid; no tool was executed.')
@@ -359,6 +411,8 @@ class AllowanceGatewayProvider:
             headers = {'Authorization': 'Bearer ' + self.cfg['gateway_token'], 'Content-Type': 'application/json',
                        'Accept': 'application/x-ndjson', 'Accept-Encoding': 'identity', 'Idempotency-Key': record['key'],
                        'X-Gateway-Mode': self.cfg['gateway_mode']}
+            if self.cfg['gateway_mode'] == 'production' and gateway_consent_valid(self.cfg):
+                headers['X-Gateway-Consent-Version'] = str(GATEWAY_CONSENT_VERSION)
             timeout = httpx.Timeout(60, connect=10, write=10, pool=10)
             async with httpx.AsyncClient(timeout=timeout, follow_redirects=False, trust_env=False) as client:
                 authorize(self.cfg)
@@ -475,10 +529,12 @@ class AllowanceGatewayProvider:
         elif calls and finish != 'length':
             raise GatewayError('Gateway did not authorize completion of its tool calls.')
         record.update(state='completed', usage=usage, finish_reason=finish,
-                      reserved_microusd=terminal.get('reserved_microusd'), charged_microusd=terminal.get('charged_microusd'))
+                      reserved_microusd=terminal.get('reserved_microusd'), charged_microusd=terminal.get('charged_microusd'),
+                      accounting=terminal.get('accounting'))
         record.pop('body', None)
         self._journal(record)
-        usage = {**usage, 'cache_read_input_tokens': usage.get('cached_input_tokens'),
-                 'cache_creation_input_tokens': usage.get('cache_write_input_tokens')}
+        usage = ({**usage, 'cache_read_input_tokens': usage.get('cached_input_tokens'),
+                  'cache_creation_input_tokens': usage.get('cache_write_input_tokens')} if usage is not None else {})
         return Turn(text=text, tool_calls=complete_calls, stop={'stop': 'end', 'tool_calls': 'tool_use', 'length': 'truncated'}[finish],
-                    model=self.model['id'], usage=usage, raw={'provider': self.name, 'request_id': record['request_id']})
+                    model=self.model['id'], usage=usage, raw={'provider': self.name, 'request_id': record['request_id'],
+                                                           'accounting': terminal.get('accounting')})

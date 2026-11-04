@@ -99,7 +99,7 @@ class SourceAnalysis:
                       (token, aid, sid, self._fingerprint(aid, s, cfg), now_iso()))
         return {'available': True, 'token': token, 'urls': [s['url']], 'provider': cfg['provider'],
                 'setup': cfg.get('name'), 'endpoint': self._endpoint(cfg),
-                'usage_note': (('This uses gateway allowance; selected text passes through the gateway to OpenAI.'
+                'usage_note': (('This uses gateway allowance; selected text passes through the gateway to OpenAI or through the operator\'s New API relay to DeepSeek. New API requests consume the full reserved allowance.'
                                 if cfg.get('gateway_mode') == 'production' else
                                 'This uses the mock gateway; no paid model is contacted.')
                                if cfg['provider'] == 'allowance_gateway' else None),

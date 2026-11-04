@@ -25,7 +25,23 @@ export interface OpenAIModelPolicy {
   pricing: Pricing;
 }
 
-export type ModelPolicy = MockModelPolicy | OpenAIModelPolicy;
+// Peak, uncached rates and full provider context reviewed 2026-11-03.
+export const DEEPSEEK_CONTEXT_TOKENS = 1_048_576;
+// The provider allows 393,216; retain the existing Canvas wire limit.
+export const DEEPSEEK_OUTPUT_TOKENS = 128_000;
+export const DEEPSEEK_INPUT_RATE = 300_000;
+export const DEEPSEEK_OUTPUT_RATE = 1_200_000;
+
+export interface NewApiModelPolicy {
+  provider: "new_api";
+  native_model: "deepseek-flash";
+  max_input_tokens: number;
+  max_output_tokens: number;
+  input_microusd_per_million_tokens: number;
+  output_microusd_per_million_tokens: number;
+}
+
+export type ModelPolicy = MockModelPolicy | OpenAIModelPolicy | NewApiModelPolicy;
 
 export interface ToolDefinition {
   description: string;
@@ -61,6 +77,10 @@ export interface Env {
   POLICY: unknown;
   ADMIN_SECRET: string;
   OPENAI_API_KEY?: string;
+  NEW_API_BASE_URL?: string;
+  NEW_API_RELAY_KEY?: string;
+  NEW_API_IDENTITY_MODE?: "shared" | "per_user";
+  NEW_API_RELAY_KEYS?: string;
 }
 
 export function record(value: unknown): value is Record<string, unknown> {
@@ -126,6 +146,12 @@ export function parsePolicy(value: unknown): Policy {
             if (!integer(rates[key], LUNA_PRICE_FLOORS[tier][key], 1_000_000_000)) throw new Error();
           }
         }
+      } else if (model.provider === "new_api" && p.mode === "production") {
+        exactKeys(model, ["provider", "native_model", "max_input_tokens", "max_output_tokens", "input_microusd_per_million_tokens", "output_microusd_per_million_tokens"]);
+        if (model.native_model !== "deepseek-flash" || model.max_input_tokens !== DEEPSEEK_CONTEXT_TOKENS
+          || !integer(model.max_output_tokens, 1, DEEPSEEK_OUTPUT_TOKENS)
+          || !integer(model.input_microusd_per_million_tokens, DEEPSEEK_INPUT_RATE, 1_000_000_000)
+          || !integer(model.output_microusd_per_million_tokens, DEEPSEEK_OUTPUT_RATE, 1_000_000_000)) throw new Error();
       } else {
         throw new Error();
       }
@@ -154,6 +180,49 @@ export function validProviderSecret(secret: unknown): secret is string {
 }
 
 export function assertConfigured(policy: Policy, env: Env): void {
-  if (!validAdminSecret(env.ADMIN_SECRET)
-    || (policy.mode === "production" && !validProviderSecret(env.OPENAI_API_KEY))) throw new GatewayError(503, "configuration_error");
+  if (!validAdminSecret(env.ADMIN_SECRET)) throw new GatewayError(503, "configuration_error");
+  for (const model of Object.values(policy.models)) {
+    if (model.provider === "openai_responses" && !validProviderSecret(env.OPENAI_API_KEY)) throw new GatewayError(503, "configuration_error");
+    if (model.provider === "new_api") {
+      newApiEndpoint(env.NEW_API_BASE_URL);
+      if (env.NEW_API_IDENTITY_MODE === "per_user") {
+        if (env.NEW_API_RELAY_KEY !== undefined) throw new GatewayError(503, "configuration_error");
+        newApiRelayKeys(env);
+      } else if ((env.NEW_API_IDENTITY_MODE !== undefined && env.NEW_API_IDENTITY_MODE !== "shared")
+        || !validProviderSecret(env.NEW_API_RELAY_KEY) || env.NEW_API_RELAY_KEYS !== undefined) {
+        throw new GatewayError(503, "configuration_error");
+      }
+    }
+  }
+}
+
+export function newApiRelayKeys(env: Env): Record<string, string> {
+  try {
+    if (typeof env.NEW_API_RELAY_KEYS !== "string" || env.NEW_API_RELAY_KEYS.length > 524_288) throw new Error();
+    const keys: unknown = JSON.parse(env.NEW_API_RELAY_KEYS);
+    // An explicit empty map permits operator cleanup and allowance/status reads
+    // after the last credential is removed. It cannot authorize relay dispatch.
+    if (!record(keys) || Object.keys(keys).length > 1000
+      || Object.entries(keys).some(([ref, key]) => !/^[A-Za-z0-9_-]{1,64}$/.test(ref) || !validProviderSecret(key))) throw new Error();
+    return keys as Record<string, string>;
+  } catch { throw new GatewayError(503, "configuration_error"); }
+}
+
+export function newApiRelayKey(env: Env, reference?: string | null): string | undefined {
+  if (env.NEW_API_IDENTITY_MODE !== "per_user") return env.NEW_API_RELAY_KEY;
+  const keys = newApiRelayKeys(env);
+  // Never fall back from a missing per-user binding to a shared credential.
+  return reference && Object.hasOwn(keys, reference) ? keys[reference] : undefined;
+}
+
+export function newApiEndpoint(value: unknown): string {
+  try {
+    if (typeof value !== "string" || value.length > 2048 || value.trim() !== value) throw new Error();
+    const url = new URL(value);
+    // A server-owned HTTPS origin, never a client URL or an admin endpoint.
+    // Private DNS names are allowed for operator-managed relay deployments.
+    if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash
+      || url.pathname !== "/" || !url.hostname || (value !== url.origin && value !== `${url.origin}/`)) throw new Error();
+    return `${url.origin}/v1/chat/completions`;
+  } catch { throw new GatewayError(503, "configuration_error"); }
 }

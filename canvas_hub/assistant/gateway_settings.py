@@ -5,9 +5,9 @@ import time
 
 from ..agent_tools import TOOLS_BY_NAME
 from ..util import InvalidInput, NotFound
-from .gateway import GatewayError, allowance, base_url, enroll
+from .gateway import GATEWAY_CONSENT_VERSION, GatewayError, _request_id, allowance, base_url, enroll, gateway_consent_valid
 
-GATEWAY_FIELDS = {'gateway_mode', 'gateway_consent', 'gateway_token', 'gateway_expires_at',
+GATEWAY_FIELDS = {'gateway_mode', 'gateway_consent', 'gateway_consent_version', 'gateway_token', 'gateway_expires_at',
                   'gateway_session_id', 'gateway_user_id', 'gateway_tools', 'gateway_available_tools', 'gateway_models'}
 
 
@@ -36,6 +36,10 @@ def apply_gateway(cfg, data, previous):
         if type(data['gateway_consent']) is not bool:
             raise InvalidInput('gateway_consent must be true or false')
         cfg['gateway_consent'] = data['gateway_consent']
+        if data['gateway_consent']:
+            cfg['gateway_consent_version'] = GATEWAY_CONSENT_VERSION
+        else:
+            cfg.pop('gateway_consent_version', None)
     if 'gateway_tools' in data:
         chosen = data['gateway_tools']
         if (not isinstance(chosen, list) or len(chosen) > 128
@@ -48,7 +52,7 @@ class GatewaySettings:
     def _gateway_authorizer(self, cfg):
         # Pin the reviewed setup, but never keep using it after its authority is
         # withdrawn. Do not log or serialize this private request-local guard.
-        fields = ('provider', 'base_url', 'model', 'gateway_mode', 'gateway_consent',
+        fields = ('provider', 'base_url', 'model', 'gateway_mode', 'gateway_consent', 'gateway_consent_version',
                   'gateway_token', 'gateway_session_id')
         expected = {key: cfg.get(key) for key in fields}
         tools = frozenset(cfg.get('gateway_tools') or [])
@@ -59,7 +63,7 @@ class GatewaySettings:
             # lock here: metadata checks can hold it during network I/O, while
             # this guard also runs in the generation/cancellation event loop.
             current = next((p for p in self._load_store()['profiles'] if p['id'] == profile_id), None)
-            if (current is None or current.get('gateway_consent') is not True
+            if (current is None or not gateway_consent_valid(current)
                     or any(current.get(key) != value for key, value in expected.items())
                     or frozenset(current.get('gateway_tools') or []) != tools):
                 raise GatewayError('Gateway setup authorization changed. This run stopped; review settings before sending again. An in-flight request may already have used allowance.')
@@ -67,8 +71,9 @@ class GatewaySettings:
 
     @staticmethod
     def _gateway_public(cfg):
-        return {'gateway_mode': cfg.get('gateway_mode', 'mock'), 'gateway_consent': cfg.get('gateway_consent') is True,
+        return {'gateway_mode': cfg.get('gateway_mode', 'mock'), 'gateway_consent': gateway_consent_valid(cfg),
                 'gateway_session_saved': bool(cfg.get('gateway_token')),
+                'gateway_user_id': _request_id(cfg.get('gateway_user_id')),
                 'gateway_expires_at': cfg.get('gateway_expires_at'),
                 'gateway_tools': cfg.get('gateway_tools') or [],
                 'gateway_available_tools': cfg.get('gateway_available_tools') or [],
@@ -86,8 +91,16 @@ class GatewaySettings:
     @staticmethod
     def _gateway_catalog(prof, info, *, initial=False):
         available = [name for name in info['tools'] if name in TOOLS_BY_NAME]
+        models = []
+        for model in info['models']:
+            saved = {k: model[k] for k in ('id', 'min_output_tokens', 'max_output_tokens', 'accounting', 'reservation') if k in model}
+            if 'new_api' in model:
+                # The binding can change remotely. Save only the identity mode;
+                # show its status exclusively from a fresh allowance response.
+                saved['new_api'] = {'identity_mode': model['new_api']['identity_mode']}
+            models.append(saved)
         prof.update(gateway_available_tools=available,
-                    gateway_models=[{k: m[k] for k in ('id', 'min_output_tokens', 'max_output_tokens')} for m in info['models']])
+                    gateway_models=models)
         if initial:
             prof['gateway_tools'] = available
 

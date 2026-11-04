@@ -4,7 +4,7 @@ import { GatewayError } from "./errors";
 export function protocolError(): never { throw new GatewayError(502, "provider_protocol_error"); }
 
 /** A bounded, one-shot SSE reader: no reconnects, prompt logs, or error bodies. */
-export async function* readSse(body: ReadableStream<Uint8Array>, signal: AbortSignal, maxTotalBytes: number, maxEventBytes: number): AsyncGenerator<Record<string, unknown>> {
+export async function* readSse(body: ReadableStream<Uint8Array>, signal: AbortSignal, maxTotalBytes: number, maxEventBytes: number, format: "responses" | "chat" = "responses"): AsyncGenerator<Record<string, unknown>> {
   const reader = body.getReader();
   const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false });
   const encoder = new TextEncoder();
@@ -43,7 +43,14 @@ export async function* readSse(body: ReadableStream<Uint8Array>, signal: AbortSi
             else {
               let event: unknown;
               try { event = JSON.parse(raw); } catch { protocolError(); }
-              if (!record(event) || typeof event.type !== "string" || (eventName && eventName !== event.type)) protocolError();
+              if (!record(event)) protocolError();
+              if (format === "responses") {
+                if (typeof event.type !== "string" || (eventName && eventName !== event.type)) protocolError();
+              } else {
+                // Chat Completions has no typed Responses events. In particular,
+                // JSON must not impersonate the transport's [DONE] sentinel.
+                if (event.type !== undefined || (eventName && eventName !== "message")) protocolError();
+              }
               yield event;
             }
           }

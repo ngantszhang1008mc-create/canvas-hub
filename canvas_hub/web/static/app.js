@@ -1563,7 +1563,7 @@ VIEWS.assistant = async (main, parts, params) => {
       cx.compacted_through && cx.live_state_changed ? h('p', null, 'Local trackers or notes changed. The historical summary is retained; current state must be read again before using or updating it.') : null,
       h("p", null, `${cx.summary_requests || 0} summary requests · reported summary tokens: ${reportedTokens(cost, "input_tokens")} in / ${reportedTokens(cost, "output_tokens")} out. Total reported tokens: ${reportedTokens(total, "input_tokens")} in / ${reportedTokens(total, "output_tokens")} out; included cache read ${reportedTokens(total, "cache_read_input_tokens")}, cache write ${reportedTokens(total, "cache_creation_input_tokens")}; included reasoning ${reportedTokens(total, "reasoning_output_tokens")}.${total.unreported_requests ? ` Usage unavailable or incomplete for ${total.unreported_requests} request(s); these are not counted as zero cost.` : ""} Local telemetry does not determine free allowance or billed cost.`),
       h("p", null, "Usage from earlier interrupted requests may be absent from these totals."),
-      budget ? h("p", null, `Last request estimate: ${budget.estimated_tokens} input tokens; ${budget.response_reserved} reserved for output/reasoning. ${budget.request_max_tokens != null && budget.request_max_tokens !== budget.response_reserved ? `Provider output cap: ${budget.request_max_tokens}. ` : ""}Capacity: ${budget.capacity} (${budget.capacity_source}). Usable budget after 10% safety margin: ${budget.effective_capacity ?? Math.floor(budget.capacity * 0.9)}. Method: ${budget.estimator || "unreported"}.`) : null,
+      budget ? h("p", null, `Last request estimate: ${budget.estimated_tokens} input tokens; ${budget.response_reserved} reserved for output/reasoning. ${budget.request_max_tokens != null && budget.request_max_tokens !== budget.response_reserved ? `Provider output cap: ${budget.request_max_tokens}. ` : ""}${budget.limit_disabled ? "Application context limit disabled. Provider limits still apply." : `Capacity: ${budget.capacity} (${budget.capacity_source}). Usable budget after 10% safety margin: ${budget.effective_capacity ?? Math.floor(budget.capacity * 0.9)}.`} Method: ${budget.estimator || "unreported"}.`) : null,
       d.conversation.context_notice ? h("p", null, d.conversation.context_notice) : null);
     mount(status, busy ? h("span", { class: "working" }, st === "cancelling" ? "Stopping…" : "Working…")
       : st === "error" ? h("div", { class: "banner bad", style: "margin:0" }, h("div", { class: "b-body" }, h("div", { class: "b-title" }, "The assistant stopped"),
@@ -1813,27 +1813,35 @@ function assistantSettingsCard(cfg, prof) {
   extra.value = cur.extra_params && Object.keys(cur.extra_params).length ? JSON.stringify(cur.extra_params) : "";
   const extraField = h("label", { class: "field", style: "grid-column:1/-1" },
     h("span", null, "Extra request settings (JSON, optional — sent as-is to the provider)"), extra);
+  const limitDisabled = h("input", { type: "checkbox", checked: cur.context?.limit_disabled === true });
   const autoCompact = h("input", { type: "checkbox", checked: cur.context?.auto_compact === true });
   const capacity = h("input", { type: "number", min: 4096, max: 2000000, step: 1,
     value: cur.context?.capacity || "", placeholder: "Application safety default", "aria-label": "Context token capacity" });
+  const syncContextLimit = () => { capacity.disabled = autoCompact.disabled = limitDisabled.checked; };
+  limitDisabled.addEventListener("change", syncContextLimit);
+  syncContextLimit();
   const responseTokens = h("input", { type: "number", min: 512, max: 128000, step: 1,
     value: cur.context?.response_tokens || "", placeholder: "Automatic", "aria-label": "Reply token limit" });
   const responseField = h("label", null, "Reply token limit, including reasoning (optional)", responseTokens,
     h("p", { class: "tiny muted" }, "Reasoning and answer share this limit. Higher limits can use more API quota. Extra request max_tokens or max_completion_tokens takes precedence; clearing this field restores the application default."));
   const contextField = h("div", { class: "field", style: "grid-column:1/-1" },
+    h("label", null, limitDisabled, " Disable application context limit"),
+    h("p", { class: "tiny muted" }, "The provider or gateway still enforces its own limits and may reject oversized requests. Disabling the application limit pauses automatic compaction. Manual compaction and reply token limits remain available."),
     h("label", null, autoCompact, " Automatically compact older turns near the context budget"),
     h("label", null, "Context token capacity (optional)", capacity),
     responseField,
-    h("p", { class: "tiny muted" }, "Set this to a capacity verified for your model and endpoint. Exact supported endpoints use documented model limits; others use conservative application defaults. Compaction uses model quota; original history stays saved. Replies, reasoning and a 10% safety margin have reserved space."));
+    h("p", { class: "tiny muted" }, "When the application limit is enabled, set capacity to a value verified for your model and endpoint. Leave it blank to use documented model limits for supported endpoints or conservative application defaults otherwise. Replies, reasoning and a 10% safety margin have reserved space. Compaction uses model quota; original history stays saved."));
   const isGateway = () => presetSel.value === "allowance_gateway"
     || cfg.presets.some((p) => p.id === presetSel.value && p.provider === "allowance_gateway");
   const gatewayMode = h("select", { "aria-label": "Gateway mode" },
     h("option", { value: "mock", selected: cur.gateway_mode !== "production" }, "Mock — synthetic responses"),
-    h("option", { value: "production", selected: cur.gateway_mode === "production" }, "Production — OpenAI"));
+    h("option", { value: "production", selected: cur.gateway_mode === "production" }, "Production — operator-funded models"));
   const gatewayConsent = h("input", { type: "checkbox", checked: cur.gateway_consent === true });
   const invitation = h("input", { type: "password", autocomplete: "off", autocapitalize: "off", spellcheck: "false", maxlength: 128,
     placeholder: "Invitation from your gateway operator" });
   const gatewaySession = h("p", { class: "small", "aria-live": "polite" });
+  const gatewayAccount = h("p", { class: "small wrap-anywhere" });
+  const gatewayLink = h("p", { class: "small", "aria-live": "polite" });
   const gatewayToolSummary = h("summary");
   const gatewayToolNames = h("p", { class: "tiny wrap-anywhere" });
   const gatewayToolChoices = h("div", { class: "perm-list" });
@@ -1846,8 +1854,8 @@ function assistantSettingsCard(cfg, prof) {
   const gatewayField = h("div", { class: "field", style: "grid-column:1/-1", hidden: true },
     h("label", { class: "field" }, h("span", null, "Gateway mode (must match your operator's gateway)"), gatewayMode),
     h("label", { class: "check" }, gatewayConsent,
-      "I allow selected conversation and course excerpts to pass through this gateway. Production mode also sends them to OpenAI. Tools still run under local permissions. Canvas Hub will not switch to an API-key provider automatically."),
-    gatewaySession,
+      "I allow selected conversation and course excerpts to pass through this gateway. Production mode sends them to OpenAI or through the operator's New API relay to DeepSeek, according to the selected model. New API requests consume the full reserved allowance; token usage and the provider's actual bill may differ. Tools still run under local permissions. Canvas Hub will not switch to an API-key provider automatically."),
+    gatewaySession, gatewayAccount, gatewayLink,
     h("label", { class: "field" }, h("span", null, "Invitation"), invitation),
     h("div", { class: "row" }, enrollBtn, removeSessionBtn),
     h("p", { class: "tiny muted" }, "Connecting saves these settings and uses the invitation once. The invitation is cleared immediately and enrollment is never retried automatically."),
@@ -1867,6 +1875,14 @@ function assistantSettingsCard(cfg, prof) {
   };
   const microUsd = (value) => typeof value === "string" && /^\d{1,40}$/.test(value)
     ? `${value.replace(/^0+(?=\d)/, "")} micro-USD` : "not reported";
+  const relayStatus = (entry, fresh) => {
+    if (!entry?.new_api) return entry?.accounting === "full_reservation" ? "New API relay configuration not reported." : "";
+    const identity = entry.new_api.identity_mode === "per_user" ? "Per-user New API identity" : "Shared New API service identity";
+    if (!fresh) return `${identity} (saved). Check allowance to refresh its configuration.`;
+    const status = { shared: "shared service configured", bound: "account link configured",
+      unbound: "account link pending; contact your gateway operator", credential_missing: "relay credential missing; contact your gateway operator" }[entry.new_api.binding_status] || "configuration not reported";
+    return `${identity}: ${status}. Last reported configuration only; upstream access and quota have not been checked.`;
+  };
   const toolSummary = () => {
     gatewayToolSummary.textContent = `${gatewaySelectedTools.size} enabled tools · model limits`;
     gatewayToolNames.textContent = gatewaySelectedTools.size ? `Enabled: ${[...gatewaySelectedTools].join(", ")}` : "No tools enabled.";
@@ -1877,6 +1893,8 @@ function assistantSettingsCard(cfg, prof) {
     gatewaySession.textContent = saved
       ? `Gateway session saved · ${gatewayMode.value} mode · expires ${utcTime(gatewayProfile.gateway_expires_at)}${Number.isSafeInteger(gatewayProfile.gateway_expires_at) && gatewayProfile.gateway_expires_at <= Date.now() ? " (expired)" : ""}.${activeGatewaySession() ? " Remove the saved session before using another invitation." : ""}`
       : "No session saved for these gateway settings. Check the URL and mode, give consent, then connect with an invitation.";
+    const userId = matches ? reportedAllowance?.user_id || gatewayProfile.gateway_user_id : null;
+    gatewayAccount.textContent = userId ? `Canvas gateway account ID: ${userId}. Share this ID with your operator for account support.` : "";
     const available = matches && Array.isArray(gatewayProfile.gateway_available_tools) ? gatewayProfile.gateway_available_tools : [];
     gatewayDetails.hidden = !matches;
     toolSummary();
@@ -1892,13 +1910,19 @@ function assistantSettingsCard(cfg, prof) {
       return h("label", { class: "check" }, toggle, `${tool}${unavailable ? " (unavailable; uncheck to remove)" : ""}`);
     }) : h("p", { class: "tiny muted" }, "No available local tools reported. Connect or check allowance to refresh capabilities."));
     const models = matches ? reportedAllowance?.models || gatewayProfile.gateway_models || [] : [];
+    gatewayLink.textContent = relayStatus(models.find((entry) => entry.id === model.value.trim()), !!reportedAllowance && matches);
     mount(gatewayModels, h("strong", null, "Reported model output limits"), models.length ? models.map((entry) => h("div", null,
-      `${entry.id}: ${Number.isSafeInteger(entry.min_output_tokens) ? entry.min_output_tokens : "unknown"}–${Number.isSafeInteger(entry.max_output_tokens) ? entry.max_output_tokens : "unknown"} output tokens`))
+      h("div", null, `${entry.id}: ${Number.isSafeInteger(entry.min_output_tokens) ? entry.min_output_tokens : "unknown"}–${Number.isSafeInteger(entry.max_output_tokens) ? entry.max_output_tokens : "unknown"} output tokens`),
+      entry.reservation ? h("div", null, `Each model round reserves ${microUsd(entry.reservation.min_microusd)}–${microUsd(entry.reservation.max_microusd)}, depending on the output cap.`,
+        entry.accounting === "full_reservation" ? ` At the maximum output cap (${entry.max_output_tokens} tokens), the full conservative charge is ${microUsd(entry.reservation.max_microusd)}.` : "") : null,
+      entry.accounting === "full_reservation" && !entry.reservation ? h("div", null, "Full reservation charged per completed model round; reservation bounds not reported.") : null,
+      h("div", null, relayStatus(entry, !!reportedAllowance && matches))))
       : h("div", null, "No model limits reported yet."));
     if (!reportedAllowance || !matches) mount(gatewayAllowance);
     else mount(gatewayAllowance,
-      h("p", null, h("strong", null, `Reported allowance · ${reportedAllowance.mode || gatewayMode.value} mode`),
+      h("p", null, h("strong", null, `Canvas gateway allowance · ${reportedAllowance.mode || gatewayMode.value} mode`),
         reportedAllowance.gateway_paused ? " · gateway paused" : ""),
+      h("p", { class: "tiny muted" }, "These daily and monthly balances come from the Canvas gateway ledger. New API manages upstream channels, users and token quotas separately; its balance is not synchronized here."),
       h("div", { style: "overflow-x:auto" }, h("table", null,
         h("thead", null, h("tr", null, ["Period", "Remaining", "Held", "Spent", "Resets (UTC)"].map((title) => h("th", { scope: "col" }, title)))),
         h("tbody", null, ["daily", "monthly"].map((period) => {
@@ -1907,7 +1931,7 @@ function assistantSettingsCard(cfg, prof) {
             h("td", null, microUsd(amount.remaining_microusd)), h("td", null, microUsd(amount.held_microusd)),
             h("td", null, microUsd(amount.spent_microusd)), h("td", null, utcTime(amount.resets_at)));
         })))),
-      h("p", { class: "tiny muted" }, "1,000,000 micro-USD = US$1. Held amounts are reservations, not final charges. Checking allowance does not generate a model response."));
+      h("p", { class: "tiny muted" }, "1,000,000 micro-USD = US$1. Held amounts are reservations. Completed New API requests consume the full reservation as a conservative allowance charge, not a measured provider bill. Interrupted requests may keep their holds. Checking allowance does not generate a model response."));
     updateButtons();
   };
   const adoptProfile = (response, syncFields = true) => {
@@ -1961,6 +1985,7 @@ function assistantSettingsCard(cfg, prof) {
   const changeGateway = () => { gatewayConsent.checked = false; invitation.value = ""; reportedAllowance = null; mount(result); renderGateway(); };
   gatewayMode.addEventListener("change", changeGateway);
   base.addEventListener("input", () => { if (isGateway()) changeGateway(); });
+  model.addEventListener("input", () => { if (isGateway()) renderGateway(); });
   const result = h("div", { class: "small", "aria-live": "polite" });
   const save = async () => {
     if (!presetSel.value) { toast("Choose a provider first", true); return null; }
@@ -1983,7 +2008,7 @@ function assistantSettingsCard(cfg, prof) {
       try { extraParams = JSON.parse(extra.value); } catch { toast("Extra request settings must be valid JSON", true); return null; }
     }
     const body = { profile_id: cur.id, name: name.value, preset: presetSel.value, model: model.value };
-    body.context = { ...(cur.context || {}), auto_compact: autoCompact.checked };
+    body.context = { ...(cur.context || {}), auto_compact: autoCompact.checked, limit_disabled: limitDisabled.checked };
     if (capacity.value.trim()) body.context.capacity = Number(capacity.value); else delete body.context.capacity;
     if (!isCodex) {
       if (responseTokens.value.trim()) body.context.response_tokens = Number(responseTokens.value); else delete body.context.response_tokens;

@@ -8,7 +8,8 @@ profiles, file access, and tool execution stay in the local Python process.
 
 The selected conversation, system instructions, function descriptions, and any
 course excerpts included in messages or tool results pass through the gateway.
-The production OpenAI Responses adapter also sends them to OpenAI. A local
+The production OpenAI Responses adapter also sends them to OpenAI; the New API
+adapter sends them through the operator's relay to DeepSeek. A local
 client must disclose that transfer before first use and let the user choose
 which context to include. An allowance is not a promise that processing is local.
 
@@ -39,7 +40,7 @@ metadata; provider retention depends on the selected provider's configuration.
    dispatch. Reservation and settlement use the same authoritative ledger.
 4. Only a trusted provider adapter may report definitive usage or proof of no
    dispatch. A client closing its stream is never evidence of zero provider cost.
-5. A timeout, missing final usage, interrupted stream, or lost worker must retain
+5. A timeout, missing required final evidence, interrupted stream, or lost worker must retain
    the worst-case liability. Conservative accounting can consume more allowance
    than was actually billed; it must not consume less on an ambiguous outcome.
 6. A quota reset does not remove owner spending or idempotency history. Existing
@@ -54,6 +55,15 @@ this gateway. It depends on correct server model limits/rates and a provider
 honoring those limits. Before the production adapter receives paid traffic, use a dedicated provider
 project/key, configure the provider's available billing controls, and reconcile
 the ledger with provider billing. Treat invoice discrepancies as an incident.
+
+New API completions use an immutable `full_reservation` accounting mode. Success
+charges the entire reserved allowance without trusting the relay's token counts;
+failure or interruption retains the hold. This is not a strict invoice cap. The
+single-attempt and reviewed-price assumptions also depend on New API, its channel
+transport and every proxy honoring the configured restrictions. Disable relay
+and proxy retries, remapping and request overrides as described in the
+[New API guide](new-api-provider.md). A full hold cannot cover arbitrary hidden
+attempts, changed billing rates or direct upstream use outside this gateway.
 
 ## Authentication and abuse
 
@@ -74,6 +84,15 @@ app and browser, restrict access, and rotate it if exposed. A production service
 should put the administration surface behind a separately verified identity/MFA
 boundary and record individual operator identities. Local development tokens are
 not production credentials.
+
+New API relay credentials are server secrets, separate from both administration
+credentials and Canvas sessions. In per-user mode, the ledger stores an opaque
+reference; the secret map holds its token. A missing binding/key fails before
+dispatch and never falls back to a shared credential. Keep the associated
+ordinary New API account logins private too: users with dashboard access could
+mint their own tokens and bypass Canvas limits. Restrict the relay network path
+and token models/groups. New API quotas/revocation are additional controls, not
+automatic updates to Canvas balances or user/session revocation.
 
 Rate and concurrency limits reduce accidental or authenticated abuse. They do
 not replace edge denial-of-service protection. A single global ledger is useful
@@ -99,8 +118,10 @@ another paid key, change models/providers, or expand the owner's spending limit.
 - Review model pricing, context/output bounds, reasoning-token billing, caching,
   and all chargeable extras for each real adapter. Bind each request to the price
   snapshot used at reservation; never calculate settlement from client data.
-  The included adapter fixes the endpoint, Luna model, standard processing and
+  The OpenAI adapter fixes the endpoint, Luna model, standard processing and
   reasoning modes, and cache lifetime; see [its supported surface](openai-provider.md).
+  The New API adapter fixes its supported DeepSeek protocol and requires a
+  separately reviewed, pinned relay configuration; see [its controls](new-api-provider.md).
 - Preserve the Durable Object namespace and fixed ledger identity across releases.
   Changing identity or restoring old database state can forget spend and replay
   protection. Pause admission during recovery, reconcile provider totals, and

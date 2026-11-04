@@ -39,8 +39,24 @@ and administrative limits use bounded integer JSON numbers.
 `limit_microusd`, `spent_microusd`, `held_microusd`, `remaining_microusd`, and
 `resets_at`, plus `reset_timezone: "UTC"`, `gateway_paused`, `mode` (`mock` or
 `production`), approved `tools` names, and `models` (each with `id`,
-`min_output_tokens`, and `max_output_tokens`). This is a display snapshot; only a
+`min_output_tokens`, and `max_output_tokens`; New API models also advertise
+`accounting:"full_reservation"`). This is a display snapshot; only a
 successful server reservation authorizes another call.
+
+Updated servers identify the single allowance ledger with
+`allowance_source:"canvas_gateway"` and include the session owner's `user_id`.
+The client validates this UUID against the account saved at enrollment. Older
+servers may omit these additive metadata fields.
+
+New API model metadata also includes
+`new_api:{identity_mode:"shared"|"per_user",binding_status:"shared"|"bound"|"unbound"|"credential_missing"}`
+and `reservation:{min_microusd:"...",max_microusd:"..."}` at the model's advertised
+minimum/maximum output token caps. A bound/shared state describes local
+configuration only; it does not certify upstream availability or remaining New
+API quota. No key reference, credential or New API account ID is returned.
+Missing bindings/credentials block the local client's next model submission;
+the gateway independently enforces the same boundary. Display binding status
+from a current allowance response, never as live status from a cached catalog.
 
 The same response advertises the versioned wire limits:
 
@@ -60,11 +76,19 @@ Request status includes `request_id`, `model`, `status`, `created_at`,
 `dispatched`, `completed`, `failed_before_dispatch`, `uncertain`, or `overrun`.
 Uncertain requests retain a hold rather than pretending their actual bill is
 known; those holds also reduce later periods until authoritatively settled.
-Settled `usage` always includes `input_tokens` and `output_tokens`. The real
-adapter also reports `cached_input_tokens`, `cache_write_input_tokens`,
+Under authoritative accounting, settled `usage` includes `input_tokens` and
+`output_tokens`. The OpenAI adapter also reports `cached_input_tokens`, `cache_write_input_tokens`,
 `cache_write_30m_input_tokens`, `cache_write_12h_input_tokens`, and
 `reasoning_tokens`. Cache counts are subsets of input; reasoning is a subset of
 output. Do not add these details to the totals a second time.
+
+Completed New API request status and successful terminal records instead carry
+`accounting:"full_reservation"`, `usage:null`, and a `charged_microusd` exactly
+equal to `reserved_microusd`. This is a conservative allowance charge, not a
+reported provider bill. Token counts remain unknown; do not turn null into
+fabricated zero usage. A completed New API response can still authorize local
+tool processing after the usual finish/argument/permission checks. Interrupted
+requests retain unresolved holds in both accounting modes.
 
 ## Sending one model request
 
@@ -87,6 +111,15 @@ matching the user's explicit local setup. The gateway rejects missing or
 mismatched modes before reserving allowance or contacting a provider. Clients
 must require the advertised `mode_header` capability: an old server that ignores
 this header cannot safely preserve mock-only consent across configuration changes.
+
+New API model requests additionally require
+`X-Gateway-Consent-Version: 2`. The updated local client sends this only with
+its renewed disclosure covering the operator's relay, DeepSeek and full-reservation
+charges. Previously saved production consent is invalidated locally on upgrade;
+users must review and save it again. The gateway rejects a missing or outdated
+header before reservation and dispatch. The header is a protocol compatibility
+guard, not proof of a person's consent or a credential. New API relay keys,
+management credentials and per-user key references never belong in client requests.
 
 Each tool round is a separate model request and separate reservation. Send only
 the minimal context needed for that round. If a request cannot fit its worst-case
@@ -155,7 +188,8 @@ The existing integration seam is `canvas_hub/assistant/providers.py`:
 | `Stopped` | Cancel transport, retain the request key/status, treat usage as potentially charged |
 | `ProviderError` | Preserve quota/auth/ambiguous-result distinctions; disable automatic paid retries |
 
-The included Responses/Luna adapter uses reasoning effort `none` and this
+The included Responses/Luna adapter uses reasoning effort `none`, and the New API
+adapter fixes DeepSeek thinking to disabled; both use this
 stateless text/function contract. Provider-native continuation state is not a
 request field. Enabling broader reasoning modes may require a versioned
 continuation envelope and model-specific validation; it must not become an

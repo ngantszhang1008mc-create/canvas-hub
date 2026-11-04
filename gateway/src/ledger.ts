@@ -8,9 +8,10 @@ export type RequestStatus = "reserved" | "dispatched" | "completed" | "failed_be
 export interface UserRow {
   id: string; created_at: number; disabled: number; daily_limit: number; monthly_limit: number;
   day_generation: number; month_generation: number; held: string;
+  new_api_key_ref: string | null;
 }
 export interface SessionRow { id: string; user_id: string; token_hash: string; expires_at: number; revoked: number }
-interface InviteRow { id: string; token_hash: string; user_id: string | null; expires_at: number; revoked: number; used_at: number | null }
+interface InviteRow { id: string; token_hash: string; user_id: string | null; expires_at: number; revoked: number; used_at: number | null; new_api_key_ref: string | null }
 interface Control { held: string; lifetime_spent: string; paused: number; breached: number }
 export interface RequestRow {
   id: string; user_id: string; key_hash: string; body_hash: string; model: string;
@@ -20,6 +21,7 @@ export interface RequestRow {
   input_rate: number; output_rate: number; max_input: number; max_output: number;
   input_tokens: number | null; output_tokens: number | null; error_code: string | null;
   pricing_json: string | null; usage_details_json: string | null;
+  accounting_mode: "authoritative_usage" | "full_reservation";
 }
 
 const day = (now: number) => new Date(now).toISOString().slice(0, 10);
@@ -80,6 +82,11 @@ export class Ledger {
       const columns = this.all<{ name: string }>("PRAGMA table_info(requests)").map(r => r.name);
       if (!columns.includes("pricing_json")) this.exec("ALTER TABLE requests ADD COLUMN pricing_json TEXT");
       if (!columns.includes("usage_details_json")) this.exec("ALTER TABLE requests ADD COLUMN usage_details_json TEXT");
+      if (!columns.includes("accounting_mode")) this.exec("ALTER TABLE requests ADD COLUMN accounting_mode TEXT NOT NULL DEFAULT 'authoritative_usage'");
+      const userColumns = this.all<{ name: string }>("PRAGMA table_info(users)").map(r => r.name);
+      if (!userColumns.includes("new_api_key_ref")) this.exec("ALTER TABLE users ADD COLUMN new_api_key_ref TEXT");
+      const inviteColumns = this.all<{ name: string }>("PRAGMA table_info(invites)").map(r => r.name);
+      if (!inviteColumns.includes("new_api_key_ref")) this.exec("ALTER TABLE invites ADD COLUMN new_api_key_ref TEXT");
     });
   }
 
@@ -105,7 +112,8 @@ export class Ledger {
       scope, bucket, String(this.spent(scope, bucket) + amount));
   }
   private audit(now: number, action: string, target: string | null, values: Record<string, string | number | boolean | null> = {}): void {
-    // Callers supply only fixed action names, random IDs, booleans and amounts.
+    // Callers supply fixed action names, IDs, booleans, amounts and opaque
+    // relay-key references, never credentials or conversation data.
     this.exec("INSERT INTO audit(at,action,target_id,values_json) VALUES (?,?,?,?)", now, action, target, JSON.stringify(values));
   }
 
@@ -138,11 +146,15 @@ export class Ledger {
     return session;
   }
 
-  createInvite(id: string, hash: string, existingUser: string | null, expiresAt: number, now: number): void {
+  createInvite(id: string, hash: string, existingUser: string | null, expiresAt: number, now: number, relayKeyRef: string | null = null): void {
     this.tx(() => {
+      // Recovery changes session credentials only. A binding change requires
+      // the separate explicit administration route.
+      if (existingUser && relayKeyRef !== null) throw new GatewayError(400, "invalid_invite_options");
       if (existingUser && this.user(existingUser).disabled) throw new GatewayError(409, "user_disabled");
-      this.exec("INSERT INTO invites(id,token_hash,user_id,expires_at) VALUES (?,?,?,?)", id, hash, existingUser, expiresAt);
-      this.audit(now, "invite_created", id, { user_id: existingUser, expires_at: expiresAt });
+      this.exec("INSERT INTO invites(id,token_hash,user_id,expires_at,new_api_key_ref) VALUES (?,?,?,?,?)", id, hash, existingUser, expiresAt, relayKeyRef);
+      this.audit(now, "invite_created", id, { user_id: existingUser, expires_at: expiresAt,
+        ...(relayKeyRef !== null ? { relay_key_ref: relayKeyRef } : {}) });
     });
   }
 
@@ -156,7 +168,8 @@ export class Ledger {
       } else {
         const count = this.one<{ count: number }>("SELECT COUNT(*) AS count FROM users")!.count;
         if (count >= policy.max_users) throw new GatewayError(429, "enrollment_full");
-        this.exec("INSERT INTO users(id,created_at,daily_limit,monthly_limit) VALUES (?,?,?,?)", userId, now, policy.user_daily_microusd, policy.user_monthly_microusd);
+        this.exec("INSERT INTO users(id,created_at,daily_limit,monthly_limit,new_api_key_ref) VALUES (?,?,?,?,?)",
+          userId, now, policy.user_daily_microusd, policy.user_monthly_microusd, invite.new_api_key_ref);
       }
       const expiresAt = now + policy.session_ttl_seconds * 1000;
       this.exec("UPDATE invites SET used_at=? WHERE id=?", now, invite.id);
@@ -200,15 +213,26 @@ export class Ledger {
       this.exec("UPDATE users SET held=? WHERE id=?", String(userHeld + cost), user.id);
       this.exec("UPDATE control SET held=? WHERE id=1", String(globalHeld + cost));
       this.exec(`INSERT INTO requests(id,user_id,key_hash,body_hash,model,status,created_at,deadline_at,reserve_microusd,
-        day_bucket,month_bucket,global_month,input_rate,output_rate,max_input,max_output,pricing_json)
-        VALUES (?,?,?,?,?,'reserved',?,?,?,?,?,?,?,?,?,?,?)`,
+        day_bucket,month_bucket,global_month,input_rate,output_rate,max_input,max_output,pricing_json,accounting_mode)
+        VALUES (?,?,?,?,?,'reserved',?,?,?,?,?,?,?,?,?,?,?,?)`,
       id, user.id, keyHash, bodyHash, modelName, now, now + policy.request_timeout_ms, String(cost), dayBucket, monthBucket, globalMonth,
-      pricing.short.input, pricing.short.output, model.max_input_tokens, maxOutput, JSON.stringify(pricing));
+      pricing.short.input, pricing.short.output, model.max_input_tokens, maxOutput, JSON.stringify(pricing),
+      model.provider === "new_api" ? "full_reservation" : "authoritative_usage");
       return { row: this.request(id)!, replay: false };
     });
   }
 
   request(id: string): RequestRow | undefined { return this.one<RequestRow>("SELECT * FROM requests WHERE id=?", id); }
+
+  relayKeyRef(userId: string): string | null { return this.user(userId).new_api_key_ref; }
+
+  bindRelayKey(userId: string, reference: string | null, now: number): void {
+    this.tx(() => {
+      if (this.user(userId).disabled && reference !== null) throw new GatewayError(409, "user_disabled");
+      this.exec("UPDATE users SET new_api_key_ref=? WHERE id=?", reference, userId);
+      this.audit(now, "new_api_binding_changed", userId, { relay_key_ref: reference });
+    });
+  }
 
   markDispatched(id: string, session: SessionRow, now: number): void {
     this.tx(() => {
@@ -258,6 +282,29 @@ export class Ledger {
     return this.tx(() => {
       const r = this.request(id)!;
       if (!held(r.status)) return r;
+      const accounting = completion?.accounting ?? "authoritative_usage";
+      if (accounting !== r.accounting_mode || !["stop", "tool_calls", "length"].includes(completion?.finish_reason)) {
+        this.uncertain(id, "accounting_mode_invalid", now, true);
+        return this.request(id)!;
+      }
+      if (r.accounting_mode === "full_reservation") {
+        // New API may synthesize usage and hide charged attempts. Its final
+        // token counts are never grounds to release a monetary reservation.
+        // Successful text/tool output consumes the maximum allowance charge;
+        // this is explicitly not a claim about the upstream invoice.
+        if (completion.usage !== null || completion.bound_violation) {
+          this.uncertain(id, "provider_bound_exceeded", now, true);
+          return this.request(id)!;
+        }
+        const cost = BigInt(r.reserve_microusd);
+        this.releaseHold(r);
+        this.addSpent(`user-day:${r.user_id}`, r.day_bucket, cost);
+        this.addSpent(`user-month:${r.user_id}`, r.month_bucket, cost);
+        this.addSpent("global-month", r.global_month, cost);
+        this.exec("UPDATE control SET lifetime_spent=? WHERE id=1", String(BigInt(this.control().lifetime_spent) + cost));
+        this.exec("UPDATE requests SET status='completed',charged_microusd=?,completed_at=?,error_code=NULL WHERE id=?", String(cost), now, id);
+        return this.request(id)!;
+      }
       const usage = completion?.usage;
       const counts = [usage?.cached_input_tokens ?? 0, usage?.cache_write_input_tokens ?? 0,
         usage?.cache_write_30m_input_tokens ?? 0, usage?.cache_write_12h_input_tokens ?? 0, usage?.reasoning_tokens ?? 0];
@@ -313,8 +360,10 @@ export class Ledger {
     const monthlyReset = Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 1);
     const window = (limit: number, spent: bigint, resetsAt: number) => ({ limit_microusd: String(limit), spent_microusd: String(spent), held_microusd: String(userHeld), remaining_microusd: String(nonnegative(BigInt(limit) - spent - userHeld)), resets_at: resetsAt });
     const c = this.control();
-    return { user_id: u.id, mode: policy.mode, tools: Object.keys(policy.tools), capabilities: { protocol_version: 1, mode_header: "X-Gateway-Mode", max_tools: MAX_TOOLS, max_tool_calls_per_response: MAX_TOOL_CALLS, max_messages: 128, max_body_bytes: policy.max_body_bytes }, reset_timezone: "UTC", daily: window(u.daily_limit, daySpent, dailyReset), monthly: window(u.monthly_limit, monthSpent, monthlyReset),
-      gateway_paused: Boolean(c.paused || c.breached), models: Object.entries(policy.models).map(([id, m]) => ({ id, min_output_tokens: m.provider === "openai_responses" ? 16 : 1, max_output_tokens: m.max_output_tokens })) };
+    return { user_id: u.id, allowance_source: "canvas_gateway", mode: policy.mode, tools: Object.keys(policy.tools), capabilities: { protocol_version: 1, mode_header: "X-Gateway-Mode", max_tools: MAX_TOOLS, max_tool_calls_per_response: MAX_TOOL_CALLS, max_messages: 128, max_body_bytes: policy.max_body_bytes }, reset_timezone: "UTC", daily: window(u.daily_limit, daySpent, dailyReset), monthly: window(u.monthly_limit, monthSpent, monthlyReset),
+      gateway_paused: Boolean(c.paused || c.breached), models: Object.entries(policy.models).map(([id, m]) => ({ id, min_output_tokens: m.provider === "openai_responses" ? 16 : 1, max_output_tokens: m.max_output_tokens,
+        ...(m.provider === "new_api" ? { accounting: "full_reservation",
+          reservation: { min_microusd: String(reservePrice(m, 1)), max_microusd: String(reservePrice(m, m.max_output_tokens)) } } : {}) })) };
   }
 
   status(policy: Policy, now: number) {
@@ -366,5 +415,6 @@ export class Ledger {
 export function publicRequest(row: RequestRow) {
   return { request_id: row.id, model: row.model, status: row.status, created_at: row.created_at, deadline_at: row.deadline_at,
     reserved_microusd: row.reserve_microusd, charged_microusd: row.charged_microusd, error: row.error_code,
+    ...(row.accounting_mode === "full_reservation" ? { accounting: "full_reservation" } : {}),
     usage: row.input_tokens === null ? null : { input_tokens: row.input_tokens, output_tokens: row.output_tokens, ...(row.usage_details_json ? JSON.parse(row.usage_details_json) : {}) } };
 }
