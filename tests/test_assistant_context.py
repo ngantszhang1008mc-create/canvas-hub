@@ -333,3 +333,111 @@ def test_compaction_control_keeps_chat_and_discloses_usage(hub, account, monkeyp
         page.screenshot(path=str(tmp_path / 'tracker-budget-380.png'), full_page=True)
         browser.close()
     assert not errors
+
+
+def test_context_limit_can_be_disabled_and_reenabled(hub, account, monkeypatch):
+    svc, cid = conversation(hub, account)
+    assert not Policy.for_config(svc._load()).limit_disabled
+    calls, configs = mock_provider(monkeypatch)
+    svc.update_config({"context": {"capacity": 4096, "response_tokens": 8192,
+                                   "limit_disabled": True, "auto_compact": True}})
+    svc = AssistantService(hub, HubAPI(hub))
+    assert svc.public_config()["profiles"][0]["context"]["limit_disabled"] is True
+    svc.send(account["id"], "Continue", cid)
+    svc.wait(cid, 5)
+    assert len(calls) == 1 and calls[0][0] != SUMMARY_SYSTEM
+    result = svc.get_conversation(account["id"], cid)
+    assert result["conversation"]["run_state"] == "idle", result
+    assert result["context"]["budget"]["limit_disabled"] is True
+    assert configs[0]["_response_tokens"] == 8192
+    # Explicit compaction still works even above the saved input capacity.
+    before = svc._transcript(cid)
+    svc.compact(account["id"], cid)
+    svc.wait(cid, 5)
+    assert len(calls) == 2 and calls[-1][0] == SUMMARY_SYSTEM
+    assert svc._transcript(cid) == before
+    assert svc.get_conversation(account["id"], cid)["context"]["last_summary_status"] == "completed"
+    calls.clear()
+    svc.update_config({"context": {"capacity": 4096}})
+    svc.send(account["id"], "Continue again", cid)
+    svc.wait(cid, 5)
+    assert not calls
+    assert "Context budget exceeded" in svc.get_conversation(account["id"], cid)["conversation"]["run_error"]
+    with pytest.raises(InvalidInput):
+        svc.update_config({"context": {"limit_disabled": "true"}})
+    with pytest.raises(InvalidInput, match="leave space for input"):
+        svc.update_config({"context": {"capacity": 4096, "response_tokens": 8192, "limit_disabled": False}})
+
+
+def test_disabled_context_limit_keeps_estimates_without_enforcing_category_or_total_budgets():
+    cfg = {"provider": "codex", "context": {"capacity": 4096, "response_tokens": 512,
+           "history_tokens": 512, "tool_tokens": 512, "document_tokens": 512}}
+    transcript = [{"role": "user", "sent_text": "x" * 12000},
+                  {"role": "tool", "results": [
+                      {"id": "tool", "name": "list_components", "content": "y" * 12000},
+                      {"id": "doc", "name": "read_context_source", "content": "z" * 12000}]}]
+    enabled = Policy.for_config(cfg).measure(cfg, "system", transcript, [])
+    assert enabled["over_budget"] and enabled["near_limit"]
+    assert all(used > enabled["limits"][key] for key, used in enabled["used"].items())
+    cfg["context"]["limit_disabled"] = True
+    disabled = Policy.for_config(cfg).measure(cfg, "system", transcript, [])
+    assert disabled["limit_disabled"] and not disabled["over_budget"] and not disabled["near_limit"]
+    assert disabled["estimated_tokens"] == enabled["estimated_tokens"]
+    assert disabled["response_reserved"] == enabled["response_reserved"]
+
+
+@pytest.mark.browser
+def test_context_limit_settings_round_trip_and_dispatch(hub, account, monkeypatch):
+    from playwright.sync_api import expect, sync_playwright
+    from .test_components_ui import serve
+    _, cid = conversation(hub, account)
+    calls, _ = mock_provider(monkeypatch)
+    with serve(hub, []) as (base, token, api), sync_playwright() as p:
+        browser = p.chromium.launch()
+        try:
+            page = browser.new_page()
+            errors = []
+            page.on("pageerror", lambda e: errors.append(str(e)))
+            page.goto(f"{base}/?token={token}")
+            pid = api.assistant.public_config()["active_profile"]
+            page.goto(f"{base}/#/assistant/settings?p={pid}")
+            toggle = page.get_by_label("Disable application context limit", exact=True)
+            capacity = page.get_by_label("Context token capacity", exact=True)
+            auto = page.get_by_label("Automatically compact older turns near the context budget", exact=True)
+            expect(toggle).not_to_be_checked()
+            capacity.fill("4096")
+            auto.check()
+            toggle.check()
+            expect(capacity).to_be_disabled()
+            expect(auto).to_be_disabled()
+            expect(page.get_by_label("Reply token limit", exact=True)).to_be_enabled()
+            expect(page.get_by_text("The provider or gateway still enforces", exact=False)).to_be_visible()
+            with page.expect_response(lambda r: r.url == base + "/api/assistant/config" and r.request.method == "PUT") as saved:
+                page.get_by_role("button", name="Save", exact=True).click()
+            assert saved.value.status == 200
+            page.reload()
+            expect(toggle).to_be_checked()
+            expect(capacity).to_have_value("4096")
+            expect(auto).to_be_checked()
+            api.assistant.send(account["id"], "Continue after disabling the limit", cid)
+            api.assistant.wait(cid, 5)
+            assert len(calls) == 1 and calls[0][0] != SUMMARY_SYSTEM
+            page.goto(f"{base}/#/assistant/{cid}")
+            page.get_by_text("Context & usage", exact=True).click()
+            expect(page.get_by_text("Application context limit disabled. Provider limits still apply.", exact=False)).to_be_visible()
+            expect(page.get_by_text("Usable budget after 10%", exact=False)).to_have_count(0)
+            page.goto(f"{base}/#/assistant/settings?p={pid}")
+            toggle.uncheck()
+            expect(capacity).to_be_enabled()
+            expect(auto).to_be_enabled()
+            capacity.fill("128000")
+            with page.expect_response(lambda r: r.url == base + "/api/assistant/config" and r.request.method == "PUT") as saved:
+                page.get_by_role("button", name="Save", exact=True).click()
+            assert saved.value.status == 200
+            page.reload()
+            expect(toggle).not_to_be_checked()
+            expect(capacity).to_have_value("128000")
+            assert api.assistant._load(pid)["context"] == {"capacity": 128000, "auto_compact": True, "limit_disabled": False}
+            assert not errors
+        finally:
+            browser.close()

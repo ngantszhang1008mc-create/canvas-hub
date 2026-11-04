@@ -131,15 +131,15 @@ def validate_settings(value):
               "history_tokens": (512, 1500000), "tool_tokens": (512, 1500000),
               "document_tokens": (512, 1500000), "summary_tokens": (512, 16000),
               "keep_turns": (1, 20), "auto_threshold_percent": (50, 95)}
-    if set(value) - (set(ranges) | {"auto_compact"}):
+    if set(value) - (set(ranges) | {"auto_compact", "limit_disabled"}):
         raise InvalidInput("unknown context setting")
     for key, val in value.items():
-        if key == "auto_compact":
+        if key in ("auto_compact", "limit_disabled"):
             if not isinstance(val, bool):
-                raise InvalidInput("auto_compact must be true or false")
+                raise InvalidInput(f"{key} must be true or false")
         elif type(val) is not int or not ranges[key][0] <= val <= ranges[key][1]:
             raise InvalidInput(f"context {key} must be an integer from {ranges[key][0]} to {ranges[key][1]}")
-    if value.get("response_tokens", 512) >= value.get("capacity", 2000000):
+    if not value.get("limit_disabled", False) and value.get("response_tokens", 512) >= value.get("capacity", 2000000):
         raise InvalidInput("response_tokens must leave space for input")
     return value
 
@@ -156,6 +156,7 @@ class Policy:
     auto_compact: bool
     threshold: float
     capacity_source: str
+    limit_disabled: bool = False
 
     @classmethod
     def for_config(cls, cfg):
@@ -189,7 +190,8 @@ class Policy:
                    settings.get("history_tokens"), settings.get("tool_tokens"), settings.get("document_tokens"),
                    summary, settings.get("keep_turns", 2),
                    settings.get("auto_compact", False), settings.get("auto_threshold_percent", 80) / 100,
-                   "configured" if "capacity" in settings else capability[1] if capability else "application fallback; verify endpoint capacity")
+                   "configured" if "capacity" in settings else capability[1] if capability else "application fallback; verify endpoint capacity",
+                   settings.get("limit_disabled", False))
 
     def measure(self, cfg, system, transcript, tools):
         provider = cfg.get("provider")
@@ -250,7 +252,8 @@ class Policy:
                     "model_calibrated": False,
                     "message_representation": "decoded_text_with_structural_framing" if message_format else "serialized_projection",
                     "message_format": message_format, "network_token_count": False},
-                "used": used, "limits": limits, "available": available, "over_budget": over, "near_limit": near}
+                "used": used, "limits": limits, "available": available, "limit_disabled": self.limit_disabled,
+                "over_budget": over and not self.limit_disabled, "near_limit": near and not self.limit_disabled}
 
 
 def neutral_message(m):
@@ -361,6 +364,7 @@ def context_error(report):
                          + (f"Exceeded category budgets: {exceeded}. " if exceeded else "")
                          + "Original history and completed actions are saved; no oversized request was sent. "
                          "Retry answer cannot run tools and tool selection does not remove saved results. "
-                         "Verify this setup's capacity. A new message in this chat retains the same history; "
+                         "Adjust this setup's context capacity or disable the application context limit in Assistant settings; "
+                         "provider limits still apply. A new message in this chat retains the same history; "
                          "choose explicit manual compaction or start a focused chat with tracker IDs and check current state first. "
                          "Do not repeat completed changes.")

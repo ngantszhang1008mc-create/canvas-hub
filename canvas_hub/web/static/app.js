@@ -1563,7 +1563,7 @@ VIEWS.assistant = async (main, parts, params) => {
       cx.compacted_through && cx.live_state_changed ? h('p', null, 'Local trackers or notes changed. The historical summary is retained; current state must be read again before using or updating it.') : null,
       h("p", null, `${cx.summary_requests || 0} summary requests · reported summary tokens: ${reportedTokens(cost, "input_tokens")} in / ${reportedTokens(cost, "output_tokens")} out. Total reported tokens: ${reportedTokens(total, "input_tokens")} in / ${reportedTokens(total, "output_tokens")} out; included cache read ${reportedTokens(total, "cache_read_input_tokens")}, cache write ${reportedTokens(total, "cache_creation_input_tokens")}; included reasoning ${reportedTokens(total, "reasoning_output_tokens")}.${total.unreported_requests ? ` Usage unavailable or incomplete for ${total.unreported_requests} request(s); these are not counted as zero cost.` : ""} Local telemetry does not determine free allowance or billed cost.`),
       h("p", null, "Usage from earlier interrupted requests may be absent from these totals."),
-      budget ? h("p", null, `Last request estimate: ${budget.estimated_tokens} input tokens; ${budget.response_reserved} reserved for output/reasoning. ${budget.request_max_tokens != null && budget.request_max_tokens !== budget.response_reserved ? `Provider output cap: ${budget.request_max_tokens}. ` : ""}Capacity: ${budget.capacity} (${budget.capacity_source}). Usable budget after 10% safety margin: ${budget.effective_capacity ?? Math.floor(budget.capacity * 0.9)}. Method: ${budget.estimator || "unreported"}.`) : null,
+      budget ? h("p", null, `Last request estimate: ${budget.estimated_tokens} input tokens; ${budget.response_reserved} reserved for output/reasoning. ${budget.request_max_tokens != null && budget.request_max_tokens !== budget.response_reserved ? `Provider output cap: ${budget.request_max_tokens}. ` : ""}${budget.limit_disabled ? "Application context limit disabled. Provider limits still apply." : `Capacity: ${budget.capacity} (${budget.capacity_source}). Usable budget after 10% safety margin: ${budget.effective_capacity ?? Math.floor(budget.capacity * 0.9)}.`} Method: ${budget.estimator || "unreported"}.`) : null,
       d.conversation.context_notice ? h("p", null, d.conversation.context_notice) : null);
     mount(status, busy ? h("span", { class: "working" }, st === "cancelling" ? "Stopping…" : "Working…")
       : st === "error" ? h("div", { class: "banner bad", style: "margin:0" }, h("div", { class: "b-body" }, h("div", { class: "b-title" }, "The assistant stopped"),
@@ -1813,18 +1813,24 @@ function assistantSettingsCard(cfg, prof) {
   extra.value = cur.extra_params && Object.keys(cur.extra_params).length ? JSON.stringify(cur.extra_params) : "";
   const extraField = h("label", { class: "field", style: "grid-column:1/-1" },
     h("span", null, "Extra request settings (JSON, optional — sent as-is to the provider)"), extra);
+  const limitDisabled = h("input", { type: "checkbox", checked: cur.context?.limit_disabled === true });
   const autoCompact = h("input", { type: "checkbox", checked: cur.context?.auto_compact === true });
   const capacity = h("input", { type: "number", min: 4096, max: 2000000, step: 1,
     value: cur.context?.capacity || "", placeholder: "Application safety default", "aria-label": "Context token capacity" });
+  const syncContextLimit = () => { capacity.disabled = autoCompact.disabled = limitDisabled.checked; };
+  limitDisabled.addEventListener("change", syncContextLimit);
+  syncContextLimit();
   const responseTokens = h("input", { type: "number", min: 512, max: 128000, step: 1,
     value: cur.context?.response_tokens || "", placeholder: "Automatic", "aria-label": "Reply token limit" });
   const responseField = h("label", null, "Reply token limit, including reasoning (optional)", responseTokens,
     h("p", { class: "tiny muted" }, "Reasoning and answer share this limit. Higher limits can use more API quota. Extra request max_tokens or max_completion_tokens takes precedence; clearing this field restores the application default."));
   const contextField = h("div", { class: "field", style: "grid-column:1/-1" },
+    h("label", null, limitDisabled, " Disable application context limit"),
+    h("p", { class: "tiny muted" }, "The provider or gateway still enforces its own limits and may reject oversized requests. Disabling the application limit pauses automatic compaction. Manual compaction and reply token limits remain available."),
     h("label", null, autoCompact, " Automatically compact older turns near the context budget"),
     h("label", null, "Context token capacity (optional)", capacity),
     responseField,
-    h("p", { class: "tiny muted" }, "Set this to a capacity verified for your model and endpoint. Exact supported endpoints use documented model limits; others use conservative application defaults. Compaction uses model quota; original history stays saved. Replies, reasoning and a 10% safety margin have reserved space."));
+    h("p", { class: "tiny muted" }, "When the application limit is enabled, set capacity to a value verified for your model and endpoint. Leave it blank to use documented model limits for supported endpoints or conservative application defaults otherwise. Replies, reasoning and a 10% safety margin have reserved space. Compaction uses model quota; original history stays saved."));
   const isGateway = () => presetSel.value === "allowance_gateway"
     || cfg.presets.some((p) => p.id === presetSel.value && p.provider === "allowance_gateway");
   const gatewayMode = h("select", { "aria-label": "Gateway mode" },
@@ -2002,7 +2008,7 @@ function assistantSettingsCard(cfg, prof) {
       try { extraParams = JSON.parse(extra.value); } catch { toast("Extra request settings must be valid JSON", true); return null; }
     }
     const body = { profile_id: cur.id, name: name.value, preset: presetSel.value, model: model.value };
-    body.context = { ...(cur.context || {}), auto_compact: autoCompact.checked };
+    body.context = { ...(cur.context || {}), auto_compact: autoCompact.checked, limit_disabled: limitDisabled.checked };
     if (capacity.value.trim()) body.context.capacity = Number(capacity.value); else delete body.context.capacity;
     if (!isCodex) {
       if (responseTokens.value.trim()) body.context.response_tokens = Number(responseTokens.value); else delete body.context.response_tokens;

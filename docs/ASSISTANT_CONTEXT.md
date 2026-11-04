@@ -3,7 +3,8 @@
 The Assistant keeps original messages append-only and builds a separate provider
 projection. In Chat, **Context & usage → Compact conversation** summarizes older
 complete turns using the selected setup. Provider settings offer automatic
-compaction (default off) and an optional verified context capacity. Both actions
+compaction (default off), an optional verified context capacity, and an option to
+disable the application context limit. Both compaction actions
 consume model quota. Summary usage is stored separately and included in the
 conversation's recorded-response totals, including cache counters when supplied.
 Unknown usage after errors, cancellation or restart is labelled unknown. New
@@ -18,7 +19,7 @@ references and a deterministic tool execution manifest. Native reasoning and too
 pairs in retained turns are replayed unchanged. The checkpoint and usage survive
 restart. Failed, invalid, non-reducing, cancelled or concurrently stale summaries
 do not replace context. Automatic compaction makes at most one summary attempt
-per user run, with SDK retries/fallbacks disabled. An oversized active turn or
+per user run, with SDK retries/fallbacks disabled. With the application limit enabled, an oversized active turn or
 history too large for a single summary stops with an actionable budget error;
 essential context is not silently dropped and actions are not re-executed.
 
@@ -30,12 +31,24 @@ configuration, not forwarded as provider request settings.
 | Field | Default |
 | --- | --- |
 | `capacity` | Exact supported endpoint/model metadata when known; otherwise application fallback: Anthropic/Codex 64,000, compatible endpoints 32,768 |
+| `limit_disabled` | `false`; `true` disables application context-budget enforcement and automatic budget-based compaction |
 | `response_tokens` | Anthropic 6,000 at resolved capacity ≤64,000, otherwise 16,000; verified DeepSeek thinking up to 16,384; others 4,096. Explicit output settings take precedence. |
 | `auto_compact` | `false` (manual compaction remains available) |
 | `auto_threshold_percent` | `80` |
 | `keep_turns` | `2` |
 | `summary_tokens` | `2000` |
 | `history_tokens`, `tool_tokens`, `document_tokens` | Share remaining input space; an explicitly configured category ceiling still applies |
+
+In **Assistant settings**, each setup can change **Context token capacity** or
+select **Disable application context limit**. Existing installations keep their
+previous limits when `limit_disabled` is absent. Disabling bypasses the aggregate
+and category context checks, including the summary request's input-capacity check;
+automatic compaction is paused. Saved capacity and compaction preferences are kept
+for re-enabling the limit. Manual compaction, reply/summary output limits, usage
+tracking and original saved history remain available. Providers and gateways still
+enforce their own context and request limits and may reject oversized requests.
+Context & usage identifies requests sent with the application limit disabled;
+token estimates remain informational and do not guarantee provider acceptance.
 
 An explicit `capacity` always overrides defaults. The exact models
 `deepseek-flash` and `deepseek-v4-pro` on `https://api.deepseek.com` (optionally
@@ -96,7 +109,7 @@ or paid counting call), and Context & usage displays the method. Existing usage
 observations can identify overestimation but do not justify applying one model's
 divisors to unrelated models.
 
-Errors and Context & usage show the effective budget after headroom. For example,
+With the application limit enabled, errors and Context & usage show the effective budget after headroom. For example,
 64,000 capacity leaves 57,600 including the output reserve; an estimated 58,000
 request exceeds it by 400. The 6,400 safety margin is retained. Explicit category
 ceilings are reported separately. Starting another message keeps the same history;
