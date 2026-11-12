@@ -11,6 +11,7 @@ import sys
 from importlib import resources as importlib_resources
 from pathlib import Path
 from contextlib import asynccontextmanager
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
@@ -43,23 +44,22 @@ def mcp_command() -> list[str]:
 
 
 def create_app(api: HubAPI, *, token: str, port: int) -> FastAPI:
-    from ..services.site_connection import SiteConnections
-    site_connections = SiteConnections(api.hub)
+    from ..services.link_inspection import LinkInspector
+    inspector = getattr(api, "link_inspector", None) or LinkInspector(api.hub)
+    api.link_inspector = inspector
 
     @asynccontextmanager
     async def lifespan(_app):
         try:
             yield
         finally:
-            await run_in_threadpool(site_connections.close)
+            await run_in_threadpool(inspector.stop)
 
     app = FastAPI(title="Canvas Hub", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
     from ..services.source_analysis import SourceAnalysis
     source_analysis = SourceAnalysis(api)
     app.state.source_analysis = source_analysis
-    login_detection = source_analysis.login_detection
-    app.state.login_detection = login_detection
-    app.state.site_connections = site_connections
+    app.state.link_inspector = inspector
     hosts = allowed_hosts(port)
     own_origins = {f"http://{h}" for h in hosts}
 
@@ -399,24 +399,92 @@ def create_app(api: HubAPI, *, token: str, port: int) -> FastAPI:
         b = await body(request)
         return api.delete_account_data(aid, b.get("confirm", ""))
 
-    # External adapter approval is user-only: no Agent tool enables or expands scope.
+    # ---- external links: inspection, sign-in, saved pages -------------------------------
     def external(aid):
         api.hub.identity.get_account(aid)
         return api.hub.external_sources
+
+    def with_inspection(aid, sources, course_id=None, item_id=None):
+        views = {s["id"]: s for s in inspector.sources(aid, course_id, item_id)}
+        for source in sources:
+            view = views.get(source["id"])
+            source["inspection"] = view["inspection"] if view else inspector.view(source)
+            source["earlier"] = view["earlier"] if view else None
+            source["course_title"] = view["course_title"] if view else None
+            source["host"] = urlsplit(source["url"]).netloc
+        return sources
 
     @app.get("/api/accounts/{aid}/external-sources")
     def external_list(aid: int, course_id: str | None = None, item_id: int | None = None):
         from ..external_inspection import status
         service = external(aid)
         service.backfill(aid)
-        sources = service.list(aid, course_id, item_id)
-        for source in sources:
-            if (source.get('request') or {}).get('status') == 'declined':
-                source_analysis.check_failed_source(aid, source['id'])
-            source['login_check'] = source_analysis.login_status(aid, source)
-            source['connection_state'] = site_connections.status(aid, source['id'])['state']
-        return {"sources": sources, "inspection": status()}
+        return {"sources": with_inspection(aid, service.list(aid, course_id, item_id), course_id, item_id),
+                "summary": inspector.summary(aid), "analysis": status()}
 
+    @app.post("/api/accounts/{aid}/external-sources")
+    async def external_add(aid: int, request: Request):
+        b = await body(request)
+        service = external(aid)
+        sid = service.register(aid, b.get("url"), course_id=b.get("course_id") or None, title=(b.get("title") or "").strip() or None)
+        return with_inspection(aid, [service.get(aid, sid)])[0]
+
+    @app.get("/api/accounts/{aid}/link-inspection")
+    def link_overview(aid: int):
+        external(aid).backfill(aid)
+        return {"summary": inspector.summary(aid), "sources": inspector.sources(aid)}
+
+    @app.get("/api/accounts/{aid}/link-inspection/summary")
+    def link_summary(aid: int):
+        return inspector.summary(aid)
+
+    @app.post("/api/accounts/{aid}/link-inspection/inspect")
+    async def link_inspect(aid: int, request: Request):
+        b = await body(request)
+        result = inspector.inspect(aid, b.get("source_ids"), course_id=b.get("course_id"), item_id=b.get("item_id"),
+                                   only_new=b.get("only_new") is True)
+        return {**result, "summary": inspector.summary(aid)}
+
+    @app.post("/api/accounts/{aid}/link-inspection/dismiss")
+    async def link_dismiss(aid: int, request: Request):
+        b = await body(request)
+        return inspector.dismiss_notice(aid, b.get("source_ids"))
+
+    @app.post("/api/accounts/{aid}/link-inspection/forget-sign-ins")
+    def link_forget(aid: int):
+        return inspector.forget_sign_ins(aid)
+
+    @app.get("/api/accounts/{aid}/external-sources/{sid}")
+    def external_get(aid: int, sid: int):
+        from ..external_inspection import status
+        source = with_inspection(aid, [external(aid).get(aid, sid)])[0]
+        source["analysis"] = status()
+        return source
+
+    @app.post("/api/accounts/{aid}/external-sources/{sid}/inspect")
+    def link_inspect_one(aid: int, sid: int):
+        inspector.inspect(aid, [sid])
+        return with_inspection(aid, [external(aid).get(aid, sid)])[0]
+
+    @app.post("/api/accounts/{aid}/external-sources/{sid}/sign-in")
+    def link_sign_in(aid: int, sid: int):
+        return inspector.sign_in(aid, sid)
+
+    @app.post("/api/accounts/{aid}/external-sources/{sid}/continue")
+    def link_continue(aid: int, sid: int):
+        return inspector.continue_sign_in(aid, sid)
+
+    @app.post("/api/accounts/{aid}/external-sources/{sid}/cancel")
+    def link_cancel(aid: int, sid: int):
+        return inspector.cancel(aid, sid)
+
+    @app.post("/api/accounts/{aid}/external-sources/{sid}/credentials")
+    async def link_credentials(aid: int, sid: int, request: Request):
+        # Typed into Canvas Hub's own page and sent only to this local server; never to a model.
+        b = await body(request)
+        return inspector.submit_credentials(aid, sid, b.get("username"), b.get("password"), remember=b.get("remember") is True)
+
+    # ---- earlier AI classification and adapters (paused; kept for stored data) ------------
     @app.get("/api/accounts/{aid}/external-analysis/disclosure")
     def batch_disclosure(aid: int, course_id: str | None = None, item_id: int | None = None):
         return source_analysis.batch_disclosure(aid, course_id, item_id)
@@ -438,65 +506,9 @@ def create_app(api: HubAPI, *, token: str, port: int) -> FastAPI:
     def batch_cancel(aid: int, batch_token: str):
         return source_analysis.batch_cancel(aid, batch_token)
 
-    @app.get("/api/accounts/{aid}/external-sources/{sid}")
-    def external_get(aid: int, sid: int):
-        from ..external_inspection import status
-        source_analysis.check_failed_source(aid, sid)
-        source = external(aid).get(aid, sid)
-        source['login_check'] = source_analysis.login_status(aid, source)
-        source['inspection'] = status()
-        return source
-
     @app.get("/api/accounts/{aid}/external-sources/{sid}/disclosure")
     def external_disclosure(aid: int, sid: int):
         return source_analysis.disclosure(aid, sid)
-
-    @app.get("/api/accounts/{aid}/external-sources/{sid}/login-check")
-    def external_login_check(aid: int, sid: int):
-        return login_detection.get(aid, sid)
-
-    @app.post("/api/accounts/{aid}/external-sources/{sid}/login-check")
-    def external_login_check_start(aid: int, sid: int):
-        return login_detection.start(aid, sid)
-
-    @app.get("/api/accounts/{aid}/external-sources/{sid}/site-connection")
-    def site_connection_status(aid: int, sid: int):
-        return site_connections.status(aid, sid)
-
-    @app.post("/api/accounts/{aid}/external-sources/{sid}/site-connection/offer")
-    async def site_connection_offer(aid: int, sid: int, request: Request):
-        b = await body(request)
-        return site_connections.offer(aid, sid, b.get('identity_origins', []), method=b.get('method', 'browser'))
-
-    @app.post("/api/accounts/{aid}/external-sources/{sid}/site-connection/start")
-    async def site_connection_start(aid: int, sid: int, request: Request):
-        b = await body(request)
-        return site_connections.start(aid, sid, b.get('token'), b.get('consent'))
-
-    @app.post("/api/accounts/{aid}/external-sources/{sid}/https-source")
-    async def site_https_source(aid: int, sid: int, request: Request):
-        b = await body(request)
-        return site_connections.https_source(aid, sid, b.get('consent'))
-
-    @app.post("/api/accounts/{aid}/external-sources/{sid}/site-connection/{action}")
-    async def site_connection_action(aid: int, sid: int, action: str, request: Request):
-        b = await body(request)
-        if action == 'analysis_snapshot':
-            raise InvalidInput('Use the connected source review flow')
-        return await run_in_threadpool(lambda: site_connections.action(aid, sid, action, b.get('request')))
-
-    @app.post("/api/accounts/{aid}/external-sources/{sid}/connected-disclosure")
-    def connected_disclosure(aid: int, sid: int):
-        return source_analysis.connected_disclosure(aid, sid, site_connections)
-
-    @app.post("/api/accounts/{aid}/external-sources/{sid}/analyze-connected")
-    async def analyze_connected(aid: int, sid: int, request: Request):
-        b = await body(request)
-        # Connected approval rechecks the page synchronously in its browser.
-        # Keep that wait off the event loop so status/cancel requests can run.
-        return await run_in_threadpool(lambda: source_analysis.start(
-            aid, sid, b.get('token'), consent=b.get('consent') is True,
-            reanalyze=True, connected=True))
 
     @app.post("/api/accounts/{aid}/external-sources/{sid}/analyze")
     async def external_analyze(aid: int, sid: int, request: Request):

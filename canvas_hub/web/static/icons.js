@@ -3,6 +3,7 @@ const shapes = {
   sun: [['circle',{cx:12,cy:12,r:4}],['path',{d:'M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5'}]],
   moon: [['path',{d:'M21 13a9 9 0 1 1-10-10 7 7 0 0 0 10 10Z'}]],
   home: [['path', {d:'m3 10 9-7 9 7M5 9v12h5v-7h4v7h5V9'}]],
+  link: [['path',{d:'M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1M14 10a4 4 0 0 0-5.7 0l-3 3A4 4 0 0 0 11 18.7l1-1'}]],
   calendar: [['rect',{x:3,y:5,width:18,height:16,rx:2}],['path',{d:'M16 3v4M8 3v4M3 11h18M8 15h2M14 15h2M8 18h2'}]],
   planner: [['rect',{x:3,y:5,width:18,height:16,rx:2}],['path',{d:'M16 3v4M8 3v4M3 11h18m-13 5 2 2 5-5'}]],
   chart: [['rect',{x:3,y:12,width:4,height:9,rx:1}],['rect',{x:10,y:7,width:4,height:14,rx:1}],['rect',{x:17,y:3,width:4,height:18,rx:1}]],
@@ -43,6 +44,6 @@ export function icon(name, className = '') {
 }
 
 export function decorateNavigation() {
-  const names = {overview:'home', assistant:'sparkles', deadlines:'calendar', planner:'planner', trackers:'chart', courses:'book', search:'search', changes:'clock', coverage:'shield', notes:'checklist', collect:'folder', requests:'bot', settings:'settings'};
+  const names = {overview:'home', assistant:'sparkles', deadlines:'calendar', planner:'planner', trackers:'chart', courses:'book', links:'link', search:'search', changes:'clock', coverage:'shield', notes:'checklist', collect:'folder', requests:'bot', settings:'settings'};
   for (const link of document.querySelectorAll('.nav a[data-view]')) link.prepend(icon(names[link.dataset.view]));
 }

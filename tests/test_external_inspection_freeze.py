@@ -1,4 +1,6 @@
-"""Shipped disabled default: no external work, with saved data and Canvas intact."""
+"""The earlier AI link analysis, adapters and connected-agent site reads stay paused, with saved data and Canvas intact.
+
+Link inspection (``test_link_inspection``) is the working way to read external sites and is not covered by this pause."""
 import json
 from copy import deepcopy
 
@@ -41,12 +43,10 @@ def saved(hub, account, fixture_pkg, monkeypatch):
 
 def block_work(monkeypatch, hub):
     def forbidden(*args,**kwargs):
-        pytest.fail('Frozen external feature attempted reader, provider, detector or browser work')
+        pytest.fail('Paused analysis attempted reader or provider work')
     monkeypatch.setattr(hub.external_sources.reader,'fetch',forbidden)
     monkeypatch.setattr(hub.external_sources.reader,'read',forbidden)
     monkeypatch.setattr('canvas_hub.services.source_analysis.make_provider',forbidden)
-    monkeypatch.setattr('canvas_hub.services.login_detection.inspect',forbidden)
-    monkeypatch.setattr('canvas_hub.services.site_connection.BrowserConnection',forbidden)
 
 
 def test_http_entrypoints_refuse_before_work_and_preserve_saved_data(hub, saved, monkeypatch):
@@ -55,27 +55,28 @@ def test_http_entrypoints_refuse_before_work_and_preserve_saved_data(hub, saved,
     monkeypatch.setattr(app.state.source_analysis,'_config',lambda:pytest.fail('No provider setup should be consulted'))
     root=f'/api/accounts/{saved["aid"]}'
     path=f'{root}/external-sources/{saved["sid"]}'
-    posts=[('/analyze',{'consent':True,'token':'old-offer'}),('/analyze',{'executor':'mcp'}),
-           ('/analyze-connected',{'consent':True,'token':'old-offer'}),('/connected-disclosure',{}),
-           ('/login-check',{}),('/site-connection/offer',{}),('/site-connection/start',{'consent':True,'token':'old-offer'}),
-           ('/site-connection/http_auth',{'request':{'username':'synthetic','password':'synthetic-secret'}}),
-           ('/site-connection/verify',{}),('/site-connection/retry_login',{}),('/site-connection/approve_post',{}),
-           ('/site-connection/confirm_content',{}),('/https-source',{'consent':True}),('/refresh',{}),
+    posts=[('/analyze',{'consent':True,'token':'old-offer'}),('/analyze',{'executor':'mcp'}),('/refresh',{}),
            ('/decision',{'approve':True,'revision':1,'spec_hash':'0'*64})]
+    # The earlier restricted site sign-in was replaced by link inspection; its entry points are gone.
+    removed=['/analyze-connected','/connected-disclosure','/login-check','/site-connection/offer','/site-connection/start',
+             '/site-connection/http_auth','/site-connection/verify','/https-source']
     with TestClient(app,base_url='http://127.0.0.1:8765',headers={'Authorization':'Bearer fixture','X-Canvas-Hub':'1'}) as client:
         for suffix,body in posts:
             response=client.post(path+suffix,json=body)
             assert response.status_code==409,(suffix,response.text)
             assert response.json()['error']=='external_inspection_paused'
+        for suffix in removed:
+            response=client.post(path+suffix,json={'consent':True,'token':'old-offer','request':{'username':'synthetic','password':'synthetic-secret'}})
+            assert response.status_code in (404,405),(suffix,response.text)
             assert 'synthetic-secret' not in response.text
         assert client.post(root+'/external-analysis/old-batch/start',json={'consent':True}).json()['error']=='external_inspection_paused'
         assert client.post(root+'/requests',json={'url':saved['url']}).json()['error']=='external_inspection_paused'
         assert not client.get(path+'/disclosure').json()['available']
         assert not client.get(root+'/external-analysis/disclosure?course_id=4242').json()['available']
-        assert client.get(path+'/login-check').json()['state']=='paused'
         assert client.get(path).json()['classification']==saved['source']['classification']
         listing=client.get(root+'/external-sources?course_id=4242').json()
-        assert listing['inspection']['enabled'] is False
+        assert listing['analysis']['enabled'] is False
+        assert listing['sources'][0]['inspection']['outcome'] is None and listing['sources'][0]['earlier']['text']=='Retained course text'
     assert hub.external_sources.get(saved['aid'],saved['sid'])==saved['source']
     assert (saved['profile']/'sentinel').read_text()=='synthetic saved profile'
     assert not hub.db.query('SELECT * FROM source_analysis_attempts')
@@ -125,7 +126,7 @@ def test_normal_canvas_import_requests_and_supplemental_collection_continue(hub,
 
 @pytest.mark.browser
 @pytest.mark.parametrize('width',[1280,380])
-def test_frozen_ui_keeps_links_and_saved_text_without_analysis_controls(hub,saved,monkeypatch,tmp_path,width):
+def test_saved_links_and_text_stay_visible_without_the_paused_analysis_controls(hub,saved,monkeypatch,tmp_path,width):
     from playwright.sync_api import sync_playwright,expect
     from .test_components_ui import serve
     block_work(monkeypatch,hub)
@@ -134,19 +135,15 @@ def test_frozen_ui_keeps_links_and_saved_text_without_analysis_controls(hub,save
         requests=[];page.on('request',lambda r:requests.append((r.method,r.url)))
         try:
             page.goto(f'{base}/?token={token}');page.goto(f'{base}/#/course/4242')
-            listing=page.locator('.external-source-list')
-            expect(listing).to_contain_text('External inspection is temporarily unavailable')
+            listing=page.get_by_role('region',name='External links',exact=True)
             expect(listing.get_by_role('link',name='Saved course link')).to_have_attribute('href',saved['url'])
-            expect(listing.get_by_role('button',name='Analyse all',exact=False)).to_have_count(0)
-            expect(page.locator('.external-source-nudge')).to_have_count(0)
-            listing.get_by_role('button',name='View saved source').click()
-            panel=page.get_by_role('complementary',name='Source Agent',exact=True)
-            panel.get_by_text('Saved source text',exact=True).click()
-            expect(panel).to_contain_text('Retained course text')
-            assert '\nnull\n' not in panel.inner_text()
-            expect(panel.get_by_role('button')).to_have_count(1) # close only
-            assert not [(method,url) for method,url in requests if '/external-' in url and method!='GET']
-            assert not [url for _,url in requests if '/login-check' in url or '/site-connection' in url]
+            expect(listing.get_by_role('status')).to_have_text('Not inspected yet')
+            expect(listing.get_by_role('button',name='Analyse',exact=False)).to_have_count(0)
+            expect(page.get_by_role('complementary',name='Source Agent',exact=True)).to_have_count(0)
+            listing.get_by_text('Text saved earlier',exact=False).click()
+            expect(listing).to_contain_text('Retained course text')
+            # Looking at the page contacts no site and changes nothing.
+            assert not [(method,url) for method,url in requests if method!='GET' and '/reminders/due' not in url]
             assert page.evaluate('document.documentElement.scrollWidth <= innerWidth + 1')
-            page.screenshot(path=str(tmp_path/f'inspection-paused-{width}.png'),full_page=True)
+            page.screenshot(path=str(tmp_path/f'saved-links-{width}.png'),full_page=True)
         finally:browser.close()

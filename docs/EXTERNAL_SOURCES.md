@@ -1,16 +1,20 @@
-# External course sources
+# External course sources: AI analysis and adapters (paused)
 
-**Temporarily paused in this release.** Analyse/inspect (including batches),
-external-site sign-in, anonymous login checks, MCP external read requests and
-adapter network refreshes are disabled. The backend rejects new work before a
-site read or model call, including previously offered requests and queued batches.
-The UI retains links and **View saved source**, with an unavailable notice.
-Existing classifications, source text, profiles, tracker state and account data
-are retained. Canvas collection and Canvas-page requests continue normally.
+**This document describes the earlier AI analysis and adapter path, which is
+paused.** To read a site outside Canvas, use link inspection:
+[EXTERNAL_LINKS.md](EXTERNAL_LINKS.md).
 
-This is a code-level release freeze, with no settings/environment bypass. The
-implementation below is retained for later review. Dormant-feature tests opt in
-explicitly; freeze acceptance tests exercise the shipped disabled default.
+Paused means: AI classification of a link (single or batch), adapter approval
+and refresh, and reads by a connected MCP agent are rejected by the backend
+before any site read or model call, and the app shows no controls for them.
+Existing classifications, source text, adapters, tracker state and account
+data are retained. Canvas collection and Canvas-page requests continue
+normally. The restricted site sign-in and anonymous login probe that belonged
+to this path were removed when link inspection replaced them.
+
+This is a code-level pause with no settings or environment bypass. The
+implementation below is retained for later review. Tests of the dormant code
+opt in explicitly.
 
 Canvas collection records external links without calling an AI provider. **> →
 Analyse link** opens the Source Agent panel with the exact public URL, active
@@ -196,12 +200,9 @@ the application; older versions do not manage these registrations.
 flow, source binding, preserved progress, collection integration, exact revision
 races, decline/cancel/retry, public text/PDF, multi-page atomicity, identity,
 account/course isolation, malicious page data, DNS/private targets, redirects,
-resource limits and stale records. `tests/test_external_sources_ui.py` exercises
-disclosure → fake API provider or connected agent → review → approval → refresh → reload
-in Light/Dark at desktop/380px. All use local fixtures, fake transports and fake
-providers; no real institutional login or paid calls are part of acceptance.
-
-`tests/test_source_analysis.py` covers settings reuse, consent, output validation,
-prompt-injection containment, exact scope, cancellation, deduplication, stale
-setup/source disclosures, failure redaction, cached attempts and MCP ownership.
-No live API keys or institutional login are needed.
+resource limits and stale records. `tests/test_source_analysis.py` covers settings
+reuse, consent, output validation, prompt-injection containment, exact scope,
+cancellation, deduplication, stale setup/source disclosures, failure redaction,
+cached attempts and MCP ownership. `tests/test_external_inspection_freeze.py`
+checks that the pause holds. All use local fixtures, fake transports and fake
+providers; no live API keys or institutional login are needed.

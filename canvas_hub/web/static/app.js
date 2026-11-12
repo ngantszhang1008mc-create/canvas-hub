@@ -1,4 +1,4 @@
-import { makeExternalSources } from "./external-sources.js";
+import { makeLinks } from "./links.js";
 import { makeWorkspace } from "./workspace.js";
 import { makeContextAgent } from "./context-agent.js";
 import { makeComponents } from "./components.js";
@@ -316,7 +316,7 @@ function selectAccount(id) {
   S.accountId = id;
   store.set("account", String(id));
   for (const i of S.identities) for (const a of i.accounts) if (a.id === id) S.account = a;
-  if(changed){ C.closeDrawer(); renderWorkspaceNavigation(); }
+  if(changed){ C.closeDrawer(); renderWorkspaceNavigation(); E.notice(); }
 }
 
 async function renderWorkspaceNavigation() {
@@ -860,10 +860,11 @@ VIEWS.item = async (main, parts) => {
     const content = (it.fields.find((f) => f.field === "content") || {}).value;
     const by = (it.fields.find((f) => f.field === "provided_by") || {}).value;
     const readAt = (it.fields.find((f) => f.field === "read_at") || {}).value;
-    const adapterRead = by === "public declarative adapter";
-    if (content) cards.unshift(h("div", { class: "card" }, h("div", { class: "card-head" }, h("h2", null, adapterRead ? "Content read by your local adapter" : "Content read by a connected agent"),
-      h("span", { class: "sub" }, `${by || "agent"} · ${readAt ? fmtDate(readAt) : ""}`)),
-      h("div", { class: "banner warn", style: "margin-bottom:10px" }, h("div", { class: "b-body small" }, adapterRead ? "Read from the approved public source. Check its evidence and read time below." : "Provided by a connected agent, not reported by Canvas. Check the original site for anything important.")),
+    const adapterRead = by === "public declarative adapter", inspected = by === "Canvas Hub link inspection";
+    const contentField = it.fields.find((f) => f.field === "content") || {};
+    if (content) cards.unshift(h("div", { class: "card" }, h("div", { class: "card-head" }, h("h2", null, inspected ? "Page text saved by Canvas Hub" : adapterRead ? "Content read by your local adapter" : "Content read by a connected agent"),
+      h("span", { class: "sub" }, inspected ? `read ${ago(contentField.last_observed_at)}` : `${by || "agent"} · ${readAt ? fmtDate(readAt) : ""}`)),
+      h("div", { class: "banner warn", style: "margin-bottom:10px" }, h("div", { class: "b-body small" }, inspected ? "Canvas Hub opened this link in its own browser and saved the text below. It is what the website showed, not something Canvas reported; open the site for anything important." : adapterRead ? "Read from the approved public source. Check its evidence and read time below." : "Provided by a connected agent, not reported by Canvas. Check the original site for anything important.")),
       h("pre", { class: "text" }, content)));
 
   }
@@ -888,7 +889,16 @@ VIEWS.item = async (main, parts) => {
   await E.attach(main, {item_id: String(it.id)});
 };
 
-const E = makeExternalSources({h, mount, api, A, launcher: actions => W.launcher(actions)});
+const E = makeLinks({h, mount, api, A, ago, toast, onSummary: (s) => {
+  // A small count beside the navigation entry: links that still need you.
+  const link = document.querySelector('#nav a[data-view="links"]');
+  if (!link) return;
+  const n = s.not_inspected + s.needs_login;
+  let badge = link.querySelector(".nav-count");
+  if (n && !badge) { badge = h("span", { class: "nav-count" }); link.append(badge); }
+  if (badge) { badge.hidden = !n; badge.textContent = String(n); badge.setAttribute("aria-label", `${n} need attention`); }
+}});
+VIEWS.links = (main) => E.page(main, pageHead);
 
 const relLabel = (r) => ({ body_link: "links to", module_item_content: "opens", module_contains: "contains", attachment: "attachment",
   folder_contains: "contains", submission_for: "submission for", home_page: "home page", calendar_for: "calendar entry for" }[r] || r);
@@ -1144,7 +1154,7 @@ VIEWS.collect = async (main) => {
       const j = await api(A("/jobs") + qs({ limit: 15 })).catch(() => null);
       if (!j) return;
       renderJobs(j.jobs);
-      if (!j.jobs.some((x) => ["running", "queued", "cancel_requested"].includes(x.state))) { clearInterval(S.jobPoll); refreshSession(true); }
+      if (!j.jobs.some((x) => ["running", "queued", "cancel_requested"].includes(x.state))) { clearInterval(S.jobPoll); refreshSession(true); E.notice(); }
     }, 2000);
   }
   const rs = await api(A("/refresh-settings")).catch(() => null);
@@ -1348,6 +1358,7 @@ const STEP_LABEL = {
   cancel_job: () => "Cancelled a job", update_scope: () => "Changed the collection scope",
   get_timetable: () => "Built your week", list_class_times: () => "Read your class times",
   add_class_time: (a) => `Saved class time “${a.title}”`, remove_class_time: () => "Removed a class time",
+  list_external_sources: () => "Looked at external links", inspect_external_link: () => "Opened an external link",
   list_view_requests: () => "Checked agent requests", request_external_view: (a) => `Asked a connected agent to read ${a.title || a.url}`,
 };
 
@@ -2245,8 +2256,8 @@ VIEWS.requests = async (main) => {
     url.placeholder=(S.account?.origin||'https://canvas.example.edu')+'/courses/…';
     title.placeholder='Canvas page title';note.placeholder='Which Canvas page content should the agent read?';
   }
-  mount(main, pageHead("Agent requests", inspectionPaused?"External-site inspection is temporarily unavailable. Saved results and Canvas-page requests remain available.":"Ask a connected agent to read sites Canvas Hub can't open itself, such as a course website outside Canvas."),
-    inspectionPaused?h('p',{role:'status'},'New requests must use your Canvas instance address while external inspection is paused.'):null,
+  mount(main, pageHead("Agent requests", inspectionPaused?"Ask a connected agent to read a Canvas page. For sites outside Canvas, use External links: Canvas Hub now opens those itself.":"Ask a connected agent to read sites Canvas Hub can't open itself, such as a course website outside Canvas."),
+    inspectionPaused?h('p',{role:'status'},'Requests here must use your Canvas address. To read a course website, grader or forum, go to ',h('a',{href:'#/links'},'External links'),'.'):null,
     inspectionPaused?null:h("div", { class: "banner info" }, h("div", { class: "b-body small" },
       "Canvas Hub never opens these sites or touches your other browser profiles. An agent you connect over MCP (for example Codex or Claude with your browser) can pick up a request, read the site with its own access, and send back the text. It is stored as ",
       h("strong", null, "agent-provided"), " content, separate from what Canvas reported, and becomes searchable. The agent needs ",

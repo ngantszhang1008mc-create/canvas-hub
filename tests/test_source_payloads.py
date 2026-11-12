@@ -14,7 +14,6 @@ from canvas_hub.util import Conflict, now_iso
 from .test_workspace import workspace, prepare, start
 from .test_source_analysis import builtin, finish, start as start_analysis, RESULT
 from .test_external_sources import source, URL, SPEC, HTML
-from .test_connected_analysis import Connections
 from .test_allowance_gateway import gateway, setup as gateway_setup
 from canvas_hub.boundary import HubAPI
 from canvas_hub.services.source_analysis import SourceAnalysis
@@ -255,28 +254,6 @@ def test_public_classification_is_bounded_preserves_full_local_content_and_check
     assert svc.get(account['id'], sid)['classification'] == previous
     assert svc.get(account['id'], sid)['request']['status'] == 'declined'
     assert reads == [URL, URL]
-
-
-def test_connected_classification_samples_only_reviewed_text_and_keeps_full_snapshot(builtin, source, account, monkeypatch):
-    service, api, _ = builtin
-    svc, sid, reads = source
-    calls = []
-    class Provider:
-        def complete(self, *args):
-            calls.append(args)
-            return Turn(json.dumps({'roles': ['material'], 'confidence': .8, 'summary': 'Synthetic'}))
-    monkeypatch.setattr('canvas_hub.services.source_analysis.make_provider', lambda cfg: Provider())
-    connection = Connections(account, 'Approved course lecture material. ' * 1500 + '\nFinal grading exception.')
-    offer = service.connected_disclosure(account['id'], sid, connection)
-    service.start(account['id'], sid, offer['token'], consent=True, connected=True)
-    finish(service)
-    assert len(calls) == 1 and not reads
-    payload = json.loads(calls[0][1][0]['sent_text'])
-    assert not any(k in payload for k in ('dom_examples', 'title', 'links'))
-    assert '/2026' not in payload['url'] and not payload['coverage']['complete_read']
-    assert all(offer['content'][r['start_char']:r['end_char']] == r['text'] for r in payload['excerpts'])
-    stored = json.loads(svc.db.one('SELECT evidence_json FROM external_reads WHERE source_id=?', (sid,))['evidence_json'])[0]
-    assert stored['content'] == offer['content'] and stored['access_mode'] == 'connected_local_reviewed'
 
 
 def test_shared_attachment_is_sent_once_with_both_origins(workspace):

@@ -36,7 +36,7 @@ def test_upgrade_preserves_manual_tracker_original_chat_and_summary_usage(tmp_pa
             old.close()
     current = Hub(paths)
     try:
-        assert db.schema_version(current.db.conn) == 18
+        assert db.schema_version(current.db.conn) == 19
         assert current.components.get(account['id'], component['id'])['state']['done'] == {'read': True}
         assert current.db.conn.execute('SELECT content_json FROM assistant_messages WHERE conversation_id=?', (cid,)).fetchone()[0] == payload
         assert current.db.conn.execute('SELECT count(*) FROM assistant_context').fetchone()[0] == 0

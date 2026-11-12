@@ -79,18 +79,6 @@ def test_gateway_opt_in_context_and_source_flow(hub, account, source, gateway, w
             assert len(gateway.requests) == 1 and gateway.requests[0]['body']['max_output_tokens'] == 1024
             page.screenshot(path=str(artifact / f'gateway-context-{width}.png'), full_page=True)
 
-            page.goto(f'{base}/#/course/4242')
-            listing = page.locator('.external-source-list')
-            listing.get_by_role('button', name='Workspace actions', exact=True).click()
-            listing.locator('.workspace-action-icon[aria-label="Analyse link"]').click()
-            panel = page.get_by_role('complementary', name='Source Agent', exact=True)
-            expect(panel).to_contain_text('mock gateway; no paid model is contacted')
-            assert len(gateway.requests) == 1
-            panel.get_by_role('button', name='Approve and analyse', exact=True).click()
-            expect(panel.get_by_role('button', name='Approve, test and enable')).to_be_visible(timeout=10000)
-            assert len(gateway.requests) == 2 and gateway.requests[-1]['body']['tools'] == []
-            assert page.evaluate('document.documentElement.scrollWidth <= innerWidth + 1')
-            page.screenshot(path=str(artifact / f'gateway-source-{width}.png'), full_page=True)
             assert not errors, errors
         finally:
             browser.close()

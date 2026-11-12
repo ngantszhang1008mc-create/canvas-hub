@@ -368,28 +368,19 @@ def test_reader_failures_are_distinguished_without_model(builtin,source,account,
     Read(URL,302,'text/html',b'', 'https://identity.example/login'),
     Read(URL,200,'text/html',b'<script>renderCourse()</script>'),
 ])
-def test_failed_analysis_automatically_checks_auth_once_without_model(builtin, source, account, response):
-    from .test_login_detection import wait
+def test_failed_analysis_never_calls_the_model_or_retries_by_itself(builtin, source, account, response):
     service, _, calls = builtin
     sources, sid, _ = source
     aid = account['id']
-    probes = []
-    sources.reader = PublicReader(lambda url: response)
-    service.login_detection.detector = lambda url: probes.append(url) or {
-        'outcome':'unknown', 'evidence':['login_or_enrollment_shell'], 'course_access':'unknown', 'raw_html':'never-return'}
+    reads = []
+    sources.reader = PublicReader(lambda url: reads.append(url) or response)
     _, disclosure = start(service, aid, sid)
     finish(service)
-    result = wait(service.login_detection, aid, sid)
-    assert result['outcome'] == 'unknown' and 'raw_html' not in result
-    assert probes == [URL] and not calls
+    assert sources.get(aid, sid)['request']['status'] == 'declined' and not calls
+    # A consumed disclosure never dispatches again, and nothing else re-reads the site.
     service.start(aid, sid, disclosure['token'], consent=True)
-    service.check_failed_source(aid, sid)
-    assert probes == [URL]
-    # Restart recovery and saved-result reads do not start paid work either.
-    service.login_detection._states.clear()
-    service.check_failed_source(aid, sid)
-    wait(service.login_detection, aid, sid)
-    assert probes == [URL, URL] and not calls
+    finish(service)
+    assert len(reads) == 1 and not calls
 
 
 def test_enrollment_chooser_with_password_is_not_assumed_to_require_login(builtin, source, account):
