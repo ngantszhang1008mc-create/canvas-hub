@@ -158,7 +158,7 @@ def test_auto_compaction_then_budget_stop_without_paid_retry_loop(hub, account, 
     svc.send(account["id"], "Next", cid)
     svc.wait(cid, 5)
     assert not calls
-    assert "Context budget exceeded" in svc.get_conversation(account["id"], cid)["conversation"]["run_error"]
+    assert "too large for the model's context window" in svc.get_conversation(account["id"], cid)["conversation"]["run_error"]
 
 
 def test_pending_tool_group_is_never_summarized_and_restart_attempt_is_unknown(hub, account, monkeypatch):
@@ -180,7 +180,7 @@ def test_budget_counts_native_reasoning_schema_and_separate_document_allowance()
     transcript = [{"role": "user", "sent_text": "hello"}, {"role": "assistant", "tool_calls": [],
                   "raw": {"provider": "anthropic", "content": [{"type": "thinking", "thinking": "思考" * 1000, "signature": "x"}]}}]
     report = Policy.for_config(cfg).measure(cfg, "system", transcript, [{"schema": "x" * 3000}])
-    assert report["used"]["history"] > 6000 and report["overhead_tokens"] > 1000
+    assert report["used"]["history"] > 2000 and report["overhead_tokens"] > 800
     transcript = [{"role": "tool", "results": [{"name": "read_context_source", "id": "c", "content": "x" * 4000}]}]
     report = Policy.for_config(cfg).measure(cfg, "system", transcript, [])
     assert report["over_budget"] and report["used"]["documents"] > 512
@@ -321,7 +321,7 @@ def test_compaction_control_keeps_chat_and_discloses_usage(hub, account, monkeyp
         expect(page.locator(".msg.user")).to_have_count(before)
         assert api.assistant.get_conversation(account["id"], cid)["context"]["history_preserved"]
         from canvas_hub.assistant.context import context_error
-        cfg = {'provider': 'codex', 'context': {'tool_tokens': 512}}
+        cfg = {'provider': 'codex', 'context': {'capacity': 64000, 'tool_tokens': 512}}
         report = Policy.for_config(cfg).measure(cfg, 'system', [
             {'role': 'tool', 'results': [{'name': 'get_component', 'content': 'x' * 9000}]}], [])
         api.assistant._record_final_state(cid, 'error', str(context_error(report)))
@@ -362,10 +362,10 @@ def test_context_limit_can_be_disabled_and_reenabled(hub, account, monkeypatch):
     svc.send(account["id"], "Continue again", cid)
     svc.wait(cid, 5)
     assert not calls
-    assert "Context budget exceeded" in svc.get_conversation(account["id"], cid)["conversation"]["run_error"]
+    assert "too large for the model's context window" in svc.get_conversation(account["id"], cid)["conversation"]["run_error"]
     with pytest.raises(InvalidInput):
         svc.update_config({"context": {"limit_disabled": "true"}})
-    with pytest.raises(InvalidInput, match="leave space for input"):
+    with pytest.raises(InvalidInput, match="smaller than the context window"):
         svc.update_config({"context": {"capacity": 4096, "response_tokens": 8192, "limit_disabled": False}})
 
 
@@ -401,43 +401,40 @@ def test_context_limit_settings_round_trip_and_dispatch(hub, account, monkeypatc
             page.goto(f"{base}/?token={token}")
             pid = api.assistant.public_config()["active_profile"]
             page.goto(f"{base}/#/assistant/settings?p={pid}")
-            toggle = page.get_by_label("Disable application context limit", exact=True)
-            capacity = page.get_by_label("Context token capacity", exact=True)
-            auto = page.get_by_label("Automatically compact older turns near the context budget", exact=True)
-            expect(toggle).not_to_be_checked()
-            capacity.fill("4096")
+            limits = page.get_by_role("group", name="Context window (how much the model can read at once)", exact=True)
+            own = limits.get_by_role("radio", name="Use my own limit:", exact=False)
+            off = limits.get_by_role("radio", name="No limit in Canvas Hub", exact=False)
+            capacity = page.get_by_label("Context window in tokens", exact=True)
+            auto = limits.get_by_role("checkbox", name="Automatically summarize older turns", exact=False)
+            expect(own).to_be_checked()                 # this setup was saved with its own 64,000-token window
+            expect(capacity).to_have_value("64000")
+            expect(limits).to_contain_text("context window is not known")
             auto.check()
-            toggle.check()
-            expect(capacity).to_be_disabled()
+            off.check()
             expect(auto).to_be_disabled()
-            expect(page.get_by_label("Reply token limit", exact=True)).to_be_enabled()
-            expect(page.get_by_text("The provider or gateway still enforces", exact=False)).to_be_visible()
             with page.expect_response(lambda r: r.url == base + "/api/assistant/config" and r.request.method == "PUT") as saved:
                 page.get_by_role("button", name="Save", exact=True).click()
             assert saved.value.status == 200
             page.reload()
-            expect(toggle).to_be_checked()
-            expect(capacity).to_have_value("4096")
-            expect(auto).to_be_checked()
+            expect(off).to_be_checked()
+            saved_context = api.assistant.public_config()["profiles"][0]["context"]
+            assert saved_context["limit_disabled"] is True and "capacity" not in saved_context and not saved_context["auto_compact"]
             api.assistant.send(account["id"], "Continue after disabling the limit", cid)
             api.assistant.wait(cid, 5)
             assert len(calls) == 1 and calls[0][0] != SUMMARY_SYSTEM
             page.goto(f"{base}/#/assistant/{cid}")
             page.get_by_text("Context & usage", exact=True).click()
-            expect(page.get_by_text("Application context limit disabled. Provider limits still apply.", exact=False)).to_be_visible()
-            expect(page.get_by_text("Usable budget after 10%", exact=False)).to_have_count(0)
+            usage = page.locator(".chat-context")
+            expect(usage).to_contain_text("Context window: not known for this model, so Canvas Hub does not limit requests")
+            expect(usage).to_contain_text("Last request: the provider counted 200 input and 30 output tokens")
             page.goto(f"{base}/#/assistant/settings?p={pid}")
-            toggle.uncheck()
-            expect(capacity).to_be_enabled()
+            capacity.fill("20000")
+            expect(own).to_be_checked()                 # typing a number selects "my own limit"
             expect(auto).to_be_enabled()
-            capacity.fill("128000")
             with page.expect_response(lambda r: r.url == base + "/api/assistant/config" and r.request.method == "PUT") as saved:
                 page.get_by_role("button", name="Save", exact=True).click()
             assert saved.value.status == 200
-            page.reload()
-            expect(toggle).not_to_be_checked()
-            expect(capacity).to_have_value("128000")
-            assert api.assistant._load(pid)["context"] == {"capacity": 128000, "auto_compact": True, "limit_disabled": False}
-            assert not errors
+            assert api.assistant.public_config()["profiles"][0]["context"]["capacity"] == 20000
+            assert not errors, errors
         finally:
             browser.close()

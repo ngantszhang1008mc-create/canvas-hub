@@ -209,6 +209,7 @@ Declared Canvas field bindings refresh trackers deterministically after collecti
   - **Supported providers:** Anthropic (Claude), OpenAI, Google Gemini, OpenRouter, DeepSeek, a local Ollama model, or any OpenAI-compatible endpoint.
   - **What it can do:** answer from the stored data. If you allow it, it can also check Canvas for updates through the app's signed-in browser (with the same read-only rules as Quick check) and create or edit your local notes and to-dos.
   - **Your key:** stays in a private file on this computer and is never included in backups or exports. Your questions, and the course data the assistant reads, go to the provider you choose.
+  - **Limits you control:** each setup shows the model's real context window (asked from the provider when you press **Save & test**, never guessed) and lets you choose the reply length: no limit, or your own maximum number of tokens. Token counts shown in a chat are corrected with what the provider itself reports. Details: [docs/ASSISTANT_CONTEXT.md](docs/ASSISTANT_CONTEXT.md).
 - **MCP:** other agents such as Codex, Claude Code or Claude Desktop can use your data through a local MCP server:
 
   ```bash
@@ -292,8 +293,8 @@ Run `uv run canvas-hub paths` to print the exact locations. To use a different f
 
 ```bash
 uv sync
-uv run pytest -q                    # all tests, including real-Chromium end-to-end runs (~35 s)
-uv run pytest -q -m "not browser"   # fast tests (~2 s)
+uv run pytest -q                    # all tests, including real-Chromium end-to-end runs (several minutes)
+uv run pytest -q -m "not browser"   # fast tests (about a minute)
 ```
 
 To use an existing Chromium installation for both collection and browser tests, set `CANVAS_HUB_CHROMIUM` to its executable path before running these commands.

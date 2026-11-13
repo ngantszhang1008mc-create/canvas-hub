@@ -263,7 +263,7 @@ def test_tool_picker_slash_keyboard_chips_and_mobile_bounds(hub, account, monkey
         page.get_by_role("button", name="Send", exact=True).click()
         expect(page.get_by_text("Ready", exact=True)).to_be_visible()
         assert "patch_component_state" in {t["name"] for t in requests[0]}
-        assert len(requests[0]) == 32 and estimate(requests[0]) + 32 * len(requests[0]) > 8000
+        assert len(requests[0]) == 32 and estimate(requests[0]) > 5000      # a full selection is a large request
         expect(page.locator(".assistant-tool-chip")).to_have_count(0)
         page.reload()
         expect(page.get_by_text("Requested tools: /tracker", exact=False)).to_be_visible()

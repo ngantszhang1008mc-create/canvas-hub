@@ -1,5 +1,4 @@
-"""One combined settings/context/source UI flow at desktop and phone widths."""
-import json
+"""One combined settings and context UI flow at desktop and phone widths."""
 import os
 from pathlib import Path
 
@@ -7,20 +6,18 @@ import pytest
 
 from .test_allowance_gateway import gateway, setup, new_api_allowance, INVITE, SESSION, SUMMARY
 from .test_components_ui import serve
-from .test_external_sources import source
-from .test_source_analysis import RESULT
 from .test_assistant_context import conversation
 
 pytestmark = pytest.mark.browser
 
 
 @pytest.mark.parametrize('width', [1280, 380])
-def test_gateway_opt_in_context_and_source_flow(hub, account, source, gateway, width, tmp_path):
+def test_gateway_opt_in_and_context_flow(hub, account, gateway, width, tmp_path):
     from playwright.sync_api import expect, sync_playwright
     _, cid = conversation(hub, account)
     def response(request):
         system = request['body']['messages'][0]['content']
-        text = SUMMARY if system.startswith('Summarize historical') else json.dumps(RESULT)
+        text = SUMMARY if system.startswith('Summarize historical') else 'Synthetic answer'
         return gateway.events(request, text)
     gateway.action = response
     with serve(hub, []) as (base, token, api), sync_playwright() as pw:
@@ -43,7 +40,7 @@ def test_gateway_opt_in_context_and_source_flow(hub, account, source, gateway, w
                     check.click()
                 assert saved.value.status == 200
                 expect(check).to_be_enabled()
-            expect(card.get_by_label('Automatically compact older turns', exact=False)).not_to_be_checked()
+            expect(card.get_by_label('Automatically summarize older turns', exact=False)).not_to_be_checked()
             expect(card.get_by_role('button', name='Connect with invitation')).to_be_disabled()
             card.get_by_label('I allow selected conversation and course excerpts', exact=False).check()
             card.get_by_label('Invitation', exact=True).fill(INVITE)
