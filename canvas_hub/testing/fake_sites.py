@@ -280,6 +280,9 @@ class FakeSites:
                                      f"<input type='hidden' name='next' value='{html.escape(target, quote=True)}'>"
                                      "<label>E-mail <input name='email' type='email'></label>"
                                      "<label>Password <input name='password' type='password'></label><button>Log in</button></form>"))
+        elif path == "/to-course":
+            # Stands in for http://site/ -> https://site/: another origin that redirects into the Basic site.
+            self._redirect(h, self.origin("course") + "/comp/")
         elif path == "/api/feed":
             if method != "POST" or not signed_in:
                 self._send(h, 401, json.dumps({"error": "sign in"}), "application/json")

@@ -644,12 +644,43 @@ class LinkInspector:
         self._sync_routes(owner)
         return ctx
 
-    def _sync_routes(self, owner: str) -> None:
-        """Attach a saved Basic sign-in to requests for its own origin, and to nothing else."""
+    def _basic_origins(self, owner: str) -> set[str]:
         with self._lock:
             origins = {origin for (who, origin) in self._basic if who == owner}
-        origins |= set(self._saved_credentials().get(owner, {}))
-        for origin in origins - self._routes:
+        return origins | set(self._saved_credentials().get(owner, {}))
+
+    def _start_url(self, ctx, owner: str, url: str) -> str:
+        """Where to open a link so a saved password reaches the site it belongs to.
+
+        Request routes only see the first request of a redirect chain. A link that redirects into
+        a site with a saved password (http -> https of the same host is enough) would therefore
+        arrive there without it. Such redirects are followed here first, without any password,
+        and the page is opened at the address they lead to.
+        """
+        origins = self._basic_origins(owner)
+        if not origins or _origin(url) in origins:
+            return url
+        current = url
+        for _ in range(10):
+            try:
+                response = ctx.request.get(current, max_redirects=0, timeout=NAVIGATION_MS)
+            except Exception:  # noqa: BLE001
+                return url
+            location = response.headers.get("location")
+            if not 300 <= response.status < 400 or not location:
+                return url
+            current = urljoin(current, location)
+            if _origin(current) in origins:
+                try:
+                    self._check_target(current)
+                except InvalidInput:
+                    return url
+                return current
+        return url
+
+    def _sync_routes(self, owner: str) -> None:
+        """Attach a saved Basic sign-in to requests for its own origin, and to nothing else."""
+        for origin in self._basic_origins(owner) - self._routes:
             self._ctx.route(origin + "/**", self._basic_handler(owner, origin))
             self._routes.add(origin)
 
@@ -783,7 +814,7 @@ class LinkInspector:
         page.on("response", on_response)
         try:
             try:
-                page.goto(url, wait_until="domcontentloaded", timeout=NAVIGATION_MS)
+                page.goto(self._start_url(ctx, owner, url), wait_until="domcontentloaded", timeout=NAVIGATION_MS)
             except Exception as e:  # noqa: BLE001
                 last = chain[-1] if chain else None
                 if last and last["status"] < 400 and last["type"] and last["type"] not in HTML_TYPES:

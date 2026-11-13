@@ -252,6 +252,20 @@ def test_a_site_password_does_not_follow_a_redirect_to_another_site(hub, account
 
 
 @pytest.mark.browser
+def test_a_link_that_redirects_into_a_password_site_is_read_after_signing_in(hub, account, inspector, fake_sites):
+    # Like http://course.cse.ust.hk/comp1023/, which redirects to https before asking for a password.
+    aid = account["id"]
+    sid = add_link(hub, aid, fake_sites.url("forum", "/to-course"), "COMP course website (http)")
+    inspector.inspect(aid, [sid])
+    first = inspector.wait(aid, sid)
+    assert (first["outcome"], first["login_method"]) == ("login_required", "basic")
+    inspector.submit_credentials(aid, sid, fs.BASIC_USER, fs.BASIC_PASSWORD)
+    done = settled(inspector, aid, sid)
+    assert done["outcome"] == "ok" and "recursion" in field(hub, aid, done["item_id"])
+    assert all(r["authorization"] is None for r in fake_sites.seen("forum"))
+
+
+@pytest.mark.browser
 def test_every_connection_of_an_inspection_passes_the_address_check(hub, account, inspector, fake_sites):
     from canvas_hub.services.guard_proxy import GuardProxy
     aid = account["id"]
