@@ -98,12 +98,56 @@ export function makeLinks(env) {
         !i.outcome && !wantsLogin ? "primary" : null));
       if (i.actions.includes("sign_in") && !wantsLogin && !follows) side.push(button("Sign in to this site", "/sign-in", "ghost sm"));
       if (i.item_id) side.push(h("a", { class: "btn sm", href: `#/item/${i.item_id}` }, "View saved page"));
+      if (source.site_decision === "ask" && i.outcome !== "ok") side.push(h("button", { class: "ghost sm", title: `Stop listing links to ${source.site}`,
+        onclick: (e) => act(e.currentTarget, async () => {
+          await setSite(source.site, "ignore");
+          toast(`Links to ${source.site} are ignored. Change it under Sites on the External links page.`);
+        }) }, "Ignore this site"));
     }
     return h("article", { class: "link-row", dataset: { source: String(source.id), state: i.state, outcome: i.outcome || "new" } },
       h("div", { class: "link-main" }, main), h("div", { class: "link-actions" }, side));
   }
 
-  const retryable = (s) => s.inspection.state === "idle" && !["ok", "login_required", "unsafe"].includes(s.inspection.outcome);
+  const retryable = (s) => s.site_decision !== "ignore" && s.inspection.state === "idle" && !["ok", "login_required", "unsafe"].includes(s.inspection.outcome);
+  const shown = (sources) => sources.filter((s) => s.site_decision !== "ignore");
+  const setSite = (site, decision) => api(A("/link-inspection/sites"), { method: "POST", body: { site, decision } });
+
+  // One line per site: most links point at a handful of sites, and most of those sites carry
+  // nothing about the course. Deciding once per site keeps the list to what matters.
+  const DECISION = { ask: "Ask each time", read: "Always read", ignore: "Ignore" };
+  function sitesCard() {
+    const body = h("div", { class: "link-sites" });
+    const card = h("section", { class: "card link-card", "aria-label": "Sites" },
+      h("div", { class: "card-head" }, h("h2", null, "Sites")),
+      h("p", { class: "small muted" }, "Choose once for every link to a site. ", h("strong", null, "Always read"),
+        " reads its links, including ones found later, without asking. ", h("strong", null, "Ignore"),
+        " hides its links and never opens them. Video, social and reference sites start as ignored."), body);
+    let last = "";
+    function line(site) {
+      const select = h("select", { "aria-label": `What to do with links to ${site.site}` },
+        Object.entries(DECISION).map(([value, label]) => h("option", { value, selected: value === site.decision }, label)));
+      select.addEventListener("change", () => act(select, async () => {
+        const r = await setSite(site.site, select.value);
+        if (r.queued.length) toast(`Reading ${r.queued.length} link${r.queued.length === 1 ? "" : "s"} from ${site.site}…`);
+      }));
+      const note = [`${site.links} link${site.links === 1 ? "" : "s"}`, site.read ? `${site.read} read` : null,
+        site.decision === "ignore" && !site.chosen ? "ignored by default" : null].filter(Boolean).join(" · ");
+      return h("div", { class: "link-site row" },
+        h("div", { class: "link-site-name" }, h("strong", null, site.site), h("div", { class: "tiny muted" }, note,
+          site.examples.length ? ` — e.g. ${site.examples.map((x) => `“${x}”`).join(", ")}` : "")), select);
+    }
+    card.update = (sites) => {
+      const key = JSON.stringify(sites);
+      if (key === last) return;
+      last = key;
+      card.hidden = !sites.length;
+      const active = sites.filter((x) => x.decision !== "ignore"), ignored = sites.filter((x) => x.decision === "ignore");
+      const open = body.querySelector("details")?.open;
+      mount(body, active.map(line), ignored.length ? h("details", { open: !!open },
+        h("summary", { class: "small" }, ((n) => `Ignored sites (${ignored.length}, ${n} link${n === 1 ? "" : "s"})`)(ignored.reduce((n, x) => n + x.links, 0))), ignored.map(line)) : null);
+    };
+    return card;
+  }
 
   // Bring a list up to date without redrawing rows that did not change, so a
   // half-typed sign-in form is never wiped by a background refresh.
@@ -167,7 +211,7 @@ export function makeLinks(env) {
     const query = new URLSearchParams(scope).toString();
     const path = A("/external-sources") + "?" + query;
     const first = await api(path);
-    if (!main.isConnected || !first.sources.length) return;
+    if (!main.isConnected || !shown(first.sources).length) return;
     const all = inspectAllButton(scope.item_id ? { item_id: Number(scope.item_id) } : { course_id: scope.course_id });
     const list = h("div", { class: "link-list" });
     const section = h("section", { class: "card link-card", "aria-label": "External links" },
@@ -176,7 +220,11 @@ export function makeLinks(env) {
       list);
     (main.querySelector(".workspace-content") || main).append(section);
     const rows = new Map();
-    const updates = live(section, () => api(path), (data) => { syncRows(list, rows, data.sources, { leaders: leaders(data.sources) }); all.update(data.sources); });
+    const updates = live(section, () => api(path), (data) => {
+      const sources = shown(data.sources);
+      syncRows(list, rows, sources, { leaders: leaders(sources) });
+      all.update(sources);
+    });
     attached.set(main, updates);
     updates.prime(first);
     await updates.refresh();
@@ -188,6 +236,8 @@ export function makeLinks(env) {
     const all = inspectAllButton({});
     const counts = h("div", { class: "row link-counts" });
     const groups = h("div", { class: "stack" });
+    const sites = sitesCard();
+    const hiddenNote = h("p", { class: "small muted", hidden: true });
     const url = h("input", { type: "url", placeholder: "https://course-site.example.edu/…", required: true, "aria-label": "Link address" });
     const title = h("input", { type: "text", placeholder: "Name (optional), e.g. COMP1023 course website", "aria-label": "Link name" });
     const course = h("select", { "aria-label": "Course" }, h("option", { value: "" }, "No course"),
@@ -210,7 +260,7 @@ export function makeLinks(env) {
       h("div", { class: "banner info" }, h("div", { class: "b-body small" },
         h("strong", null, "How it works. "), "Press ", h("strong", null, "Inspect"), " and Canvas Hub opens the link in its own background browser and saves the text so you can search it and the Assistant can use it. ",
         "If a site needs you to sign in, the row says which kind of sign-in it is and gives you one button to do it. After you sign in, Canvas Hub carries on by itself.")),
-      counts, groups,
+      counts, groups, hiddenNote, sites,
       h("div", { class: "card link-card" }, h("h2", null, "Add a link yourself"),
         h("p", { class: "small muted" }, "For a site Canvas does not link to. It is treated like any other external link."), addForm),
       h("div", { class: "card link-card" }, h("h2", null, "Site sign-ins"),
@@ -219,6 +269,10 @@ export function makeLinks(env) {
     const lists = new Map();
     function draw(d) {
       const s = d.summary;
+      if (d.sites) sites.update(d.sites);
+      hiddenNote.hidden = !s.ignored;
+      hiddenNote.textContent = s.ignored ? `${s.ignored} link${s.ignored === 1 ? "" : "s"} to ignored sites ${s.ignored === 1 ? "is" : "are"} not listed. See Sites below.` : "";
+      d = { ...d, sources: shown(d.sources) };
       mount(counts, [["accent", s.not_inspected, "not inspected yet"], ["warn", s.needs_login, "need sign-in"], ["bad", s.failed, "could not be read"],
         ["ok", s.read, "read and saved"]].filter((x) => x[1]).map(([cls, n, label]) => h("span", { class: `pill ${cls}` }, `${n} ${label}`)));
       if (!d.sources.length) {

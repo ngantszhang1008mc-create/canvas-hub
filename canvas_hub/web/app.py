@@ -432,11 +432,19 @@ def create_app(api: HubAPI, *, token: str, port: int) -> FastAPI:
     @app.get("/api/accounts/{aid}/link-inspection")
     def link_overview(aid: int):
         external(aid).backfill(aid)
-        return {"summary": inspector.summary(aid), "sources": inspector.sources(aid)}
+        return {"summary": inspector.summary(aid), "sources": inspector.sources(aid), "sites": inspector.sites(aid)}
 
     @app.get("/api/accounts/{aid}/link-inspection/summary")
     def link_summary(aid: int):
+        # New links from a site the user chose to always read are read without asking. The
+        # notice polls this, so they are picked up soon after a collection finds them.
+        inspector.inspect_trusted(aid)
         return inspector.summary(aid)
+
+    @app.post("/api/accounts/{aid}/link-inspection/sites")
+    async def link_site(aid: int, request: Request):
+        b = await body(request)
+        return inspector.set_site(aid, b.get("site"), b.get("decision"))
 
     @app.post("/api/accounts/{aid}/link-inspection/inspect")
     async def link_inspect(aid: int, request: Request):

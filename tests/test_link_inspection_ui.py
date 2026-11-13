@@ -117,6 +117,33 @@ def test_inspect_all_sends_a_long_list_in_requests_the_server_accepts(hub, accou
         assert [len(batch) for batch in sent] == [200, 50] and sorted(sum(sent, [])) == sorted(ids)
 
 
+def test_sites_are_chosen_once_for_all_their_links(hub, account, inspector, fake_sites):
+    from playwright.sync_api import expect
+    aid = account["id"]
+    add_link(hub, aid, "https://www.youtube.com/watch?v=abc", "Lecture recording")
+    add_links(hub, aid, fake_sites, ["syllabus", "missing", "forum"])
+    course_site = fake_sites.origin("course").split("//")[1]
+    with app(hub, inspector) as (base, token), browser_page(base, token) as page:
+        page.goto(f"{base}/#/links")
+        sites = page.get_by_role("region", name="Sites", exact=True)
+        expect(sites).to_contain_text(course_site)
+        expect(page.get_by_text("1 link to ignored sites is not listed")).to_be_visible()
+        expect(row(page, "Lecture recording")).to_have_count(0)
+        sites.get_by_text("Ignored sites (1, 1 link)").click()
+        expect(sites.get_by_label("What to do with links to youtube.com")).to_have_value("ignore")
+
+        # One press on a row ignores every link to that site.
+        row(page, "Class forum").get_by_role("button", name="Ignore this site", exact=True).click()
+        expect(row(page, "Class forum")).to_have_count(0)
+        expect(page.get_by_text("2 links to ignored sites are not listed")).to_be_visible()
+
+        # Always read: its links are read now, without asking.
+        sites.get_by_label(f"What to do with links to {course_site}").select_option("read")
+        expect(row(page, "Public syllabus").get_by_role("status")).to_have_text("Read and saved", timeout=30000)
+        expect(row(page, "Old tutorial page").get_by_role("status")).to_have_text("Page not found", timeout=30000)
+        assert page.problems == []
+
+
 def test_not_now_keeps_quiet_until_another_link_is_found(hub, account, inspector, fake_sites):
     from playwright.sync_api import expect
     add_links(hub, account["id"], fake_sites, ["syllabus"])

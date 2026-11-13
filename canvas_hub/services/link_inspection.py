@@ -45,7 +45,7 @@ import threading
 import time
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
-from ..external_urls import clean_url, public_address
+from ..external_urls import SENSITIVE, clean_url, public_address
 from .guard_proxy import GuardProxy
 from ..util import Conflict, InvalidInput, NotFound, canonical_json, now_iso, sha256_text
 
@@ -98,6 +98,79 @@ FACTS_JS = r"""() => {
     loginForm: forms.length > 0, loginPrompt: prompts.length > 0,
     challenge: !!document.querySelector('#challenge-form, #cf-challenge-running, .g-recaptcha, iframe[src*="captcha" i], iframe[title*="challenge" i]') };
 }"""
+
+
+# Sites whose links rarely carry course information: videos, social media, encyclopedias and
+# programming references, meeting links. Their links are not announced or read unless the user
+# chooses otherwise for that site.
+DEFAULT_IGNORED = ("youtube.com", "youtu.be", "vimeo.com", "bilibili.com", "tiktok.com", "facebook.com", "instagram.com",
+                   "twitter.com", "x.com", "linkedin.com", "reddit.com", "wikipedia.org", "wikimedia.org",
+                   "stackoverflow.com", "w3schools.com", "geeksforgeeks.org", "cplusplus.com", "cppreference.com",
+                   "docs.python.org", "developer.mozilla.org", "zoom.us", "teams.microsoft.com", "meet.google.com",
+                   "community.canvaslms.com", "community.instructure.com")
+SITE_DECISIONS = ("ask", "read", "ignore")
+MAX_DATA = 100_000                      # characters of data responses kept per page
+MAX_DATA_RESPONSE = 30_000
+MAX_DATA_BYTES = 2_000_000
+JSON_TYPE = re.compile(r"^application/(?:[\w.+-]*\+)?json$", re.I)
+PRIVATE_DATA_PATH = re.compile(r"(^|[/._-])(token|session|auth|oauth2?|login|logout|signin|password|credential)s?([/._?-]|$)", re.I)
+
+
+def site_of(url: str) -> str:
+    """The site a link belongs to for the user's read/ignore choice: its host without "www."."""
+    host = _host(url)
+    return host[4:] if host.startswith("www.") else host
+
+
+def default_ignored(site: str) -> bool:
+    host = site.split(":")[0]
+    return any(host == d or host.endswith("." + d) for d in DEFAULT_IGNORED)
+
+
+def _same_site(a: str, b: str) -> bool:
+    """Whether two hosts belong to one organisation: zinc.example.edu and api.example.edu do."""
+    def base(host):
+        labels = host.split(":")[0].split(".")
+        keep = 3 if len(labels) >= 3 and len(labels[-1]) == 2 and labels[-2] in ("com", "edu", "ac", "org", "gov", "net", "co") else 2
+        return ".".join(labels[-keep:])
+    ha, hb = (urlsplit(a).hostname or "").lower(), (urlsplit(b).hostname or "").lower()
+    return bool(ha) and base(ha) == base(hb)
+
+
+def json_text(value, limit: int = MAX_DATA_RESPONSE) -> str:
+    """Data a page loaded, as indented "name: value" lines. Secrets and type tags are left out."""
+    lines: list[str] = []
+    size = 0
+
+    def emit(line):
+        nonlocal size
+        if size < limit:
+            lines.append(line)
+            size += len(line) + 1
+
+    def walk(v, indent, label):
+        pad = "  " * indent
+        prefix = f"{pad}{label}: " if label else f"{pad}- " if label == "" else pad
+        if isinstance(v, dict):
+            items = [(k, x) for k, x in v.items() if isinstance(k, str) and k != "__typename" and not SENSITIVE.search(k)
+                     and x not in (None, "", [], {})]
+            if label is not None:
+                emit(f"{pad}{label}:" if label else f"{pad}-")
+            for k, x in items:
+                walk(x, indent + (1 if label is not None else 0), k)
+        elif isinstance(v, list):
+            if label is not None:
+                emit(f"{pad}{label}:" if label else f"{pad}-")
+            for x in v[:500]:
+                walk(x, indent + (1 if label is not None else 0), "")
+        else:
+            text = v if isinstance(v, str) else json.dumps(v)
+            emit(prefix + " ".join(text.split())[:2000])
+        if size >= limit:
+            return
+
+    walk(value, 0, None)
+    return "\n".join(lines)[:limit]
 
 
 def _not_public(ip: str) -> bool:
@@ -191,7 +264,8 @@ def explain(result: dict, url: str) -> str:
     outcome, reason = result.get("outcome"), result.get("reason")
     login_host = result.get("login_host") or host
     if outcome == "ok":
-        note = " The page also offers an optional sign-in; sign in if something is missing." if reason == "sign_in_optional" else ""
+        note = {"sign_in_optional": " The page also offers an optional sign-in; sign in if something is missing.",
+                "page_data": " The page itself shows little text; the data it loaded for itself was saved."}.get(reason, "")
         return f"Read and saved ({result.get('content_chars') or 0:,} characters).{note}"
     if outcome == "login_required":
         if reason == "credentials_rejected":
@@ -370,10 +444,13 @@ class LinkInspector:
             sql += " AND s.id IN (SELECT source_id FROM external_source_origins WHERE item_id=?)"
             args.append(int(item_id))
         out = []
+        rules = self._site_rules(aid)
         for r in self.db.query(sql + " ORDER BY s.course_id, s.id LIMIT 500", args):
             r = dict(r)
+            site = site_of(r["url"])
             source = {"id": r["id"], "course_id": r["course_id"], "course_title": r["course_title"], "url": r["url"],
-                      "title": r["title"], "host": _host(r["url"]), "last_seen_at": r["last_seen_at"], "earlier": None}
+                      "title": r["title"], "host": _host(r["url"]), "site": site, "site_decision": self._decision(site, rules),
+                      "last_seen_at": r["last_seen_at"], "earlier": None}
             source["inspection"] = self.view(source, {**r, "state": r["state"] or "idle"})
             out.append(source)
         # Text kept from before link inspection existed (an agent's or adapter's read) stays visible.
@@ -388,12 +465,64 @@ class LinkInspector:
                     source["earlier"] = {"read_at": read["read_at"], "text": text[:3000]}
         return out
 
+    # ---- the user's choice per site ----------------------------------------------
+    def _site_rules(self, aid: int) -> dict[str, str]:
+        return {r["site"]: r["decision"] for r in self.db.query("SELECT site, decision FROM link_site_rules WHERE account_id=?", (aid,))}
+
+    @staticmethod
+    def _decision(site: str, rules: dict) -> str:
+        return rules.get(site) or ("ignore" if default_ignored(site) else "ask")
+
+    def sites(self, aid: int) -> list[dict]:
+        """Every site the links point at, with how many links and what the user chose for it."""
+        rules = self._site_rules(aid)
+        out: dict[str, dict] = {}
+        for s in self.sources(aid):
+            site = out.setdefault(s["site"], {"site": s["site"], "decision": s["site_decision"], "chosen": s["site"] in rules,
+                                              "default_ignored": default_ignored(s["site"]), "links": 0, "read": 0,
+                                              "not_inspected": 0, "examples": []})
+            site["links"] += 1
+            site["read"] += s["inspection"]["outcome"] == "ok"
+            site["not_inspected"] += s["inspection"]["outcome"] is None
+            if len(site["examples"]) < 3:
+                site["examples"].append(s["title"])
+        order = {"read": 0, "ask": 1, "ignore": 2}
+        return sorted(out.values(), key=lambda x: (order[x["decision"]], -x["links"], x["site"]))
+
+    def set_site(self, aid: int, site, decision) -> dict:
+        """Read every link from a site without asking, ignore them, or go back to asking."""
+        self.hub.identity.get_account(aid)
+        if decision not in SITE_DECISIONS or not isinstance(site, str) or not site or len(site) > 300:
+            raise InvalidInput("Choose ask, read or ignore for a site")
+        site = site.lower()
+        with self.db.tx() as c:
+            if decision == "ask" and not default_ignored(site):
+                c.execute("DELETE FROM link_site_rules WHERE account_id=? AND site=?", (aid, site))
+            else:                                # an explicit "ask" overrides a site ignored by default
+                c.execute("INSERT INTO link_site_rules(account_id, site, decision, updated_at) VALUES (?,?,?,?) "
+                          "ON CONFLICT(account_id, site) DO UPDATE SET decision=excluded.decision, updated_at=excluded.updated_at",
+                          (aid, site, decision, now_iso()))
+        queued = self.inspect_trusted(aid)["queued"] if decision == "read" else []
+        with self._changed:
+            self._changed.notify_all()
+        return {"queued": queued, "sites": self.sites(aid), "summary": self.summary(aid)}
+
+    def inspect_trusted(self, aid: int) -> dict:
+        """Queue new links from the sites the user chose to always read."""
+        rules = self._site_rules(aid)
+        if "read" not in rules.values():
+            return {"queued": []}
+        ids = [s["id"] for s in self.sources(aid) if s["site_decision"] == "read" and s["inspection"]["outcome"] is None
+               and s["inspection"]["state"] == "idle"]
+        return self.inspect(aid, ids[:200]) if ids else {"queued": []}
+
     def summary(self, aid: int) -> dict:
-        rows = self.sources(aid)
+        everything = self.sources(aid)
+        rows = [s for s in everything if s["site_decision"] != "ignore"]
         new = [s for s in rows if s["inspection"]["outcome"] is None and s["inspection"]["state"] == "idle"]
         notice = [s for s in new if not s["inspection"]["notice_dismissed"]]
         waiting = next((s for s in rows if s["inspection"]["state"] == "waiting_login"), None)
-        return {"total": len(rows),
+        return {"total": len(rows), "ignored": len(everything) - len(rows),
                 "not_inspected": len(new),
                 "needs_login": sum(s["inspection"]["outcome"] == "login_required" and s["inspection"]["state"] == "idle" for s in rows),
                 "failed": sum(s["inspection"]["outcome"] not in (None, "ok", "login_required") and s["inspection"]["state"] == "idle" for s in rows),
@@ -424,7 +553,8 @@ class LinkInspector:
         """Queue reads. With no ids: every link in the scope that has not been read successfully."""
         self.hub.identity.get_account(aid)
         if source_ids is None:
-            chosen = [s for s in self.sources(aid, course_id, item_id) if s["inspection"]["state"] == "idle" and (
+            chosen = [s for s in self.sources(aid, course_id, item_id) if s["inspection"]["state"] == "idle"
+                      and s["site_decision"] != "ignore" and (
                 s["inspection"]["outcome"] is None if only_new else
                 s["inspection"]["outcome"] not in ("ok", "login_required", "unsafe"))]
             ids = [s["id"] for s in chosen]
@@ -803,8 +933,13 @@ class LinkInspector:
                 pass
         page.on("request", on_request)
 
+        data_responses: list = []
+
         def on_response(response):
             try:
+                if (response.request.resource_type in ("xhr", "fetch") and response.status == 200 and len(data_responses) < 60
+                        and JSON_TYPE.match((response.headers.get("content-type") or "").split(";")[0].strip())):
+                    data_responses.append(response)
                 if response.request.is_navigation_request() and response.frame == page.main_frame:
                     chain.append({"status": response.status, "url": response.url,
                                   "challenge": response.headers.get("www-authenticate"),
@@ -845,12 +980,51 @@ class LinkInspector:
                 result["reason"] = "insecure_basic"
             if result.get("reason") == "credentials_rejected":
                 self._forget_basic(owner, origin)            # never keep sending a rejected password
+            if result["outcome"] in ("ok", "empty"):
+                data = self._page_data(data_responses, final_url)
+                if data:
+                    text = (result.get("content") or "").strip()
+                    result = {**result, "outcome": "ok", "reason": result.get("reason") if text else "page_data",
+                              "content": (text[:MAX_TEXT - len(data) - 2] + "\n\n" + data).strip()}
             return result
         finally:
             try:
                 page.close()
             except Exception:  # noqa: BLE001
                 pass
+
+    @staticmethod
+    def _page_data(responses: list, page_url: str) -> str:
+        """The data a script-built page fetched for itself (assignments, deadlines, scores...).
+
+        Many course systems show an almost empty page and fill it from their own API, so the
+        visible text misses most of what is there. Only JSON the page itself requested from its
+        own site is kept; sign-in and session endpoints are skipped and secret-looking fields dropped.
+        """
+        parts, used, seen = [], 0, set()
+        for response in responses:
+            try:
+                url = response.url
+                path = urlsplit(url).path
+                if not _same_site(url, page_url) or PRIVATE_DATA_PATH.search(path):
+                    continue
+                body = response.body()
+                if len(body) > MAX_DATA_BYTES:
+                    continue
+                text = json_text(json.loads(body.decode("utf-8", errors="replace")))
+            except Exception:  # noqa: BLE001
+                continue
+            if len(text) < 20 or text in seen:
+                continue
+            seen.add(text)
+            block = f"[Data loaded by the page: {path or '/'}]\n{text}"
+            if used + len(block) > MAX_DATA:
+                block = block[:MAX_DATA - used]
+            parts.append(block)
+            used += len(block) + 2
+            if used >= MAX_DATA:
+                break
+        return "\n\n".join(parts)
 
     def _read_file(self, ctx, owner: str, hop: dict) -> dict:
         base = {"http_status": hop["status"], "final_url": _display_url(hop["url"]), "content_type": hop["type"]}

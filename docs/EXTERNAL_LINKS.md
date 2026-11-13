@@ -19,6 +19,24 @@ link it finds during collection. This page describes how it reads them.
    for the page to finish drawing, and saves the text. The saved page is
    searchable, has its own item page (**View saved page**) and can be read by
    the Assistant. No AI provider is involved in an inspection.
+   Many course systems (graders such as Zinc, forums) draw an almost empty page
+   and fill it from their own API. Canvas Hub also saves the data the page
+   itself loaded from its own site (as readable "name: value" lines), so
+   deadlines, scores and other details are kept even when the visible text
+   leaves them out. Sign-in and session responses are skipped, and fields that
+   look like secrets (tokens, keys, passwords) are dropped.
+4. **Decide once per site.** Most links point at a few sites, and most of
+   those carry nothing about the course. The **Sites** card on the External
+   links page lists every site with its number of links:
+   - **Ask each time** (the default): new links are announced as above.
+   - **Always read**: its links are read without asking, including links a
+     later collection finds.
+   - **Ignore**: its links are hidden from the lists and the notice and are
+     never opened. **Ignore this site** on a row does the same in one press.
+
+   Video, social media, encyclopedia, programming-reference and meeting sites
+   (YouTube, Wikipedia, Stack Overflow, Zoom, ...) start as ignored; choose
+   **Ask each time** to bring one back.
 
 | Status | Meaning | What to do |
 | --- | --- | --- |

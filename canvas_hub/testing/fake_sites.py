@@ -167,6 +167,19 @@ class FakeSites:
             self._redirect(h, "/comp/")                        # the legacy link Canvas still points at
         elif path == "/public/syllabus":
             self._send(h, 200, _page("Public syllabus", f"<main><h1>Syllabus</h1><p>{PUBLIC_TEXT}</p></main>"))
+        elif path == "/public/app":
+            # Like a script-built grader page: the visible text says little; the details come from its own API.
+            self._send(h, 200, _page("Assignments", "<main><h1>Assignments</h1><ul id='list'></ul></main>",
+                                     "fetch('/public/api/session').then(r=>r.json());"
+                                     "fetch('/public/api/assignments').then(r=>r.json()).then(d=>{const l=document.getElementById('list');"
+                                     "d.data.assignments.forEach(a=>{const li=document.createElement('li');li.textContent=a.title;l.append(li);});});"))
+        elif path == "/public/api/assignments":
+            self._send(h, 200, json.dumps({"data": {"assignments": [
+                {"__typename": "Assignment", "title": "PA2 Maze Solver", "dueAt": "2026-11-21T23:59:00+08:00", "attemptsLeft": 3},
+                {"__typename": "Assignment", "title": "Lab 5 Linked lists", "dueAt": "2026-11-14T23:59:00+08:00",
+                 "grade": {"score": 9, "outOf": 10}, "apiToken": "do-not-keep"}]}}), "application/json")
+        elif path == "/public/api/session":
+            self._send(h, 200, json.dumps({"user": "astudent", "sessionKey": "secret-session-value"}), "application/json")
         elif path == "/missing":
             self._send(h, 404, _page("Not found", "<h1>404</h1><p>Nothing here.</p>"))
         elif path == "/broken":

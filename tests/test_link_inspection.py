@@ -266,6 +266,59 @@ def test_a_link_that_redirects_into_a_password_site_is_read_after_signing_in(hub
 
 
 @pytest.mark.browser
+def test_a_script_built_page_is_saved_with_the_data_it_loaded(hub, account, inspector, fake_sites):
+    aid = account["id"]
+    sid = add_link(hub, aid, fake_sites.url("course", "/public/app"), "Grader assignments")
+    inspector.inspect(aid, [sid])
+    view = inspector.wait(aid, sid)
+    assert view["outcome"] == "ok"
+    text = field(hub, aid, view["item_id"])
+    assert "PA2 Maze Solver" in text and "2026-11-21T23:59:00+08:00" in text and "score: 9" in text
+    assert "do-not-keep" not in text and "secret-session-value" not in text and "__typename" not in text
+
+
+def test_links_are_decided_once_per_site(hub, account, fixture_pkg, fake_sites):
+    hub.importer.import_package(fixture_pkg)
+    aid = account["id"]
+    video = add_link(hub, aid, "https://www.youtube.com/watch?v=abc", "Lecture recording")
+    ids = add_links(hub, aid, fake_sites, ["syllabus", "missing", "forum"])
+    service = LinkInspector(hub, allow_local=True)
+    try:
+        summary = service.summary(aid)
+        assert summary["ignored"] == 1 and video not in summary["notice"]["source_ids"] and summary["not_inspected"] == 3
+        sites = {s["site"]: s for s in service.sites(aid)}
+        assert sites["youtube.com"]["decision"] == "ignore" and not sites["youtube.com"]["chosen"]
+        course_site = next(s["site"] for s in service.sources(aid) if s["id"] == ids["syllabus"])
+        assert sites[course_site]["links"] == 2 and sites[course_site]["decision"] == "ask"
+
+        service.set_site(aid, course_site, "ignore")
+        summary = service.summary(aid)
+        assert summary["ignored"] == 3 and summary["notice"]["source_ids"] == [ids["forum"]]
+        assert service.inspect_trusted(aid)["queued"] == []
+        # "Ask" brings a default-ignored site back, and stays that way.
+        service.set_site(aid, "youtube.com", "ask")
+        assert video in service.summary(aid)["notice"]["source_ids"]
+        with pytest.raises(Exception):
+            service.set_site(aid, course_site, "sometimes")
+    finally:
+        service.stop()
+
+
+@pytest.mark.browser
+def test_a_site_chosen_to_always_read_is_read_without_asking(hub, account, inspector, fake_sites):
+    aid = account["id"]
+    ids = add_links(hub, aid, fake_sites, ["syllabus", "forum"])
+    site = next(s["site"] for s in inspector.sources(aid) if s["id"] == ids["syllabus"])
+    result = inspector.set_site(aid, site, "read")
+    assert result["queued"] == [ids["syllabus"]]
+    assert inspector.wait(aid, ids["syllabus"])["outcome"] == "ok"
+    later = add_link(hub, aid, fake_sites.url("course", "/missing"), "Found by a later collection")
+    assert inspector.inspect_trusted(aid)["queued"] == [later]
+    assert inspector.wait(aid, later)["outcome"] == "not_found"
+    assert inspector.view(inspector._source(aid, ids["forum"]))["outcome"] is None   # other sites still wait
+
+
+@pytest.mark.browser
 def test_every_connection_of_an_inspection_passes_the_address_check(hub, account, inspector, fake_sites):
     from canvas_hub.services.guard_proxy import GuardProxy
     aid = account["id"]

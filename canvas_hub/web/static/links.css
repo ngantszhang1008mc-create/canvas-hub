@@ -16,6 +16,11 @@
 .link-credentials label:not(.check) { display: grid; gap: 4px; font-size: 13px; font-weight: 600; }
 .link-credentials input:not([type=checkbox]) { width: 100%; min-width: 0; box-sizing: border-box; }
 .link-counts { margin: 14px 0; }
+.link-sites { display: grid; gap: 6px; }
+.link-site { justify-content: space-between; gap: 12px; padding: 6px 0; border-top: 1px solid var(--border); flex-wrap: nowrap; }
+.link-site-name { min-width: 0; overflow-wrap: anywhere; }
+.link-site select { flex: none; }
+.link-sites details > summary { cursor: pointer; padding: 6px 0; }
 .link-add { display: grid; grid-template-columns: minmax(200px, 2fr) minmax(160px, 1.5fr) minmax(120px, 1fr) auto; gap: 8px; align-items: center; }
 .link-inspect-all { min-height: 36px; }
 .nav-count { margin-left: auto; min-width: 18px; padding: 0 6px; border-radius: 9px; background: var(--mark); color: var(--bg); font-size: 11px; font-weight: 700; line-height: 18px; text-align: center; }
