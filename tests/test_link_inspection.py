@@ -75,15 +75,14 @@ def test_the_final_address_is_stored_without_sign_in_tickets():
     assert result["final_url"] == "https://cas.example.edu/cas/login" and "ST-secret" not in json.dumps(result)
 
 
-@pytest.mark.parametrize("url,private", [
-    ("http://127.0.0.1:8730/api/info", True), ("http://localhost/", True), ("https://10.1.2.3/x", True),
-    ("http://192.168.0.1", True), ("http://172.20.4.4:8080/a", True), ("http://169.254.169.254/latest/meta-data", True),
-    ("http://[::1]:9000/", True), ("http://printer.local/status", True), ("http://user@127.0.0.1/", True),
-    ("https://course.example.edu/127.0.0.1/", False), ("https://10.example.edu/", False), ("https://172.99.1.1/", False),
-    ("https://localhost.example.edu/", False), ("https://piazza.com/class/abc?next=http://127.0.0.1/", False),
-])
-def test_requests_to_this_computer_or_a_private_network_are_dropped(url, private):
-    assert bool(PRIVATE_URL.match(url)) is private
+def test_requests_to_this_computer_or_a_private_network_are_dropped():
+    for url in ("http://127.0.0.1:8730/api/info", "http://localhost/", "https://10.1.2.3/x", "http://192.168.0.1",
+                "http://172.20.4.4:8080/a", "http://169.254.169.254/latest/meta-data", "http://[::1]:9000/",
+                "http://printer.local/status", "http://user@127.0.0.1/"):
+        assert PRIVATE_URL.match(url), url
+    for url in ("https://course.example.edu/127.0.0.1/", "https://10.example.edu/", "https://172.99.1.1/",
+                "https://localhost.example.edu/", "https://piazza.com/class/abc?next=http://127.0.0.1/"):
+        assert not PRIVATE_URL.match(url), url
 
 
 # ---- newly found links are announced, never opened by themselves ------------------------

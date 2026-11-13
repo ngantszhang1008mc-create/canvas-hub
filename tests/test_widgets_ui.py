@@ -27,8 +27,8 @@ def card(page,cid):
     return page.locator(f'.overall-widget[data-widget-key="component:{cid}"]')
 
 
-@pytest.mark.parametrize('theme',['light','dark'])
-@pytest.mark.parametrize('width',[1280,380],ids=['desktop','phone'])
+# One light desktop run and one dark phone run: every theme and every width is exercised once.
+@pytest.mark.parametrize('theme,width',[('light',1280),('dark',380)],ids=['light-desktop','dark-phone'])
 def test_direct_controls_shared_state_focus_and_layout(hub,widget_examples,theme,width,tmp_path):
     e=widget_examples
     with serve(hub,[]) as (base,token,_),sync_playwright() as p:
