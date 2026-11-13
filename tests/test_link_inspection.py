@@ -1,5 +1,6 @@
 """External-link inspection against synthetic sites: reading, diagnosing failures, and the three kinds of sign-in."""
 import json
+import os
 import stat
 import time
 
@@ -243,7 +244,9 @@ def test_a_remembered_basic_sign_in_survives_a_restart_and_can_be_forgotten(hub,
     inspector.submit_credentials(aid, sid, fs.BASIC_USER, fs.BASIC_PASSWORD, remember=True)
     assert inspector.wait(aid, sid)["outcome"] == "ok"
     path = inspector._credentials_file()
-    assert path.parent == hub.paths.runtime and stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert path.parent == hub.paths.runtime
+    if os.name != "nt":                                  # Windows has no owner-only mode bits
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert not str(path).startswith(str(hub.paths.data))  # outside the folder that backups and exports read
     inspector.stop()
     again = LinkInspector(hub, allow_local=True)
