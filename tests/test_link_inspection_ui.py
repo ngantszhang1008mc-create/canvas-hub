@@ -8,7 +8,7 @@ import pytest
 
 from canvas_hub.boundary import HubAPI
 from canvas_hub.testing import fake_sites as fs
-from canvas_hub.testing.link_demo import add_links
+from canvas_hub.testing.link_demo import add_link, add_links
 from canvas_hub.web.app import create_app
 
 from .conftest import in_sign_in_window
@@ -98,6 +98,23 @@ def test_found_links_are_announced_and_one_press_inspects_them_all(hub, account,
         expect(row(page, "Public syllabus").get_by_role("status")).to_have_text("Read and saved")
         expect(notice).to_be_hidden()
     assert ids
+
+
+def test_inspect_all_sends_a_long_list_in_requests_the_server_accepts(hub, account, inspector, fake_sites):
+    import json
+    from playwright.sync_api import expect
+    ids = [add_link(hub, account["id"], fake_sites.url("course", f"/missing?page={n}"), f"Page {n}") for n in range(250)]
+    with app(hub, inspector) as (base, token), browser_page(base, token) as page:
+        sent = []
+
+        def record(route):
+            sent.append(json.loads(route.request.post_data)["source_ids"])
+            route.fulfill(json={"queued": sent[-1]})
+        page.route("**/link-inspection/inspect", record)
+        notice = page.get_by_role("complementary", name="External links", exact=True)
+        notice.get_by_role("button", name="Inspect all 250", exact=True).click()
+        expect(page).to_have_url(f"{base}/#/links")
+        assert [len(batch) for batch in sent] == [200, 50] and sorted(sum(sent, [])) == sorted(ids)
 
 
 def test_not_now_keeps_quiet_until_another_link_is_found(hub, account, inspector, fake_sites):

@@ -270,7 +270,11 @@ export function makeLinks(env) {
         const first = s.notice.examples[0];
         const dismiss = h("button", { onclick: (e) => act(e.currentTarget, () => api(A("/link-inspection/dismiss"), { method: "POST", body: { source_ids: s.notice.source_ids } })) }, "Not now");
         const go = h("button", { class: "primary", onclick: (e) => act(e.currentTarget, async () => {
-          await api(A("/link-inspection/inspect"), { method: "POST", body: { source_ids: s.notice.source_ids } });
+          // The server takes at most 200 ids per request; the notice can list more.
+          const ids = s.notice.source_ids;
+          for (let i = 0; i < ids.length; i += 200) {
+            await api(A("/link-inspection/inspect"), { method: "POST", body: { source_ids: ids.slice(i, i + 200) } });
+          }
           if (!location.hash.startsWith("#/links")) location.hash = "#/links";
         }) }, n === 1 ? "Inspect it" : `Inspect all ${n}`);
         mount(noticeEl, h("p", { role: "status" }, h("strong", null, n === 1 ? "New external link found. " : `${n} new external links found. `),

@@ -53,7 +53,8 @@ written to the database, logs, backups or exports. Without *Remember* they are
 kept in memory until Canvas Hub closes. With it they are stored in
 `<home>/runtime/site-logins.json` (owner-only, the same folder as the API token
 and assistant keys). A password the site rejects is discarded immediately, so it
-is never sent twice.
+is never sent twice. If the site redirects to another origin, the password is not
+sent with that redirect; redirects within the same site keep it.
 
 ### 2. University single sign-on (redirect to another sign-in host)
 
@@ -95,7 +96,11 @@ browser profile and any remembered passwords. Saved pages are kept.
   own browsers, lives under `<home>/browser-profiles/external-sites/`, and is
   never part of a backup or export.
 - Addresses on a private network and links that look like actions are refused.
-  If a public link redirects to a private address, nothing is saved.
+  The inspection browser makes every connection through a small local proxy
+  that resolves the host name and refuses private and local addresses. That
+  covers each redirect hop and every image, script or other resource a page
+  loads, not only the link itself. If a public link redirects to a private
+  address, nothing is saved.
 - Saved text is website content. The app and the Assistant treat it as data,
   not as instructions, and label it as read by Canvas Hub rather than reported
   by Canvas.

@@ -236,6 +236,33 @@ def test_basic_sign_in_from_the_local_form_then_everything_behind_it(hub, accoun
 
 
 @pytest.mark.browser
+def test_a_site_password_does_not_follow_a_redirect_to_another_site(hub, account, inspector, fake_sites):
+    aid = account["id"]
+    course = add_links(hub, aid, fake_sites, ["course"])["course"]
+    moved = add_link(hub, aid, fake_sites.url("course", "/comp/moved"), "Moved page")
+    inspector.inspect(aid, [course])
+    inspector.wait(aid, course)
+    inspector.submit_credentials(aid, course, fs.BASIC_USER, fs.BASIC_PASSWORD)
+    assert inspector.wait(aid, course)["outcome"] == "ok"
+    inspector.inspect(aid, [moved])
+    settled(inspector, aid, moved)
+    assert [r for r in fake_sites.seen("course") if r["path"] == "/comp/moved" and r["authorization"]]
+    forum = fake_sites.seen("forum")
+    assert forum and all(r["authorization"] is None for r in forum)
+
+
+@pytest.mark.browser
+def test_every_connection_of_an_inspection_passes_the_address_check(hub, account, inspector, fake_sites):
+    from canvas_hub.services.guard_proxy import GuardProxy
+    aid = account["id"]
+    sid = add_links(hub, aid, fake_sites, ["syllabus"])["syllabus"]
+    inspector._guard = GuardProxy(lambda ip: True)      # treat the synthetic sites' address as private
+    inspector.inspect(aid, [sid])
+    view = settled(inspector, aid, sid)
+    assert (view["outcome"], view["reason"]) == ("unsafe", "private_destination") and not fake_sites.seen()
+
+
+@pytest.mark.browser
 def test_a_remembered_basic_sign_in_survives_a_restart_and_can_be_forgotten(hub, account, inspector, fake_sites):
     aid = account["id"]
     sid = add_links(hub, aid, fake_sites, ["course"])["course"]

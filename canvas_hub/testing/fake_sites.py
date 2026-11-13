@@ -182,6 +182,8 @@ class FakeSites:
             if h.headers.get("Authorization") != expected:
                 self._send(h, 401, _page("Authorization required", "<h1>401 Authorization Required</h1>"),
                            headers=[("WWW-Authenticate", 'Basic realm="Course materials"')])
+            elif path == "/comp/moved":
+                self._redirect(h, self.origin("forum") + "/public")     # moved to another site
             elif path == "/comp/notes.pdf":
                 self._send(h, 200, make_pdf(["Lecture notes", "Recursion needs a base case."]), "application/pdf")
             else:

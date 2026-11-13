@@ -43,9 +43,10 @@ import subprocess
 import sys
 import threading
 import time
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 from ..external_urls import clean_url, public_address
+from .guard_proxy import GuardProxy
 from ..util import Conflict, InvalidInput, NotFound, canonical_json, now_iso, sha256_text
 
 log = logging.getLogger("canvas_hub.link_inspection")
@@ -97,6 +98,13 @@ FACTS_JS = r"""() => {
     loginForm: forms.length > 0, loginPrompt: prompts.length > 0,
     challenge: !!document.querySelector('#challenge-form, #cf-challenge-running, .g-recaptcha, iframe[src*="captcha" i], iframe[title*="challenge" i]') };
 }"""
+
+
+def _not_public(ip: str) -> bool:
+    try:
+        return not public_address(ip.split("%", 1)[0])
+    except ValueError:
+        return True
 
 
 def _host(url: str) -> str:
@@ -239,6 +247,9 @@ class LinkInspector:
         # Loopback targets are refused in the app. Only tests, which serve their
         # synthetic sites on 127.0.0.1, construct an inspector that allows them.
         self.allow_local = allow_local
+        # Every connection the browser makes (each redirect hop and subresource included) goes
+        # through this proxy, which refuses private and local addresses after resolving the name.
+        self._guard = None if allow_local else GuardProxy(_not_public)
         self.online = self._canvas_reachable
         self._q: queue.Queue = queue.Queue()
         self._thread: threading.Thread | None = None
@@ -578,6 +589,8 @@ class LinkInspector:
         except Exception:  # noqa: BLE001
             pass
         self._pw = None
+        if self._guard is not None:
+            self._guard.stop()
 
     def _alive(self) -> bool:
         if self._ctx is None:
@@ -608,8 +621,12 @@ class LinkInspector:
                 os.chmod(directory, 0o700)
             except OSError:
                 pass
-        options = {"headless": not want_headed, "accept_downloads": False,
+        # Service workers would fetch outside the request routes below, so they are not allowed.
+        options = {"headless": not want_headed, "accept_downloads": False, "service_workers": "block",
                    "viewport": None if want_headed else {"width": 1280, "height": 900}}
+        if self._guard is not None:
+            # "<-loopback>" removes Chromium's built-in exception, so loopback goes through the proxy too.
+            options["proxy"] = {"server": self._guard.start().server, "bypass": "<-loopback>"}
         if os.environ.get("CANVAS_HUB_CHROMIUM"):
             options["executable_path"] = os.environ["CANVAS_HUB_CHROMIUM"]
         elif os.environ.get("CANVAS_HUB_BROWSER_CHANNEL"):
@@ -644,7 +661,7 @@ class LinkInspector:
                 value = self._basic_for(owner, origin)
                 request = route.request
                 if value and _origin(request.url) == origin:
-                    route.continue_(headers={**request.headers, "authorization": value})
+                    self._send_basic(route, origin, value)
                 else:
                     route.continue_()
             except Exception:  # noqa: BLE001
@@ -653,6 +670,33 @@ class LinkInspector:
                 except Exception:  # noqa: BLE001
                     pass
         return handler
+
+    @staticmethod
+    def _send_basic(route, origin: str, value: str) -> None:
+        """Send a saved password with this request without letting it follow a redirect to another origin.
+
+        A header added with continue_() is also sent on every redirect the browser follows, and
+        redirect hops never reach a route handler. So the redirects are looked at here first. If
+        they all stay on this origin, the browser makes the request itself with the password and
+        follows them. Otherwise the browser gets the first response as it is and follows its
+        redirect without the password.
+        """
+        request = route.request
+        headers = {**request.headers, "authorization": value}
+        first = route.fetch(headers=headers, max_redirects=0)
+        response, url, hops = first, request.url, 0
+        while 300 <= response.status < 400 and request.method == "GET" and hops < 10:
+            location = response.headers.get("location")
+            target = urljoin(url, location) if location else None
+            if not target or _origin(target) != origin:
+                route.fulfill(response=first)        # the redirect leaves this site: no password with it
+                return
+            url, hops = target, hops + 1
+            response = route.fetch(url=url, headers=headers, max_redirects=0)
+        if hops == 0 or request.method != "GET":
+            route.fulfill(response=first)
+        else:
+            route.continue_(headers=headers)         # same-origin redirects only; the browser shows each hop
 
     def _close_context(self, *, keep_session: bool = True) -> None:
         ctx, self._ctx = self._ctx, None
@@ -717,6 +761,16 @@ class LinkInspector:
             return {"outcome": "unsafe", "reason": "refused_target"}
         page = ctx.new_page()
         chain: list[dict] = []
+        hosts: set[str] = set()                  # hosts the page itself was loaded from, redirects included
+        mark = self._guard.mark() if self._guard is not None else 0
+
+        def on_request(request):
+            try:
+                if request.is_navigation_request() and request.frame == page.main_frame:
+                    hosts.add((urlsplit(request.url).hostname or "").lower())
+            except Exception:  # noqa: BLE001
+                pass
+        page.on("request", on_request)
 
         def on_response(response):
             try:
@@ -734,7 +788,9 @@ class LinkInspector:
                 last = chain[-1] if chain else None
                 if last and last["status"] < 400 and last["type"] and last["type"] not in HTML_TYPES:
                     return self._read_file(ctx, owner, last)
-                if "ERR_BLOCKED_BY_CLIENT" in str(e) or any(self._private_destination(c["url"]) for c in chain):
+                refused = set(self._guard.refused_since(mark)) if self._guard is not None else set()
+                if ("ERR_BLOCKED_BY_CLIENT" in str(e) or hosts & refused
+                        or any(self._private_destination(c["url"]) for c in chain)):
                     return {"outcome": "unsafe", "reason": "private_destination"}
                 reason = _network_reason(str(e))
                 if reason in ("dns", "timeout", "refused", "network_error") and not self.online(aid):
