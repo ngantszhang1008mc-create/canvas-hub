@@ -253,7 +253,12 @@ export function makeLinks(env) {
     let s;
     try { s = await api(A("/link-inspection/summary")); } catch { noticeTimer = setTimeout(notice, 60000); return; }
     env.onSummary?.(s);
-    if (!noticeEl) { noticeEl = h("aside", { class: "link-notice", "aria-label": "External links", hidden: true }); document.body.append(noticeEl); }
+    if (!noticeEl) {
+      // Placed in the page column: a floating card on wide screens, an ordinary block above the page on narrow ones,
+      // so it never sits on top of what the user is trying to press.
+      noticeEl = h("aside", { class: "link-notice", "aria-label": "External links", hidden: true });
+      (document.getElementById("topbar") || document.body.lastElementChild).after(noticeEl);
+    }
     const n = s.notice.count, w = s.waiting_login;
     const key = JSON.stringify([n, s.notice.source_ids, w]);
     if (key !== lastNoticeKey) {
@@ -274,6 +279,7 @@ export function makeLinks(env) {
           h("div", { class: "row" }, go, h("a", { class: "btn", href: "#/links" }, "Review first"), dismiss));
       }
       noticeEl.hidden = !(n || w);
+      document.body.classList.toggle("has-link-notice", !noticeEl.hidden);
     }
     noticeTimer = setTimeout(notice, s.active || w ? 2500 : 60000);
   }
