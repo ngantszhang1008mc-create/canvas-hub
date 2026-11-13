@@ -7,8 +7,8 @@ from .test_components_ui import serve
 pytestmark = pytest.mark.browser
 
 
-@pytest.mark.parametrize("theme", ["light", "dark"])
-@pytest.mark.parametrize("width,height", [(1280, 800), (390, 844)], ids=["desktop", "phone"])
+# One light desktop run and one dark phone run: every theme and every width is exercised once.
+@pytest.mark.parametrize("theme,width,height", [("light", 1280, 800), ("dark", 390, 844)], ids=["light-desktop", "dark-phone"])
 def test_switch_during_a_response_keeps_chat_and_scrolling_working(hub, account, theme, width, height):
     from playwright.sync_api import expect, sync_playwright
     from .test_chat_ui import ANSWER

@@ -20,7 +20,7 @@ GROUPS = (
     ("notes", "Notes & files", "Read and edit local notes, reminders and reusable files."),
     ("planner", "Planner", "Read timetables, class times and scheduling clashes."),
     ("collect", "Collection", "Check sign-in and collection jobs; refresh stored Canvas data."),
-    ("external", "External sources", "Read external-source records and agent view requests."),
+    ("external", "External links", "List links to sites outside Canvas, open one in the app's browser, and read agent view requests."),
     ("display", "Interactive answers", "Show tables, charts, artifacts and other supported displays."),
     ("writes", "Canvas write previews", "Prepare Canvas writes only; sending still requires approval in the app."),
     ("settings", "Scope settings", "Read structured data and manage collection scope when permitted."),

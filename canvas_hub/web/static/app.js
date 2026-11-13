@@ -1,4 +1,4 @@
-import { makeExternalSources } from "./external-sources.js";
+import { makeLinks } from "./links.js";
 import { makeWorkspace } from "./workspace.js";
 import { makeContextAgent } from "./context-agent.js";
 import { makeComponents } from "./components.js";
@@ -316,7 +316,7 @@ function selectAccount(id) {
   S.accountId = id;
   store.set("account", String(id));
   for (const i of S.identities) for (const a of i.accounts) if (a.id === id) S.account = a;
-  if(changed){ C.closeDrawer(); renderWorkspaceNavigation(); }
+  if(changed){ C.closeDrawer(); renderWorkspaceNavigation(); E.notice(); }
 }
 
 async function renderWorkspaceNavigation() {
@@ -860,10 +860,11 @@ VIEWS.item = async (main, parts) => {
     const content = (it.fields.find((f) => f.field === "content") || {}).value;
     const by = (it.fields.find((f) => f.field === "provided_by") || {}).value;
     const readAt = (it.fields.find((f) => f.field === "read_at") || {}).value;
-    const adapterRead = by === "public declarative adapter";
-    if (content) cards.unshift(h("div", { class: "card" }, h("div", { class: "card-head" }, h("h2", null, adapterRead ? "Content read by your local adapter" : "Content read by a connected agent"),
-      h("span", { class: "sub" }, `${by || "agent"} · ${readAt ? fmtDate(readAt) : ""}`)),
-      h("div", { class: "banner warn", style: "margin-bottom:10px" }, h("div", { class: "b-body small" }, adapterRead ? "Read from the approved public source. Check its evidence and read time below." : "Provided by a connected agent, not reported by Canvas. Check the original site for anything important.")),
+    const adapterRead = by === "public declarative adapter", inspected = by === "Canvas Hub link inspection";
+    const contentField = it.fields.find((f) => f.field === "content") || {};
+    if (content) cards.unshift(h("div", { class: "card" }, h("div", { class: "card-head" }, h("h2", null, inspected ? "Page text saved by Canvas Hub" : adapterRead ? "Content read by your local adapter" : "Content read by a connected agent"),
+      h("span", { class: "sub" }, inspected ? `read ${ago(contentField.last_observed_at)}` : `${by || "agent"} · ${readAt ? fmtDate(readAt) : ""}`)),
+      h("div", { class: "banner warn", style: "margin-bottom:10px" }, h("div", { class: "b-body small" }, inspected ? "Canvas Hub opened this link in its own browser and saved the text below. It is what the website showed, not something Canvas reported; open the site for anything important." : adapterRead ? "Read from the approved public source. Check its evidence and read time below." : "Provided by a connected agent, not reported by Canvas. Check the original site for anything important.")),
       h("pre", { class: "text" }, content)));
 
   }
@@ -888,7 +889,16 @@ VIEWS.item = async (main, parts) => {
   await E.attach(main, {item_id: String(it.id)});
 };
 
-const E = makeExternalSources({h, mount, api, A, launcher: actions => W.launcher(actions)});
+const E = makeLinks({h, mount, api, A, ago, toast, onSummary: (s) => {
+  // A small count beside the navigation entry: links that still need you.
+  const link = document.querySelector('#nav a[data-view="links"]');
+  if (!link) return;
+  const n = s.not_inspected + s.needs_login;
+  let badge = link.querySelector(".nav-count");
+  if (n && !badge) { badge = h("span", { class: "nav-count" }); link.append(badge); }
+  if (badge) { badge.hidden = !n; badge.textContent = String(n); badge.setAttribute("aria-label", `${n} need attention`); }
+}});
+VIEWS.links = (main) => E.page(main, pageHead);
 
 const relLabel = (r) => ({ body_link: "links to", module_item_content: "opens", module_contains: "contains", attachment: "attachment",
   folder_contains: "contains", submission_for: "submission for", home_page: "home page", calendar_for: "calendar entry for" }[r] || r);
@@ -1144,7 +1154,7 @@ VIEWS.collect = async (main) => {
       const j = await api(A("/jobs") + qs({ limit: 15 })).catch(() => null);
       if (!j) return;
       renderJobs(j.jobs);
-      if (!j.jobs.some((x) => ["running", "queued", "cancel_requested"].includes(x.state))) { clearInterval(S.jobPoll); refreshSession(true); }
+      if (!j.jobs.some((x) => ["running", "queued", "cancel_requested"].includes(x.state))) { clearInterval(S.jobPoll); refreshSession(true); E.notice(); }
     }, 2000);
   }
   const rs = await api(A("/refresh-settings")).catch(() => null);
@@ -1348,6 +1358,7 @@ const STEP_LABEL = {
   cancel_job: () => "Cancelled a job", update_scope: () => "Changed the collection scope",
   get_timetable: () => "Built your week", list_class_times: () => "Read your class times",
   add_class_time: (a) => `Saved class time “${a.title}”`, remove_class_time: () => "Removed a class time",
+  list_external_sources: () => "Looked at external links", inspect_external_link: () => "Opened an external link",
   list_view_requests: () => "Checked agent requests", request_external_view: (a) => `Asked a connected agent to read ${a.title || a.url}`,
 };
 
@@ -1543,7 +1554,7 @@ VIEWS.assistant = async (main, parts, params) => {
       log.append(h("div", { class: "msg assistant live", "aria-busy": "true" }, typer("live", d.draft.text, true)));
     } else typers.delete("live");
     const st = d.conversation.run_state;
-    const contextBlocked = (d.conversation.run_error || '').startsWith('Context budget exceeded');
+    const contextBlocked = /^(Context budget exceeded|This request is too large for the model's context window)/.test(d.conversation.run_error || '');
     const newest = [...all].reverse();
     const lastReply = newest.find(m => m.role === "assistant"), lastUser = newest.find(m => m.role === "user");
     const replyStopped = /^The provider (reached its output limit|returned no answer or tool call)/.test(d.conversation.run_error || "");
@@ -1558,12 +1569,18 @@ VIEWS.assistant = async (main, parts, params) => {
       return missing && missing === usage.requests ? "unreported" : `${usage[key] ?? 0}${missing ? " (partial)" : ""}`;
     };
     const budget = cx.budget;
+    const count = (v) => v == null ? "an unreported number of" : Number(v).toLocaleString("en-US");
     mount(contextInfo,
       h("p", null, cx.compacted_through ? (cx.stale ? "Historical goals and decisions are retained. Source facts in the saved summary are stale and must be checked against current versions before use." : `Older turns compacted through message ${cx.compacted_through}.`) : "Using original conversation context."),
       cx.compacted_through && cx.live_state_changed ? h('p', null, 'Local trackers or notes changed. The historical summary is retained; current state must be read again before using or updating it.') : null,
       h("p", null, `${cx.summary_requests || 0} summary requests · reported summary tokens: ${reportedTokens(cost, "input_tokens")} in / ${reportedTokens(cost, "output_tokens")} out. Total reported tokens: ${reportedTokens(total, "input_tokens")} in / ${reportedTokens(total, "output_tokens")} out; included cache read ${reportedTokens(total, "cache_read_input_tokens")}, cache write ${reportedTokens(total, "cache_creation_input_tokens")}; included reasoning ${reportedTokens(total, "reasoning_output_tokens")}.${total.unreported_requests ? ` Usage unavailable or incomplete for ${total.unreported_requests} request(s); these are not counted as zero cost.` : ""} Local telemetry does not determine free allowance or billed cost.`),
       h("p", null, "Usage from earlier interrupted requests may be absent from these totals."),
-      budget ? h("p", null, `Last request estimate: ${budget.estimated_tokens} input tokens; ${budget.response_reserved} reserved for output/reasoning. ${budget.request_max_tokens != null && budget.request_max_tokens !== budget.response_reserved ? `Provider output cap: ${budget.request_max_tokens}. ` : ""}${budget.limit_disabled ? "Application context limit disabled. Provider limits still apply." : `Capacity: ${budget.capacity} (${budget.capacity_source}). Usable budget after 10% safety margin: ${budget.effective_capacity ?? Math.floor(budget.capacity * 0.9)}.`} Method: ${budget.estimator || "unreported"}.`) : null,
+      budget ? h("p", null, `This chat now sends about ${count(budget.estimated_tokens)} input tokens per request (estimated from ${budget.estimator}). `
+        + (budget.capacity != null ? `Context window: ${count(budget.capacity)} tokens (${budget.capacity_source})${budget.limit_disabled ? "; Canvas Hub's limit is turned off" : `, ${budget.estimated_tokens / budget.capacity < 0.01 ? "under 1" : Math.round(100 * budget.estimated_tokens / budget.capacity)}% in use`}. `
+          : "Context window: not known for this model, so Canvas Hub does not limit requests; the provider enforces its own. ")
+        + `Reply limit: ${budget.reply_limit === "none" ? "none" : budget.request_max_tokens != null ? `${count(budget.request_max_tokens)} tokens` : "none"}.`) : null,
+      cx.last_request ? h("p", null, `Last request: the provider counted ${count(cx.last_request.reported_input_tokens)} input and ${count(cx.last_request.reported_output_tokens)} output tokens`
+        + (cx.last_request.estimated_input_tokens ? ` (estimated beforehand: ${count(cx.last_request.estimated_input_tokens)}).` : ".")) : null,
       d.conversation.context_notice ? h("p", null, d.conversation.context_notice) : null);
     mount(status, busy ? h("span", { class: "working" }, st === "cancelling" ? "Stopping…" : "Working…")
       : st === "error" ? h("div", { class: "banner bad", style: "margin:0" }, h("div", { class: "b-body" }, h("div", { class: "b-title" }, "The assistant stopped"),
@@ -1813,24 +1830,55 @@ function assistantSettingsCard(cfg, prof) {
   extra.value = cur.extra_params && Object.keys(cur.extra_params).length ? JSON.stringify(cur.extra_params) : "";
   const extraField = h("label", { class: "field", style: "grid-column:1/-1" },
     h("span", null, "Extra request settings (JSON, optional — sent as-is to the provider)"), extra);
-  const limitDisabled = h("input", { type: "checkbox", checked: cur.context?.limit_disabled === true });
+  // ---- limits: how long a reply may be, and how much the model can take in ----
+  const tokens = (v) => Number(v).toLocaleString("en-US");
+  const radio = (name, value, checked) => h("input", { type: "radio", name: `${name}-${cur.id || "new"}`, value, checked: checked ? true : null });
+  // A setup saved before this choice existed keeps the automatic cap it had, shown here as its limit.
+  const replyMode = cur.id ? (cur.limits?.reply_limit || "legacy") : "none";
+  const replyNone = radio("reply-limit", "none", replyMode === "none");
+  const replyCustom = radio("reply-limit", "custom", replyMode !== "none");
+  const responseTokens = h("input", { type: "number", min: 16, max: 2000000, step: 1, style: "width:9em",
+    value: replyMode === "none" ? "" : (cur.context?.response_tokens || cur.limits?.reply_tokens || ""), "aria-label": "Maximum tokens per reply" });
+  responseTokens.addEventListener("input", () => { replyCustom.checked = true; });
+  const replyNoneText = h("span");
+  const responseField = h("fieldset", { class: "limit-choice" }, h("legend", null, "Reply length"),
+    h("label", { class: "check" }, replyNone, replyNoneText),
+    h("label", { class: "check" }, replyCustom, h("span", null, "Limit each reply to ", responseTokens, " tokens")),
+    replyMode === "legacy" ? h("p", { class: "tiny muted" }, "This setup has been using that limit automatically. Choose No limit if replies get cut off.") : null,
+    h("p", { class: "tiny muted" }, "The model's reasoning and its answer share this number. A reply that reaches the limit is cut off and marked incomplete. With no limit the model stops when it has finished; longer replies use more of your API quota."));
+  const windowMode = cur.context?.limit_disabled === true ? "off" : cur.context?.capacity ? "own" : "model";
+  const windowModel = radio("context-limit", "model", windowMode === "model");
+  const windowOwn = radio("context-limit", "own", windowMode === "own");
+  const limitDisabled = radio("context-limit", "off", windowMode === "off");
+  const capacity = h("input", { type: "number", min: 1024, max: 50000000, step: 1, style: "width:10em",
+    value: cur.context?.capacity || "", "aria-label": "Context window in tokens" });
+  capacity.addEventListener("input", () => { windowOwn.checked = true; syncContextLimit(); });
   const autoCompact = h("input", { type: "checkbox", checked: cur.context?.auto_compact === true });
-  const capacity = h("input", { type: "number", min: 4096, max: 2000000, step: 1,
-    value: cur.context?.capacity || "", placeholder: "Application safety default", "aria-label": "Context token capacity" });
-  const syncContextLimit = () => { capacity.disabled = autoCompact.disabled = limitDisabled.checked; };
-  limitDisabled.addEventListener("change", syncContextLimit);
-  syncContextLimit();
-  const responseTokens = h("input", { type: "number", min: 512, max: 128000, step: 1,
-    value: cur.context?.response_tokens || "", placeholder: "Automatic", "aria-label": "Reply token limit" });
-  const responseField = h("label", null, "Reply token limit, including reasoning (optional)", responseTokens,
-    h("p", { class: "tiny muted" }, "Reasoning and answer share this limit. Higher limits can use more API quota. Extra request max_tokens or max_completion_tokens takes precedence; clearing this field restores the application default."));
+  const windowInfo = h("p", { class: "small", role: "status" });
+  const windowModelText = h("span");
+  const syncContextLimit = () => { autoCompact.disabled = limitDisabled.checked || (windowModel.checked && !cur.limits?.model_context_window); };
+  for (const r of [windowModel, windowOwn, limitDisabled]) r.addEventListener("change", syncContextLimit);
+  const renderLimits = () => {
+    const l = cur.limits || {};
+    replyNoneText.textContent = l.max_output ? `No limit (the model stops by itself; its own maximum is ${tokens(l.max_output)} tokens)` : "No limit (the model stops by itself)";
+    windowInfo.textContent = l.model_context_window
+      ? `This model's context window is ${tokens(l.model_context_window)} tokens (${l.model_context_source}).`
+      : cur.id ? "This model's context window is not known. Save & test asks the provider for it; if the provider does not say, enter it below or leave requests unlimited."
+        : "Save & test asks the provider for this model's context window.";
+    windowModelText.textContent = l.model_context_window ? `Use the model's own limit (${tokens(l.model_context_window)} tokens)`
+      : "Use the model's own limit (not known yet, so Canvas Hub does not limit requests)";
+    syncContextLimit();
+  };
+  renderLimits();
   const contextField = h("div", { class: "field", style: "grid-column:1/-1" },
-    h("label", null, limitDisabled, " Disable application context limit"),
-    h("p", { class: "tiny muted" }, "The provider or gateway still enforces its own limits and may reject oversized requests. Disabling the application limit pauses automatic compaction. Manual compaction and reply token limits remain available."),
-    h("label", null, autoCompact, " Automatically compact older turns near the context budget"),
-    h("label", null, "Context token capacity (optional)", capacity),
     responseField,
-    h("p", { class: "tiny muted" }, "When the application limit is enabled, set capacity to a value verified for your model and endpoint. Leave it blank to use documented model limits for supported endpoints or conservative application defaults otherwise. Replies, reasoning and a 10% safety margin have reserved space. Compaction uses model quota; original history stays saved."));
+    h("fieldset", { class: "limit-choice" }, h("legend", null, "Context window (how much the model can read at once)"),
+      windowInfo,
+      h("label", { class: "check" }, windowModel, windowModelText),
+      h("label", { class: "check" }, windowOwn, h("span", null, "Use my own limit: ", capacity, " tokens")),
+      h("label", { class: "check" }, limitDisabled, h("span", null, "No limit in Canvas Hub (the provider still enforces its own and may reject an oversized request)")),
+      h("label", { class: "check" }, autoCompact, h("span", null, "Automatically summarize older turns when a chat gets close to the limit (uses model quota; the full history stays saved)")),
+      h("p", { class: "tiny muted" }, "Before each request Canvas Hub estimates its size and refuses to send one that would not fit. The estimate is corrected with the token counts the provider reports, so it becomes exact for your model after the first reply.")));
   const isGateway = () => presetSel.value === "allowance_gateway"
     || cfg.presets.some((p) => p.id === presetSel.value && p.provider === "allowance_gateway");
   const gatewayMode = h("select", { "aria-label": "Gateway mode" },
@@ -1938,6 +1986,7 @@ function assistantSettingsCard(cfg, prof) {
     const updated = response?.profiles?.find((p) => p.id === (response.saved_profile || cur.id));
     if (updated) {
       Object.assign(cur, updated);
+      renderLimits();
       const listed = document.querySelector(`[data-setup-summary="${CSS.escape(cur.id)}"]`);
       if (listed) listed.textContent = assistantSetupSummary(cur);
       if (cur.provider === "allowance_gateway" || cur.preset === "allowance_gateway") {
@@ -2008,10 +2057,19 @@ function assistantSettingsCard(cfg, prof) {
       try { extraParams = JSON.parse(extra.value); } catch { toast("Extra request settings must be valid JSON", true); return null; }
     }
     const body = { profile_id: cur.id, name: name.value, preset: presetSel.value, model: model.value };
-    body.context = { ...(cur.context || {}), auto_compact: autoCompact.checked, limit_disabled: limitDisabled.checked };
-    if (capacity.value.trim()) body.context.capacity = Number(capacity.value); else delete body.context.capacity;
+    body.context = { ...(cur.context || {}), auto_compact: autoCompact.checked && !autoCompact.disabled, limit_disabled: limitDisabled.checked };
+    delete body.context.capacity;
+    if (windowOwn.checked) {
+      if (!capacity.value.trim()) { toast("Enter your own context window in tokens, or choose another option", true); return null; }
+      body.context.capacity = Number(capacity.value);
+    }
     if (!isCodex) {
-      if (responseTokens.value.trim()) body.context.response_tokens = Number(responseTokens.value); else delete body.context.response_tokens;
+      delete body.context.response_tokens;
+      body.context.reply_limit = replyCustom.checked ? "custom" : "none";
+      if (replyCustom.checked) {
+        if (!responseTokens.value.trim()) { toast("Enter the maximum tokens per reply, or choose No limit", true); return null; }
+        body.context.response_tokens = Number(responseTokens.value);
+      }
     }
     if (gateway) Object.assign(body, { base_url: base.value, gateway_mode: gatewayMode.value, gateway_consent: gatewayConsent.checked,
       ...(gatewayToolsChanged && sameGateway() ? { gateway_tools: [...gatewaySelectedTools] } : {}) });
@@ -2050,6 +2108,7 @@ function assistantSettingsCard(cfg, prof) {
     mount(result, h("span", { class: "muted" }, gateway ? "Checking allowance…" : "Testing…"));
     const t = await guard(() => api("/api/assistant/test", { method: "POST", body: { profile_id: r.saved_profile } }), result);
     if (t) {
+      if (t.limits) { cur.limits = t.limits; renderLimits(); }
       if (gateway && t.ok) {
         const latest = await guard(() => api("/api/assistant/config"));
         if (latest) adoptProfile({ ...latest, saved_profile: r.saved_profile });
@@ -2245,8 +2304,8 @@ VIEWS.requests = async (main) => {
     url.placeholder=(S.account?.origin||'https://canvas.example.edu')+'/courses/…';
     title.placeholder='Canvas page title';note.placeholder='Which Canvas page content should the agent read?';
   }
-  mount(main, pageHead("Agent requests", inspectionPaused?"External-site inspection is temporarily unavailable. Saved results and Canvas-page requests remain available.":"Ask a connected agent to read sites Canvas Hub can't open itself, such as a course website outside Canvas."),
-    inspectionPaused?h('p',{role:'status'},'New requests must use your Canvas instance address while external inspection is paused.'):null,
+  mount(main, pageHead("Agent requests", inspectionPaused?"Ask a connected agent to read a Canvas page. For sites outside Canvas, use External links: Canvas Hub now opens those itself.":"Ask a connected agent to read sites Canvas Hub can't open itself, such as a course website outside Canvas."),
+    inspectionPaused?h('p',{role:'status'},'Requests here must use your Canvas address. To read a course website, grader or forum, go to ',h('a',{href:'#/links'},'External links'),'.'):null,
     inspectionPaused?null:h("div", { class: "banner info" }, h("div", { class: "b-body small" },
       "Canvas Hub never opens these sites or touches your other browser profiles. An agent you connect over MCP (for example Codex or Claude with your browser) can pick up a request, read the site with its own access, and send back the text. It is stored as ",
       h("strong", null, "agent-provided"), " content, separate from what Canvas reported, and becomes searchable. The agent needs ",

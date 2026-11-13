@@ -1,0 +1,40 @@
+/* External links: one row per link, with its status, a plain explanation and the next step. */
+.link-card > .card-head { align-items: center; flex-wrap: wrap; }
+.link-card > .card-head .row { flex-wrap: wrap; }
+.link-list { display: grid; }
+.link-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px 16px; align-items: start; padding: 14px 0; border-top: 1px solid var(--rule); }
+.link-list > .link-row:first-child { border-top: 0; }
+.link-main { min-width: 0; display: grid; gap: 6px; overflow-wrap: anywhere; }
+.link-title { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-weight: 600; }
+.link-message, .link-steps { margin: 0; }
+.link-steps { padding-left: 20px; display: grid; gap: 4px; }
+.link-actions { display: grid; gap: 6px; justify-items: stretch; min-width: 168px; }
+.link-actions > button, .link-actions > .btn { min-height: 36px; white-space: normal; text-align: center; }
+.link-row .link-error { grid-column: 1 / -1; margin: 0; color: var(--bad); font-size: 13px; }
+.link-credentials { display: grid; gap: 10px; max-width: 460px; padding: 12px; border: 1px solid var(--rule); border-radius: 8px; background: var(--surface-2); }
+.link-credentials p { margin: 0; }
+.link-credentials label:not(.check) { display: grid; gap: 4px; font-size: 13px; font-weight: 600; }
+.link-credentials input:not([type=checkbox]) { width: 100%; min-width: 0; box-sizing: border-box; }
+.link-counts { margin: 14px 0; }
+.link-sites { display: grid; gap: 6px; }
+.link-site { justify-content: space-between; gap: 12px; padding: 6px 0; border-top: 1px solid var(--border); flex-wrap: nowrap; }
+.link-site-name { min-width: 0; overflow-wrap: anywhere; }
+.link-site select { flex: none; }
+.link-sites details > summary { cursor: pointer; padding: 6px 0; }
+.link-add { display: grid; grid-template-columns: minmax(200px, 2fr) minmax(160px, 1.5fr) minmax(120px, 1fr) auto; gap: 8px; align-items: center; }
+.link-inspect-all { min-height: 36px; }
+.nav-count { margin-left: auto; min-width: 18px; padding: 0 6px; border-radius: 9px; background: var(--mark); color: var(--bg); font-size: 11px; font-weight: 700; line-height: 18px; text-align: center; }
+.link-notice { position: fixed; z-index: 35; right: 20px; bottom: 20px; width: min(380px, calc(100vw - 40px)); padding: 16px; border: 1px solid var(--border-strong); border-radius: 12px; background: var(--paper); box-shadow: var(--shadow); }
+/* Room to scroll the last rows clear of the floating card. */
+body.has-link-notice .main { padding-bottom: 190px; }
+.link-notice p { margin: 0 0 12px; font-size: 13.5px; overflow-wrap: anywhere; }
+.link-notice .row { flex-wrap: wrap; }
+.link-notice button, .link-notice .btn { min-height: 36px; }
+@media (max-width: 640px) {
+  .link-row { grid-template-columns: minmax(0, 1fr); }
+  .link-actions { min-width: 0; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); }
+  .link-add { grid-template-columns: minmax(0, 1fr); }
+  .link-notice { position: static; width: auto; margin: 10px 12px 0; box-shadow: none; }
+  body.has-link-notice .main { padding-bottom: 24px; }
+}
+.link-earlier pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 280px; overflow: auto; margin: 8px 0 0; }

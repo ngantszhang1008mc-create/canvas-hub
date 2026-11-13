@@ -25,14 +25,6 @@ def external_inspection_enabled(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def anonymous_probe_is_synthetic(monkeypatch):
-    # Analysis failures now schedule a probe. Existing fixture-based tests must
-    # never turn that recovery path into real DNS/browser/network access.
-    monkeypatch.setattr('canvas_hub.services.login_detection.inspect', lambda url: {
-        'outcome': 'unknown', 'evidence': ['insufficient_rendered_evidence'], 'course_access': 'unknown'})
-
-
-@pytest.fixture(autouse=True)
 def configured_browser_executable(request, monkeypatch):
     """Use the app's browser override for UI tests as well as the collector."""
     executable = os.environ.get("CANVAS_HUB_CHROMIUM")
@@ -79,3 +71,58 @@ def variant(pkg, package_id, observed_at, mutate=None):
     if mutate:
         mutate(p)
     return p
+
+
+@pytest.fixture
+def fake_sites():
+    """Synthetic external sites: Basic sign-in, single sign-on, and a site with its own form."""
+    from canvas_hub.testing.fake_sites import FakeSites
+    sites = FakeSites().start()
+    yield sites
+    sites.stop()
+
+
+@pytest.fixture
+def inspector(hub, account, fixture_pkg):
+    """A link inspector that may open the synthetic sites on 127.0.0.1 (the app itself never can)."""
+    from canvas_hub.services.link_inspection import LinkInspector
+    hub.importer.import_package(fixture_pkg)
+    service = LinkInspector(hub, allow_local=True)
+    service.online = lambda _aid: True
+    yield service
+    service.stop()
+
+
+def in_sign_in_window(inspector, action, timeout=30):
+    """Stand in for the user: run ``action(page)`` in the open sign-in window, on the browser's own thread."""
+    import threading
+    import time
+    deadline = time.monotonic() + timeout
+    while inspector._login is None and time.monotonic() < deadline:
+        time.sleep(0.05)
+    done, out = threading.Event(), {}
+
+    def job():
+        try:
+            out["value"] = action(inspector._login["page"])
+        except Exception as e:  # noqa: BLE001
+            out["error"] = e
+        finally:
+            done.set()
+    inspector._q.put(job)
+    assert done.wait(timeout), "the sign-in window did not respond"
+    if "error" in out:
+        raise out["error"]
+    return out.get("value")
+
+
+def settled(inspector, account_id, source_id, timeout=30):
+    """Wait until a link is neither being read nor waiting for a sign-in."""
+    import time
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        view = inspector.view(inspector._source(account_id, source_id))
+        if view["state"] == "idle":
+            return view
+        time.sleep(0.1)
+    raise AssertionError(f"link {source_id} did not settle: {view}")

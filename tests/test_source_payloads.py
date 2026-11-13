@@ -6,18 +6,11 @@ import pytest
 
 from canvas_hub.assistant import AssistantService
 from canvas_hub.assistant.context import valid_groups
-from canvas_hub.assistant.providers import ProviderError, Turn
+from canvas_hub.assistant.providers import ProviderError
 from canvas_hub.assistant.source_context import followup_source_context, with_source_context
 from canvas_hub.services.context_sources import ContextSources
-from canvas_hub.services.external_reader import PublicReader, Read
 from canvas_hub.util import Conflict, now_iso
 from .test_workspace import workspace, prepare, start
-from .test_source_analysis import builtin, finish, start as start_analysis, RESULT
-from .test_external_sources import source, URL, SPEC, HTML
-from .test_connected_analysis import Connections
-from .test_allowance_gateway import gateway, setup as gateway_setup
-from canvas_hub.boundary import HubAPI
-from canvas_hub.services.source_analysis import SourceAnalysis
 
 
 def attachment(w, body):
@@ -221,64 +214,6 @@ def test_followup_matches_complete_ids_and_never_substitutes_small_text_for_larg
     assert all('text' not in s for s in manifest['sources'])
 
 
-def test_public_classification_is_bounded_preserves_full_local_content_and_checks_dom(builtin, source, account, monkeypatch):
-    service, api, calls = builtin
-    svc, sid, reads = source
-    body = b'<html><title>Actual course title</title><main>' + b'Lecture introduction. '*5000 + HTML + b'<h2>FINAL EXCEPTION</h2><a href="/policy">Policy</a></main></html>'
-    svc.reader = PublicReader(lambda url: (reads.append(url) or Read(url, 200, 'text/html', body)))
-    class Provider:
-        def complete(self, *args):
-            calls.append(args)
-            return Turn(json.dumps({**RESULT, 'adapter_spec': SPEC}))
-    monkeypatch.setattr('canvas_hub.services.source_analysis.make_provider', lambda cfg: Provider())
-    start_analysis(service, account['id'], sid)
-    finish(service)
-    result = svc.get(account['id'], sid)
-    assert result['request']['status'] == 'done' and len(calls) == 1 and reads == [URL]
-    sent = json.loads(calls[0][1][0]['sent_text'])
-    assert sent['title'] == 'Actual course title' and sent['dom_examples'] and sent['links']
-    assert not sent['coverage']['complete_read'] and sent['coverage']['supplied_chars'] <= 4600
-    full = json.loads(svc.db.one('SELECT evidence_json FROM external_reads WHERE source_id=?', (sid,))['evidence_json'])[0]['content']
-    assert len(full) > 100000 and 'FINAL EXCEPTION' in full
-    assert all(full[x['start_char']:x['end_char']] == x['text'] for x in sent['excerpts'])
-    assert any('FINAL EXCEPTION' in x['text'] for x in sent['excerpts'])
-    assert result['classification']['evidence_coverage'] == sent['coverage']
-    assert len(calls[0][1][0]['sent_text']) < len(full) / 8
-    # Valid syntax is insufficient: a selector absent from the fetched DOM fails.
-    previous = deepcopy(result['classification'])
-    bad = deepcopy(SPEC)
-    bad['records']['selector'] = '.invented-card'
-    monkeypatch.setattr('canvas_hub.services.source_analysis.make_provider',
-                        lambda cfg: type('Bad', (), {'complete': lambda *a: Turn(json.dumps({**RESULT, 'adapter_spec': bad}))})())
-    start_analysis(service, account['id'], sid, reanalyze=True)
-    finish(service)
-    assert svc.get(account['id'], sid)['classification'] == previous
-    assert svc.get(account['id'], sid)['request']['status'] == 'declined'
-    assert reads == [URL, URL]
-
-
-def test_connected_classification_samples_only_reviewed_text_and_keeps_full_snapshot(builtin, source, account, monkeypatch):
-    service, api, _ = builtin
-    svc, sid, reads = source
-    calls = []
-    class Provider:
-        def complete(self, *args):
-            calls.append(args)
-            return Turn(json.dumps({'roles': ['material'], 'confidence': .8, 'summary': 'Synthetic'}))
-    monkeypatch.setattr('canvas_hub.services.source_analysis.make_provider', lambda cfg: Provider())
-    connection = Connections(account, 'Approved course lecture material. ' * 1500 + '\nFinal grading exception.')
-    offer = service.connected_disclosure(account['id'], sid, connection)
-    service.start(account['id'], sid, offer['token'], consent=True, connected=True)
-    finish(service)
-    assert len(calls) == 1 and not reads
-    payload = json.loads(calls[0][1][0]['sent_text'])
-    assert not any(k in payload for k in ('dom_examples', 'title', 'links'))
-    assert '/2026' not in payload['url'] and not payload['coverage']['complete_read']
-    assert all(offer['content'][r['start_char']:r['end_char']] == r['text'] for r in payload['excerpts'])
-    stored = json.loads(svc.db.one('SELECT evidence_json FROM external_reads WHERE source_id=?', (sid,))['evidence_json'])[0]
-    assert stored['content'] == offer['content'] and stored['access_mode'] == 'connected_local_reviewed'
-
-
 def test_shared_attachment_is_sent_once_with_both_origins(workspace):
     w = workspace
     body = 'ONE_SHARED_POLICY: mandatory lab attendance.'
@@ -313,40 +248,6 @@ def test_manifest_overflow_is_explicit_and_all_sources_remain_readable(workspace
         offset = page['next_offset']
     assert len(all_sources) == 24
     assert all(index.read(w['aid'], s['source_id'], version=s['version'])['coverage']['complete_read'] for s in all_sources)
-
-
-def test_gateway_receives_request_sources_once_and_keeps_normalized_usage(source, account, hub, gateway):
-    sources, sid, reads = source
-    api = HubAPI(hub)
-    assistant, _ = gateway_setup(api, gateway)
-    iid = hub.db.one("SELECT id FROM items WHERE item_type='assignment' AND canvas_id='7001'")['id']
-    body = 'GATEWAY_SOURCE_RULE: Include the complete appendix.'
-    attachment({'hub': hub, 'aid': account['id'], 'iid': iid}, body)
-    payload = {'action': 'breakdown', 'item_id': iid}
-    prepared = hub.workspace.prepare(api, assistant, account['id'], payload)
-    result = hub.workspace.start(api, assistant, account['id'], {
-        **payload, 'disclosure_fingerprint': prepared['disclosure']['fingerprint'], 'acknowledge': True})
-    assistant.wait(result['conversation_id'], 5)
-    status = assistant.get_conversation(account['id'], result['conversation_id'])
-    assert status['conversation']['run_state'] == 'idle', status
-    assert len(gateway.requests) == 1
-    assert json.dumps(gateway.requests[0]['body']).count('GATEWAY_SOURCE_RULE') == 1
-    assert 'GATEWAY_SOURCE_RULE' not in json.dumps(assistant._transcript(result['conversation_id']))
-    assert status['context']['total_usage']['input_tokens'] == 100
-    assert status['context']['total_usage']['cache_read_input_tokens'] == 10
-    # Classification still uses the same enrolled gateway, one private attempt,
-    # and the existing source/provider consent before sending any evidence.
-    service = SourceAnalysis(api)
-    gateway.action = lambda request: gateway.events(request, json.dumps(RESULT))
-    offer = service.disclosure(account['id'], sid)
-    assert offer['provider'] == 'allowance_gateway' and len(gateway.requests) == 1
-    service.start(account['id'], sid, offer['token'], consent=True)
-    finish(service)
-    assert len(gateway.requests) == 2 and reads == [URL]
-    assert sources.get(account['id'], sid)['request']['status'] == 'done'
-    model_payload = json.loads(gateway.requests[1]['body']['messages'][1]['content'])
-    assert model_payload['coverage']['complete_read']
-    assert len(list((hub.paths.runtime / 'gateway-attempts').glob('*.json'))) == 2
 
 
 def test_legacy_syllabus_field_is_fully_readable_beyond_the_old_prefix(workspace):

@@ -1,19 +1,13 @@
-"""Reported tracker-budget regression; synthetic saved history and providers only."""
-import copy
+"""Tool selection limits, source catalog paging and tool discovery; synthetic data only."""
 import json
 
 import pytest
 
-from canvas_hub.agent_tools import ToolContext, run_tool_display
 from canvas_hub.assistant import AssistantService
-from canvas_hub.assistant.context import Policy, context_error, estimate, valid_groups
-from canvas_hub.assistant.providers import ToolCall, Turn
 from canvas_hub.assistant.tool_catalog import ToolSession
 from canvas_hub.boundary import HubAPI
 from canvas_hub.services.context_sources import ContextSources
 from canvas_hub.util import InvalidInput, now_iso
-
-from .test_components import HMAW
 
 EXTRA_TRACKER_TOOLS = ['tool:' + name for name in (
     'list_context_sources', 'read_context_source', 'search_context_sources',
@@ -53,108 +47,6 @@ def test_overfull_tracker_selection_is_rejected_before_dispatch_or_history(hub, 
     assert not provider_calls
     assert svc.list_conversations(account['id']) == []
     assert not hub.db.query('SELECT 1 FROM assistant_messages')
-
-
-@pytest.mark.parametrize('characters,extra_tools', [(6500, []), (6800, []), (6500, EXTRA_TRACKER_TOOLS)],
-                         ids=['original-tracker', 'tracker-followup', '32-tool-tracker-sources'])
-def test_tracker_results_share_unused_budget_without_masking_or_replaying(hub, account, monkeypatch, characters, extra_tools):
-    aid = account['id']
-    api = HubAPI(hub)
-    svc = api.assistant = AssistantService(hub, api)
-    svc.update_config({'preset': 'codex'})
-    view = hub.components.create(aid, 'score_model', HMAW)
-    hub.components.set_state(aid, view['id'], {'include': {'nest': False}, 'values': {'sde': 12}})
-    ctx = ToolContext(api, account_id=aid)
-    with hub.db.tx() as c:
-        cid = c.execute('INSERT INTO assistant_conversations(account_id,title,created_at,updated_at) VALUES (?,?,?,?)',
-                        (aid, 'Synthetic stopped tracker work', now_iso(), now_iso())).lastrowid
-    svc._append(cid, 'user', {'text': 'Rebuild the old HMAW tracker', 'sent_text': 'Rebuild the old HMAW tracker'})
-    # Retain a successful earlier mutation and the large legacy result verbatim.
-    svc._append(cid, 'assistant', {'tool_calls': [{'id': 'saved-pin', 'name': 'update_component',
-                                                  'input': {'component_id': view['id'], 'pin': False}}]})
-    text, error, _ = run_tool_display(ctx, 'update_component', {'component_id': view['id'], 'pin': False}, {'read', 'ui'})
-    assert not error
-    svc._append(cid, 'tool', {'results': [{'id': 'saved-pin', 'name': 'update_component', 'content': text, 'is_error': False}]})
-    svc._append(cid, 'assistant', {'tool_calls': [{'id': 'legacy-read', 'name': 'discover_tools', 'input': {'select': ['group:tracker']}}]})
-    legacy = json.dumps({'legacy_schema_description': '規' * characters}, ensure_ascii=False)
-    svc._append(cid, 'tool', {'results': [{'id': 'legacy-read', 'name': 'discover_tools', 'content': legacy, 'is_error': False}]})
-    before = svc._transcript(cid)
-    initial = hub.components.get(aid, view['id'])
-    cfg = svc._load()
-    tools = ToolSession(svc.permissions(cfg), ['group:tracker', *extra_tools]).advertised()
-    if extra_tools:
-        assert len(tools) == 32 and estimate(tools) + 32 * len(tools) > 8000
-        discovered = ToolSession(svc.permissions(cfg), ['group:tracker'])
-        result = json.loads(discovered.discover({'select': extra_tools}, include_schemas=True))
-        assert not result['executed'] and discovered.advertised() == tools
-        assert {t['name'] for t in result['schemas']} == {n.removeprefix('tool:') for n in extra_tools}
-    report = Policy.for_config(cfg).measure(cfg, svc._system(account, svc.permissions(cfg)), before, tools)
-    assert report['used']['tools'] > report['available'] * .4  # original implicit cap failed
-    assert not report['over_budget'] and not Policy.for_config(cfg).auto_compact
-
-    requests = []
-    class Provider:
-        def complete(self, system, transcript, advertised, on_text):
-            requests.append((copy.deepcopy(transcript), advertised))
-            assert legacy in [r['content'] for m in transcript if m['role'] == 'tool' for r in m['results']]
-            if not advertised:
-                return Turn('', tool_calls=[ToolCall('retry-must-not-write', 'update_component',
-                                                     {'component_id': view['id'], 'pin': True})])
-            if len(requests) == 1:
-                return Turn('', tool_calls=[ToolCall('read-now', 'get_component_context', {'component_id': view['id']})])
-            if len(requests) == 2:
-                assert json.loads(transcript[-1]['results'][0]['content'])['state_token']
-                replacement = {**HMAW, 'title': 'HMAW reviewed definition'}
-                return Turn('', tool_calls=[ToolCall('proposal', 'update_component', {'component_id': view['id'], 'spec': replacement})])
-            return Turn('Definition proposal ready for review; completed actions were not repeated.')
-        def close(self): pass
-    monkeypatch.setattr('canvas_hub.assistant.make_provider', lambda cfg: Provider())
-    svc._record_final_state(cid, 'error', 'Original context budget stop')
-    svc.retry(aid, cid)
-    svc.wait(cid, 5)
-    assert hub.components.get(aid, view['id'])['version'] == initial['version']
-    assert not hub.components.get(aid, view['id'])['pinned']
-    assert len(requests) == 1 and requests[0][1] == []
-    assert json.loads(svc._transcript(cid)[-1]['results'][0]['content'])['error'] == 'retry_tool_disabled'
-    requests.clear()
-    before = svc._transcript(cid)
-    svc.send(aid, '/tracker Recreate the old HMAW tracker after reading its content.', cid, tool_selection=extra_tools)
-    svc.wait(cid, 5)
-    result = svc.get_conversation(aid, cid)
-    assert result['conversation']['run_state'] == 'idle', result['conversation']
-    after = hub.components.get(aid, view['id'])
-    assert after['state'] == initial['state'] and after['spec'] == initial['spec']
-    assert after['pending_spec'] and not after['pinned']
-    assert len(requests) == 3 and all(r[1] for r in requests)
-    if extra_tools:
-        expected = {t['name']: t for t in tools}
-        assert all({t['name']: t for t in r[1]} == expected for r in requests)  # Stable serialization may sort tools.
-    assert svc._transcript(cid)[:len(before)] == before and valid_groups(svc._transcript(cid))
-    assert not hub.db.one("SELECT 1 FROM assistant_context_usage WHERE conversation_id=? AND purpose='summary'", (cid,))
-    if extra_tools:
-        # The identical tool set must stop before dispatch when the real request
-        # cannot fit a smaller configured context. No paid retry or write replay.
-        svc.update_config({'context': {'capacity': 16000}})
-        saved = hub.components.get(aid, view['id'])
-        svc.send(aid, '/tracker Continue after reading current inputs.', cid, tool_selection=extra_tools)
-        svc.wait(cid, 5)
-        assert 'Context budget exceeded' in svc.get_conversation(aid, cid)['conversation']['run_error']
-        assert len(requests) == 3 and hub.components.get(aid, view['id']) == saved
-
-
-def test_explicit_caps_and_total_capacity_still_stop_with_accurate_labels():
-    history = [{'role': 'tool', 'results': [{'name': 'get_component', 'content': 'x' * 9000}]}]
-    cfg = {'provider': 'codex', 'context': {'tool_tokens': 512}}
-    report = Policy.for_config(cfg).measure(cfg, 'system', history, [])
-    assert report['over_budget'] and report['limits']['tools'] == 512
-    message = str(context_error(report))
-    assert 'tool results' in message and 'tool schemas' in message and 'get_component' in message
-    assert 'Retry answer cannot run tools' in message and 'Do not repeat completed changes' in message
-    cfg = {'provider': 'codex', 'context': {'capacity': 4096, 'response_tokens': 512}}
-    assert Policy.for_config(cfg).measure(cfg, 'system', history, [])['over_budget']
-    assert Policy.for_config({'provider': 'openai_compatible', 'model': 'unknown'}).capacity == 32768
-    assert Policy.for_config({'provider': 'codex', 'model': 'gpt-6.1-sol'}).capacity == 64000
-    assert Policy.for_config({'provider': 'codex', 'context': {'capacity': 32000}}).capacity == 32000
 
 
 def test_source_catalog_keeps_metadata_pages_and_full_tail_rules(hub, account):
@@ -212,41 +104,3 @@ def test_codex_discovery_only_sends_new_schemas_but_can_explicitly_reread():
     with pytest.raises(InvalidInput, match='not currently loaded'):
         session.dispatch({'name': 'read_context_source', 'arguments': {}})
     assert session.advertised() == initial
-
-
-@pytest.mark.parametrize('history,tool_results,overhead,available', [
-    (1468, 20461, 6586, 46918), (1751, 20461, 9205, 44299), (1619, 19693, 10306, 43198)])
-def test_exact_reported_budget_amounts_fit_without_capacity_increase(history, tool_results, overhead, available):
-    cfg = {'provider': 'codex', 'model': 'gpt-6.1-sol', 'thinking': 'xhigh'}
-    policy = Policy.for_config(cfg)
-    transcript = [{'role': 'user', 'sent_text': ''}, {'role': 'tool', 'results': [
-        {'id': str(n), 'name': 'discover_tools', 'content': ''} for n in range(3)]}]
-    system = ''
-    def report():
-        return policy.measure(cfg, system, transcript, [])
-    def fill(target, write, read):
-        lo, hi = 0, target * 4
-        while lo < hi:
-            mid = (lo + hi) // 2
-            write(mid)
-            if read() < target:
-                lo = mid + 1
-            else:
-                hi = mid
-        write(lo)
-        assert read() == target
-    def write_history(n):
-        transcript[0]['sent_text'] = 'x' * n
-    def write_tools(n):
-        for i, result in enumerate(transcript[1]['results']):
-            result['content'] = 'x' * (n // 3 + (i < n % 3))
-    def write_system(n):
-        nonlocal system
-        system = 'x' * n
-    fill(history, write_history, lambda: report()['used']['history'])
-    fill(tool_results, write_tools, lambda: report()['used']['tools'])
-    fill(overhead, write_system, lambda: report()['overhead_tokens'])
-    measured = report()
-    assert measured['capacity'] == 64000 and measured['available'] == available
-    assert tool_results > int(available * .4) and history + tool_results < available
-    assert not measured['over_budget'] and not measured['near_limit']

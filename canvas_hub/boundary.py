@@ -34,6 +34,7 @@ class HubAPI:
         self.hub = hub
         self.runner = runner      # JobRunner when this process can run collection
         self.worker = worker      # BrowserWorker when this process owns the browser
+        self.link_inspector = None   # LinkInspector when this process can open external links
 
     # ---- helpers ----------------------------------------------------------
     def _acct(self, account_id) -> dict:
