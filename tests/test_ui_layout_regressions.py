@@ -235,22 +235,20 @@ def test_external_sources_padding_and_actions_align_for_long_urls(hub, layout_ex
         page = browser.new_page(viewport={"width": width, "height": 960})
         page.goto(f"{base}/?token={token}#/course/4242")
         page.get_by_role("button", name=theme.title(), exact=True).click()
-        listing = page.locator(".external-source-list")
+        listing = page.get_by_role("region", name="External links", exact=True)
         expect(listing).to_be_visible()
-        listing.evaluate("el => el.open = true")
-        rows = listing.locator(".external-source-row")
+        rows = listing.locator(".link-row")
         expect(rows).to_have_count(3)
         list_box = listing.bounding_box()
-        reinspection = []
-        launchers = []
+        actions = []
         for row in rows.all():
             link = row.locator("a").first
             assert link.bounding_box()["x"] >= list_box["x"] + 12
             assert row.evaluate("el => el.scrollWidth <= el.clientWidth + 1")
-            reinspection.append(row.get_by_role("button", name="Re-inspect", exact=True).bounding_box()["x"])
-            launchers.append(row.locator(".workspace-launcher-toggle").bounding_box()["x"])
-        assert max(reinspection) - min(reinspection) < 2
-        assert max(launchers) - min(launchers) < 2
+            box = row.get_by_role("button", name="Inspect", exact=True).bounding_box()
+            assert box["x"] >= list_box["x"] and box["x"] + box["width"] <= list_box["x"] + list_box["width"] + 1
+            actions.append(box["x"])
+        assert max(actions) - min(actions) < 2
         assert_no_horizontal_overflow(page)
         listing.scroll_into_view_if_needed()
         screenshot(page, tmp_path, f"external-links-{theme}-{width}.png")

@@ -26,7 +26,7 @@ from urllib.parse import urlsplit
 
 from .request_shape import stable_json, stable_object, stable_tools
 from .usage import normalize_usage
-from .model_capacity import verified_capacity
+from .model_capacity import resolve as resolve_limits, verified_capacity
 
 ANTHROPIC_DEFAULT_MODEL = "claude-opus-5-5"
 # Models that accept the server-side refusal fallback ("default" routing) on the Claude API.
@@ -44,8 +44,15 @@ class ProviderError(Exception):
         self.retryable = retryable
 
 
+def _reply_mode(cfg: dict) -> str:
+    settings = cfg.get("context") or {}
+    if settings.get("reply_limit") in ("none", "custom"):
+        return settings["reply_limit"]
+    return "custom" if "response_tokens" in settings else "legacy"
+
+
 def anthropic_output_tokens(cfg: dict) -> int:
-    """Resolve the actual wire cap without changing explicit output settings.
+    """The ``max_tokens`` sent to Claude. The API requires one, so "no limit" means the model's own maximum.
 
     This adapter supports output_config.effort, not manual thinking budgets.
     Effort is soft guidance; max_tokens includes both thinking and answer text:
@@ -59,7 +66,7 @@ def anthropic_output_tokens(cfg: dict) -> int:
                             "configured thinking was not changed and no request was sent.")
     limits = [extra[k] for k in ("max_tokens", "max_completion_tokens") if k in extra]
     configured = limits + [v for k, v in settings.items() if k == "response_tokens"]
-    if "_response_tokens" in cfg:
+    if "_response_tokens" in cfg and cfg["_response_tokens"] is not None:
         configured.append(cfg["_response_tokens"])
     if any(type(v) is not int or v < 1 for v in configured):
         raise ProviderError("Anthropic output limits must be positive integers; no request was sent.")
@@ -70,16 +77,23 @@ def anthropic_output_tokens(cfg: dict) -> int:
     # recognized by context policy; only max_tokens is sent to Anthropic.
     if limits:
         return limits[0]
-    default = 6000 if settings.get("capacity", 64000) <= 64000 else MAX_TOKENS
-    return cfg.get("_response_tokens", settings.get("response_tokens", default))
+    if cfg.get("_response_tokens") is not None:
+        return cfg["_response_tokens"]
+    mode = _reply_mode(cfg)
+    if mode == "custom":
+        return settings["response_tokens"]
+    if mode == "none":
+        # Replies are streamed, so a large ceiling does not risk a request timeout.
+        return resolve_limits(cfg)["max_output"] or 64000
+    return 6000 if settings.get("capacity", 64000) <= 64000 else MAX_TOKENS
 
 
-def compatible_output_tokens(cfg: dict) -> int:
-    """Resolve a bounded API reply cap, including reasoning, without overriding user limits."""
+def compatible_output_tokens(cfg: dict) -> int | None:
+    """The reply cap sent to an OpenAI-compatible provider; ``None`` sends none, so the model's own maximum applies."""
     extra, settings = cfg.get("extra_params") or {}, cfg.get("context") or {}
     limits = [extra[k] for k in ("max_tokens", "max_completion_tokens") if k in extra]
     configured = limits + [settings[k] for k in ("response_tokens",) if k in settings]
-    if "_response_tokens" in cfg:
+    if "_response_tokens" in cfg and cfg["_response_tokens"] is not None:
         configured.append(cfg["_response_tokens"])
     if any(type(v) is not int or v < 1 for v in configured):
         raise ProviderError("Reply token limits must be positive integers; no request was sent.")
@@ -87,10 +101,14 @@ def compatible_output_tokens(cfg: dict) -> int:
         raise ProviderError("max_tokens and max_completion_tokens conflict. Choose one reply token limit; no request was sent.")
     if limits:
         return limits[0]
-    if "_response_tokens" in cfg:
+    if cfg.get("_response_tokens") is not None:
         return cfg["_response_tokens"]
-    if "response_tokens" in settings:
+    mode = _reply_mode(cfg)
+    if mode == "custom":
         return settings["response_tokens"]
+    if mode == "none":
+        return None
+    # A setup saved before the choice existed keeps the automatic caps it had.
     default = 4096
     capability = verified_capacity(cfg)
     if capability:
@@ -98,7 +116,6 @@ def compatible_output_tokens(cfg: dict) -> int:
         mode = options["thinking"].get("type") if isinstance(options.get("thinking"), dict) else None
         thinking = mode == "enabled" or (mode is None and options.get("reasoning_effort") not in ("none", "off"))
         if thinking:
-            # An application spending bound, not the much larger vendor maximum.
             # DeepSeek defaults to thinking; reasoning and text share max_tokens.
             # https://api-docs.deepseek.com/api/create-chat-completion/
             default = min(16384, max(4096, settings.get("capacity", capability[0]) // 4))
@@ -124,7 +141,7 @@ def incomplete_reply_message(turn) -> str:
                 message += f" (including {reasoning} reasoning tokens)"
             message += ". "
         message += ("Partial text is saved as incomplete. " if turn.text.strip() else "No final answer was returned. ")
-        message += "Adjust Reply token limit in Assistant settings or lower reasoning before retrying; a higher limit can use more quota. "
+        message += "Raise the reply limit, or choose no limit, in Assistant settings (or lower reasoning) before retrying; a higher limit can use more quota. "
     else:
         message = "The provider returned no answer or tool call. Check the provider and output-format settings before retrying. "
     return message + ("Earlier tool results are saved; no tools from this incomplete reply were executed. "

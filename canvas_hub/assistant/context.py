@@ -1,11 +1,14 @@
 """Bounded provider projections; never mutate the original conversation.
 
-Unknown endpoints use application safety budgets, not inferred model capacities.
-Exact documented endpoint/model pairs can supply defaults; explicit setup budgets win.
-The estimator includes native reasoning, tool schemas and framing. It retains a
-conservative UTF-8 heuristic when no validated local model tokenizer is available;
-documented message text is counted without its outer JSON transport escaping.
-No network token-count call is made.
+Limits come from the model itself (asked from the provider, or published for
+an exact model) or from the user. A model whose limit is unknown is not given
+an invented one: the request is then not limited here, and the provider
+enforces its own.
+
+Token counts before a request are estimates from the text length. They are
+corrected with what the same provider and model actually reported for recent
+requests (``calibration``), so they converge on the provider's own counting in
+any language. No tokenizer is bundled and no paid counting call is made.
 """
 from __future__ import annotations
 
@@ -18,7 +21,7 @@ from urllib.parse import urlsplit
 from ..util import InvalidInput
 from .providers import (AnthropicProvider, OpenAICompatibleProvider, ProviderError,
                         anthropic_output_tokens, compatible_output_tokens)
-from .model_capacity import verified_capacity
+from .model_capacity import resolve as resolve_limits
 
 DOCUMENT_TOOLS = {"read_document", "search_context_sources", "read_context_source"}
 SUMMARY_KEYS = ("goals", "decisions", "open_questions", "references", "tool_outcomes")
@@ -36,16 +39,41 @@ def encoded(value) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True, default=str)
 
 
-def _estimate_units(text: str) -> int:
-    # Non-ASCII may tokenize into multiple bytes; treating every UTF-8 byte as
-    # one token is conservative for CJK, emoji and unusual encodings.
+ESTIMATOR = "chars_v2"
+ASCII_PER_TOKEN = 3.5     # English prose is nearer 4, code and JSON nearer 3
+MARGIN_UNCALIBRATED, MARGIN_CALIBRATED = .10, .03
+
+
+def _estimate_units(text: str) -> float:
+    # ASCII: about 3.5 characters per token. Other scripts (Chinese, Japanese,
+    # Korean, emoji, accents): about one token per character. The result is in
+    # "ASCII characters", so every caller divides by ASCII_PER_TOKEN once.
     ascii_chars = sum(ord(c) < 128 for c in text)
-    return ascii_chars + 3 * (len(text.encode("utf-8")) - ascii_chars)
+    return ascii_chars + ASCII_PER_TOKEN * (len(text) - ascii_chars)
+
+
+def _tokens(units: float) -> int:
+    return math.ceil(units / ASCII_PER_TOKEN) + 4
 
 
 def estimate(value) -> int:
     text = value if isinstance(value, str) else encoded(value)
-    return (_estimate_units(text) + 2) // 3 + 8
+    return _tokens(_estimate_units(text))
+
+
+def calibration(samples):
+    """How far recent estimates were from what the provider counted.
+
+    ``samples`` are (estimated, reported) input-token pairs for one provider
+    and model, newest first. The median ratio is used so one odd request
+    (a cache anomaly, a provider that omitted a counter) cannot swing it.
+    """
+    ratios = sorted(reported / estimated for estimated, reported in samples
+                    if type(estimated) is int and type(reported) is int and estimated >= 200 and reported > 0)
+    if not ratios:
+        return {"factor": 1.0, "samples": 0}
+    middle = ratios[len(ratios) // 2] if len(ratios) % 2 else (ratios[len(ratios) // 2 - 1] + ratios[len(ratios) // 2]) / 2
+    return {"factor": round(min(3.0, max(.3, middle)), 4), "samples": len(ratios)}
 
 
 def _message_format(cfg):
@@ -121,33 +149,47 @@ def _message_estimate(messages, message_format):
                 m["tool_calls"] = [{**call, "function": {**call["function"],
                     "arguments": text(call["function"]["arguments"])}} for call in m["tool_calls"]]
         shell.append(m)
-    return (_estimate_units(encoded(shell)) + units + 2) // 3 + 8
+    return _tokens(_estimate_units(encoded(shell)) + units)
 
 
 def validate_settings(value):
     if not isinstance(value, dict):
         raise InvalidInput("context must be a JSON object")
-    ranges = {"capacity": (4096, 2000000), "response_tokens": (512, 128000),
-              "history_tokens": (512, 1500000), "tool_tokens": (512, 1500000),
-              "document_tokens": (512, 1500000), "summary_tokens": (512, 16000),
+    ranges = {"capacity": (1024, 50000000), "response_tokens": (16, 2000000),
+              "history_tokens": (512, 50000000), "tool_tokens": (512, 50000000),
+              "document_tokens": (512, 50000000), "summary_tokens": (512, 16000),
               "keep_turns": (1, 20), "auto_threshold_percent": (50, 95)}
-    if set(value) - (set(ranges) | {"auto_compact", "limit_disabled"}):
+    if set(value) - (set(ranges) | {"auto_compact", "limit_disabled", "reply_limit"}):
         raise InvalidInput("unknown context setting")
     for key, val in value.items():
         if key in ("auto_compact", "limit_disabled"):
             if not isinstance(val, bool):
                 raise InvalidInput(f"{key} must be true or false")
+        elif key == "reply_limit":
+            if val not in ("none", "custom"):
+                raise InvalidInput("reply_limit must be \"none\" (no limit) or \"custom\" (your own number)")
         elif type(val) is not int or not ranges[key][0] <= val <= ranges[key][1]:
-            raise InvalidInput(f"context {key} must be an integer from {ranges[key][0]} to {ranges[key][1]}")
-    if not value.get("limit_disabled", False) and value.get("response_tokens", 512) >= value.get("capacity", 2000000):
-        raise InvalidInput("response_tokens must leave space for input")
+            raise InvalidInput(f"context {key} must be a whole number from {ranges[key][0]} to {ranges[key][1]}")
+    if value.get("reply_limit") == "custom" and "response_tokens" not in value:
+        raise InvalidInput("Enter the maximum number of tokens per reply, or choose no limit")
+    if (not value.get("limit_disabled", False) and value.get("reply_limit") != "none"
+            and value.get("response_tokens", 16) >= value.get("capacity", 50000001)):
+        raise InvalidInput("The reply limit must be smaller than the context window so there is room for input")
     return value
+
+
+def reply_limit(cfg) -> str:
+    """"none", "custom", or "legacy" (a setup saved before the choice existed keeps its old automatic caps)."""
+    settings = cfg.get("context") or {}
+    if settings.get("reply_limit") in ("none", "custom"):
+        return settings["reply_limit"]
+    return "custom" if "response_tokens" in settings else "legacy"
 
 
 @dataclass(frozen=True)
 class Policy:
-    capacity: int
-    response_tokens: int
+    capacity: int | None            # the context window; None when nobody knows it
+    response_tokens: int            # room kept free for the reply when planning input
     history_tokens: int | None
     tool_tokens: int | None
     document_tokens: int | None
@@ -157,45 +199,63 @@ class Policy:
     threshold: float
     capacity_source: str
     limit_disabled: bool = False
+    capacity_basis: str = "configured"      # configured | detected | published | unknown
+    max_output: int | None = None           # the model's own output ceiling, when known
+    reply_limit: str = "legacy"             # none | custom | legacy
+    reply_tokens: int | None = None         # the cap sent with the request; None = none is sent
+
+    @property
+    def enforced(self) -> bool:
+        """Whether this app refuses a request that looks too large for the model."""
+        return not self.limit_disabled and self.capacity is not None
 
     @classmethod
     def for_config(cls, cfg):
         settings = validate_settings(cfg.get("context") or {})
-        # Unknown compatible endpoints include small local models. These are
-        # deliberately modest deployment defaults, never inferred model limits.
-        capacity = {"anthropic": 64000, "codex": 64000}.get(cfg.get("provider"), 32768)
-        capability = verified_capacity(cfg)
-        if capability:
-            capacity = capability[0]
-        capacity = settings.get("capacity", capacity)
-        response = 4096
+        provider = cfg.get("provider")
+        limits = resolve_limits(cfg)
+        capacity, source, basis = limits["context"], limits["source"], limits["basis"]
+        if "capacity" in settings:
+            capacity, source, basis = settings["capacity"], "set by you", "configured"
+        max_output = limits["max_output"]
+        mode = reply_limit(cfg)
         extra = cfg.get("extra_params") or {}
-        if cfg.get("provider") == "anthropic":
-            response = max(settings.get("response_tokens", 0), anthropic_output_tokens(cfg))
-        elif cfg.get("provider") == "openai_compatible":
-            response = max(settings.get("response_tokens", 0), compatible_output_tokens(cfg))
+        if provider == "anthropic":
+            sent = anthropic_output_tokens(cfg)
+        elif provider == "openai_compatible":
+            sent = compatible_output_tokens(cfg)
         else:
-            response = settings.get("response_tokens", response)
+            sent = settings.get("response_tokens") if mode == "custom" else None
+            if mode == "legacy":
+                sent = 4096
             for name in ("max_tokens", "max_completion_tokens"):
                 if type(extra.get(name)) is int:
-                    response = max(response, extra[name])
+                    sent = max(sent or 0, extra[name])
         summary = settings.get('summary_tokens', 2000)
-        if cfg.get('provider') == 'allowance_gateway' and cfg.get('_gateway_model'):
+        if provider == 'allowance_gateway' and cfg.get('_gateway_model'):
             model = cfg['_gateway_model']
-            response = min(response, model['max_output_tokens'])
+            sent = min(sent or model['max_output_tokens'], model['max_output_tokens'])
             summary = min(summary, model['max_output_tokens'])
-            if min(response, summary) < model['min_output_tokens']:
+            max_output = model['max_output_tokens']
+            if min(sent, summary) < model['min_output_tokens']:
                 raise ProviderError('Configured response or summary budget is below the gateway minimum.')
-        return cls(capacity, response,
+        # Input planning keeps room for the reply. With no cap, that is the model's own ceiling,
+        # but never more than a quarter of the window: a reply rarely fills its ceiling.
+        reserve = sent if sent is not None else (max_output or 32000)
+        if capacity is not None and (sent is None or mode == "none"):
+            reserve = min(reserve, max(1024, capacity // 4))
+        return cls(capacity, reserve,
                    settings.get("history_tokens"), settings.get("tool_tokens"), settings.get("document_tokens"),
                    summary, settings.get("keep_turns", 2),
                    settings.get("auto_compact", False), settings.get("auto_threshold_percent", 80) / 100,
-                   "configured" if "capacity" in settings else capability[1] if capability else "application fallback; verify endpoint capacity",
-                   settings.get("limit_disabled", False))
+                   source, settings.get("limit_disabled", False), basis, max_output, mode, sent)
 
-    def measure(self, cfg, system, transcript, tools):
+    def measure(self, cfg, system, transcript, tools, calibrated=None):
         provider = cfg.get("provider")
         message_format = _message_format(cfg)
+        calibrated = calibrated or {"factor": 1.0, "samples": 0}
+        factor = calibrated["factor"]
+        scale = lambda n: math.ceil(n * factor)     # noqa: E731
         if provider == "anthropic":
             messages = AnthropicProvider._messages(None, transcript)
         elif provider == "openai_compatible":
@@ -206,7 +266,7 @@ class Policy:
         pos = 0
         for m in transcript:
             n = len(m.get("results", [])) if provider == "openai_compatible" and m["role"] == "tool" else 1
-            cost = _message_estimate(messages[pos:pos+n], message_format) + 24 * max(1, n)
+            cost = _message_estimate(messages[pos:pos+n], message_format) + 8 * max(1, n)
             pos += n
             if m["role"] != "tool":
                 history += cost
@@ -219,41 +279,53 @@ class Policy:
                 docs = math.ceil(cost * doc / total)
                 documents += docs
                 tool_total += cost - docs
-        overhead = estimate(system) + estimate(tools) + 512 + 32 * len(tools)
-        # Ten percent headroom is in addition to the reserved output/reasoning.
-        available = max(0, int(self.capacity * .9) - self.response_tokens - overhead)
+        framing = 64 + 12 * len(tools)
+        raw_overhead = estimate(system) + estimate(tools) + framing
+        raw_total = raw_overhead + history + tool_total + documents
+        overhead = scale(raw_overhead)
+        used = {"history": scale(history), "tools": scale(tool_total), "documents": scale(documents)}
+        total = sum(used.values())
+        # A margin for what an estimate cannot know. It is small once the estimate has been
+        # corrected with the provider's own counts for this model.
+        margin = MARGIN_CALIBRATED if calibrated["samples"] else MARGIN_UNCALIBRATED
+        capacity = self.capacity or 0
+        effective = int(capacity * (1 - margin))
+        available = max(0, effective - self.response_tokens - overhead)
         # Unspecified categories share the input budget. A tool-heavy question
         # must not fail merely because tools exceed an arbitrary 40% share.
         # Explicit per-category ceilings and the aggregate limit still apply.
         limits = {"history": self.history_tokens if self.history_tokens is not None else available,
                   "tools": self.tool_tokens if self.tool_tokens is not None else available,
                   "documents": self.document_tokens if self.document_tokens is not None else available}
-        used = {"history": history, "tools": tool_total, "documents": documents}
-        total = sum(used.values())
-        over = overhead + self.response_tokens > int(self.capacity * .9) or total > available
+        over = overhead + self.response_tokens > effective or total > available
         over = over or any(used[k] > limits[k] for k in used)
         near = total > available * self.threshold or any(used[k] > limits[k] * self.threshold for k in used)
         largest = sorted(({"name": r.get("executed_tool") or r.get("name") or "unknown",
-                           "estimated_tokens": estimate(r.get("content", ""))}
+                           "estimated_tokens": scale(estimate(r.get("content", "")))}
                           for m in transcript if m["role"] == "tool" for r in m.get("results", [])),
                          key=lambda r: r["estimated_tokens"], reverse=True)[:3]
-        return {"estimated_tokens": overhead + total, "overhead_tokens": overhead,
-                "effective_capacity": int(self.capacity * .9), "safety_headroom": self.capacity - int(self.capacity * .9),
+        method = (f"text length, corrected with the provider's own counts from {calibrated['samples']} recent request(s)"
+                  if calibrated["samples"] else "text length; becomes more exact after the first reply from this model")
+        return {"estimated_tokens": overhead + total, "raw_estimated_tokens": raw_total, "overhead_tokens": overhead,
+                "effective_capacity": effective if self.capacity is not None else None,
+                "safety_headroom": capacity - effective if self.capacity is not None else None,
+                "safety_margin_percent": round(margin * 100),
                 "total_with_response": overhead + total + self.response_tokens,
-                "schema_tokens": estimate(tools), "system_tokens": estimate(system),
-                "framing_tokens": 512 + 32 * len(tools), "largest_tool_results": largest,
+                "schema_tokens": scale(estimate(tools)), "system_tokens": scale(estimate(system)),
+                "framing_tokens": scale(framing), "largest_tool_results": largest,
                 "response_reserved": self.response_tokens, "capacity": self.capacity,
-                "request_max_tokens": (anthropic_output_tokens(cfg) if provider == "anthropic" else
-                                       compatible_output_tokens(cfg) if provider == "openai_compatible" else None),
+                "capacity_basis": self.capacity_basis, "max_output": self.max_output,
+                "reply_limit": self.reply_limit, "request_max_tokens": self.reply_tokens,
                 "capacity_source": self.capacity_source,
-                "estimator": "conservative UTF-8 heuristic, " + ("decoded message text plus framing" if message_format
-                              else "serialized projection fallback") + "; not exact",
-                "estimator_provenance": {"method": "utf8_heuristic_v1", "tokenizer": None,
-                    "model_calibrated": False,
+                "estimator": method,
+                "estimator_provenance": {"method": ESTIMATOR, "tokenizer": None,
+                    "model_calibrated": bool(calibrated["samples"]), "calibration_factor": factor,
+                    "calibration_samples": calibrated["samples"],
                     "message_representation": "decoded_text_with_structural_framing" if message_format else "serialized_projection",
                     "message_format": message_format, "network_token_count": False},
-                "used": used, "limits": limits, "available": available, "limit_disabled": self.limit_disabled,
-                "over_budget": over and not self.limit_disabled, "near_limit": near and not self.limit_disabled}
+                "used": used, "limits": limits, "available": available,
+                "limit_disabled": self.limit_disabled, "enforced": self.enforced,
+                "over_budget": over and self.enforced, "near_limit": near and self.enforced}
 
 
 def neutral_message(m):
@@ -351,20 +423,19 @@ def summary_message(summary, *, live_state_changed=False, sources_changed=False)
 
 def context_error(report):
     used = report["used"]
-    largest = ", ".join(f"{r['name']} ~{r['estimated_tokens']}" for r in report["largest_tool_results"])
-    exceeded = ', '.join(f'{key} {used[key]}/{limit}' for key, limit in report['limits'].items() if used[key] > limit)
-    return ProviderError(f"Context budget exceeded (estimated history {used['history']}, tool results {used['tools']}, "
-                         f"documents {used['documents']}; tool schemas {report['schema_tokens']}, system {report['system_tokens']}, "
-                         f"framing {report['framing_tokens']}; response reserve {report['response_reserved']}; "
-                         f"capacity {report['capacity']}, {report['capacity_source']}; "
-                         f"effective budget {report['effective_capacity']} after 10% safety margin ({report['safety_headroom']}); "
-                         f"total with response {report['total_with_response']}, "
-                         f"aggregate excess {max(0, report['total_with_response'] - report['effective_capacity'])}). "
-                         + (f"Largest tool results: {largest}. " if largest else "")
-                         + (f"Exceeded category budgets: {exceeded}. " if exceeded else "")
-                         + "Original history and completed actions are saved; no oversized request was sent. "
-                         "Retry answer cannot run tools and tool selection does not remove saved results. "
-                         "Adjust this setup's context capacity or disable the application context limit in Assistant settings; "
-                         "provider limits still apply. A new message in this chat retains the same history; "
-                         "choose explicit manual compaction or start a focused chat with tracker IDs and check current state first. "
-                         "Do not repeat completed changes.")
+    largest = ", ".join(f"{r['name']} ~{r['estimated_tokens']:,}" for r in report["largest_tool_results"])
+    exceeded = ', '.join(f'{key} {used[key]:,}/{limit:,}' for key, limit in report['limits'].items() if used[key] > limit)
+    over = max(0, report['total_with_response'] - (report['effective_capacity'] or 0))
+    return ProviderError(
+        f"This request is too large for the model's context window. Estimated input {report['estimated_tokens']:,} tokens "
+        f"(history {used['history']:,}, tool results {used['tools']:,}, documents {used['documents']:,}, "
+        f"tool schemas {report['schema_tokens']:,}, system {report['system_tokens']:,}) plus {report['response_reserved']:,} "
+        f"kept for the reply is {report['total_with_response']:,}; the context window is {report['capacity']:,} "
+        f"({report['capacity_source']}), of which {report['effective_capacity']:,} is used after a "
+        f"{report['safety_margin_percent']}% margin for estimation error. Over by about {over:,}. "
+        + (f"Largest tool results: {largest}. " if largest else "")
+        + (f"Exceeded category budgets: {exceeded}. " if exceeded else "")
+        + "Nothing was sent, and the conversation and completed actions are saved. "
+        "To continue: compact the conversation (Context & usage), start a focused new chat, or change the context window "
+        "or turn the limit off in Assistant settings (the provider still enforces its own limit). "
+        "Retry answer cannot run tools. Do not repeat completed changes.")

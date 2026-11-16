@@ -23,64 +23,88 @@ per user run, with SDK retries/fallbacks disabled. With the application limit en
 history too large for a single summary stops with an actionable budget error;
 essential context is not silently dropped and actions are not re-executed.
 
-## Budget configuration
+## Token counts, model limits and reply length
+
+Three numbers matter for every request, and each is now taken from the most
+reliable source available instead of an application default.
+
+### How many tokens a request is
+
+Before a request is sent, its size is estimated from the text: about 3.5
+characters per token for English, code and JSON, and about one token per
+character for Chinese, Japanese, Korean and other non-ASCII text. That is only
+a starting point. Every provider reports how many input tokens it actually
+counted, so each finished request records the estimate beside the provider's
+count, and later estimates for the same provider, endpoint and model are
+multiplied by the median of the last few ratios. After the first reply from a
+model the estimate follows that model's own counting, in any language. No
+tokenizer is bundled and no extra counting request is made. Codex is not
+corrected this way because its CLI adds its own instructions to every request.
+
+**Context & usage** in a chat shows both: what this chat now sends per request
+(the estimate, and how it was obtained) and what the provider counted for the
+last request.
+
+### How much the model can read (the context window)
+
+The window is resolved in this order:
+
+1. **Your own number**, if you set one in Assistant settings.
+2. **What the provider reports.** *Save & test* asks the provider for the
+   model's limits (Anthropic's Models API; `GET /models/{id}` on
+   OpenAI-compatible servers, where OpenRouter and some others include a
+   context length). The answer is remembered for that model and endpoint.
+3. **Published limits** for exact model names: current Claude models
+   (1,000,000 tokens; Claude Haiku 4.5 200,000) and `deepseek-flash` /
+   `deepseek-v4-pro` on `api.deepseek.com` (1,048,576).
+4. **Unknown.** Canvas Hub does not invent a limit. Requests are not limited
+   by the app, and the provider enforces its own. Earlier versions assumed
+   32,768 or 64,000 tokens here, which stopped requests that would have fit.
+
+When the window is known and the limit is on, a request that would not fit is
+refused before anything is sent, with the numbers in the message. A margin is
+kept for estimation error: 10% before the estimate has been corrected for the
+model, 3% afterwards. In Assistant settings you choose between the model's own
+limit, your own number, or no limit in Canvas Hub.
+
+### How long a reply may be
+
+In Assistant settings, **Reply length** is your choice:
+
+- **No limit.** The model stops when it has finished. Nothing is sent to an
+  OpenAI-compatible provider, so its own maximum applies. Claude requires a
+  number, so the model's own maximum is sent (128,000 tokens for current
+  models; 64,000 if it is not known).
+- **Limit each reply to N tokens.** Your number is sent exactly. Reasoning and
+  the answer share it, and a reply that reaches it is cut off and marked
+  incomplete.
+
+New setups start with no limit. A setup saved before this choice existed keeps
+the automatic cap it had (4,096 tokens for most providers, 6,000 for Claude,
+16,384 for DeepSeek with thinking) and shows it as its limit until you change
+it. `max_tokens` or `max_completion_tokens` in a setup's extra request settings
+still takes precedence over both.
+
+### Settings reference
 
 Each profile accepts a `context` object in `PUT /api/assistant/config`. It is local
 configuration, not forwarded as provider request settings.
 
-| Field | Default |
+| Field | Meaning |
 | --- | --- |
-| `capacity` | Exact supported endpoint/model metadata when known; otherwise application fallback: Anthropic/Codex 64,000, compatible endpoints 32,768 |
-| `limit_disabled` | `false`; `true` disables application context-budget enforcement and automatic budget-based compaction |
-| `response_tokens` | Anthropic 6,000 at resolved capacity ≤64,000, otherwise 16,000; verified DeepSeek thinking up to 16,384; others 4,096. Explicit output settings take precedence. |
-| `auto_compact` | `false` (manual compaction remains available) |
+| `capacity` | Your own context window in tokens. Absent: use the reported or published limit, or none if unknown. |
+| `limit_disabled` | `true` turns off Canvas Hub's context limit and automatic compaction. |
+| `reply_limit` | `"none"` or `"custom"`. Absent on setups saved before the choice existed. |
+| `response_tokens` | The reply limit in tokens when `reply_limit` is `"custom"`. |
+| `auto_compact` | `false` by default; manual compaction is always available. |
 | `auto_threshold_percent` | `80` |
 | `keep_turns` | `2` |
 | `summary_tokens` | `2000` |
-| `history_tokens`, `tool_tokens`, `document_tokens` | Share remaining input space; an explicitly configured category ceiling still applies |
+| `history_tokens`, `tool_tokens`, `document_tokens` | Optional ceilings per category, applied only while the context limit is in force. |
 
-In **Assistant settings**, each setup can change **Context token capacity** or
-select **Disable application context limit**. Existing installations keep their
-previous limits when `limit_disabled` is absent. Disabling bypasses the aggregate
-and category context checks, including the summary request's input-capacity check;
-automatic compaction is paused. Saved capacity and compaction preferences are kept
-for re-enabling the limit. Manual compaction, reply/summary output limits, usage
-tracking and original saved history remain available. Providers and gateways still
-enforce their own context and request limits and may reject oversized requests.
-Context & usage identifies requests sent with the application limit disabled;
-token estimates remain informational and do not guarantee provider acceptance.
-
-An explicit `capacity` always overrides defaults. The exact models
-`deepseek-flash` and `deepseek-v4-pro` on `https://api.deepseek.com` (optionally
-`/v1`) use the documented 1,048,576-token input-plus-output window, checked against
-[DeepSeek model metadata](https://api-docs.deepseek.com/api/list-models/) on
-2026-11-03. This is a static verified mapping, not an authenticated model probe;
-custom endpoints, aliases and Codex model names do not inherit this capacity.
-Unknown models/endpoints use **application fallback budgets, not advertised limits**. Verify the actual
-endpoint's capacity and configure it, especially for small local models. Estimates
-include provider-native reasoning, schemas, message framing and non-ASCII text;
-10% headroom and response/reasoning space are reserved. No paid tokenizer call is
-used. Explicit extra-provider output limits are included in the reserve. Anthropic and
-compatible calls set an output bound; Codex's app-server retains control of its
-native output limit, so its reserve is a planning allowance. Actual provider usage
-may differ from estimates. Anthropic effort remains unchanged; unsupported explicit
-thinking/budget controls are rejected rather than silently ignored or truncated.
-When explicit context and provider output budgets differ, the larger planning
-reserve protects the input window while the provider's explicit output cap remains
-unchanged. Both values are reported. Direct SDK retries are disabled; the narrow pre-acceptance
-compatibility fallback is documented in [the usage contract](PROVIDER_USAGE.md).
-Compaction always uses a single attempt without capability negotiation.
-
-**Reply token limit** in Assistant settings controls the shared reasoning/answer
-allowance for API replies. For the exact verified DeepSeek endpoint/models above,
-thinking (including the provider's default thinking mode) uses an application
-default of 16,384, bounded to a quarter of an explicitly smaller context capacity
-with a floor of 4,096. Non-thinking mode and unverified endpoints retain 4,096.
-This is a local spending bound, not the vendor maximum or a guarantee of completion.
-Explicit `context.response_tokens`, `max_tokens`, and `max_completion_tokens` remain
-unchanged; a conflicting pair of extra output limits is rejected before dispatch.
-Reasoning effort is not a reserved answer budget: even low effort can consume the
-whole output allowance. See the [DeepSeek request contract](https://api-docs.deepseek.com/api/create-chat-completion/).
+The resolved values are returned as `limits` on each profile: `context_window`,
+`context_basis` (`configured`, `detected`, `published` or `unknown`),
+`context_source`, `max_output`, `reply_limit`, `reply_tokens` and `enforced`.
 
 ## Incomplete replies and continuation
 
@@ -91,30 +115,18 @@ and earlier tool outcomes remain saved. No tool call in a truncated reply execut
 even if its arguments parse; explicit error results close those tool-call pairs.
 There is no automatic continuation, retry or budget escalation.
 
-Review completed results first. Adjust **Reply token limit** or the selected
-reasoning effort if needed; higher limits can consume more API quota. **Retry
+Review completed results first. Raise the reply limit or choose no limit
+(Assistant settings → Reply length), or lower the reasoning effort; longer
+replies can consume more API quota. **Retry
 answer** makes one new request with tools disabled and does not repeat completed
 actions. If further tools are needed, send a new message asking to check current
 state and continue only the unfinished work. Historical truncated replies also
 keep a visible warning after a later message succeeds. No history is automatically
 compacted or masked by this recovery path.
 
-Estimation retains the conservative ASCII/UTF-8 heuristic; no exact tokenizer or
-universal CJK calibration is claimed. Recognized, explicit official Messages/Chat
-endpoints count decoded message text with structural framing instead of charging
-outer JSON transport escapes as extra text. Unknown/custom endpoints and implicit
-SDK routing retain serialized-projection estimates. The API exposes
-`estimator_provenance` (method, representation, format and absence of a tokenizer
-or paid counting call), and Context & usage displays the method. Existing usage
-observations can identify overestimation but do not justify applying one model's
-divisors to unrelated models.
-
-With the application limit enabled, errors and Context & usage show the effective budget after headroom. For example,
-64,000 capacity leaves 57,600 including the output reserve; an estimated 58,000
-request exceeds it by 400. The 6,400 safety margin is retained. Explicit category
-ceilings are reported separately. Starting another message keeps the same history;
-an already oversized chat needs explicit manual compaction or a focused new chat
-after checking completed actions. Answer-only Retry cannot finish pending tool work.
+A request that is refused for size keeps the same history when you send another
+message; compact the conversation or start a focused new chat after checking
+completed actions. Answer-only Retry cannot finish pending tool work.
 
 ## Bounded tool reads
 

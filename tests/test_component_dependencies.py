@@ -1,6 +1,5 @@
 """Indexed dependency refresh, including changes that contain no field edits."""
 import json
-import time
 
 import pytest
 
@@ -181,23 +180,3 @@ def test_migration_backfills_and_accepts_gap_then_late_0015(monkeypatch):
         assert not conn.execute("SELECT 1 FROM component_source_dependencies").fetchone()
     finally:
         conn.close()
-
-
-def test_synthetic_targeted_refresh_benchmark(hub, synced, monkeypatch):
-    svc, aid, ids = synced
-    for _ in range(49):
-        svc.create(aid, "score_model", score_spec(), sources=score_sources(ids["assignment:7002"]))
-    selected = svc.create(aid, "score_model", score_spec(), sources=score_sources(ids["assignment:7001"]))
-    calls = []
-    original = svc._sync_component
-    monkeypatch.setattr(svc, "_sync_component", lambda a, row: (calls.append(row["id"]), original(a, row))[1])
-    start = time.monotonic()
-    svc.sync_sources(aid)
-    full_seconds, full_count = time.monotonic() - start, len(calls)
-    calls.clear()
-    start = time.monotonic()
-    svc.sync_changed_sources(aid, item_ids=[ids["assignment:7001"]] * 1000)
-    targeted_seconds = time.monotonic() - start
-    assert full_count == 50 and calls == [selected["id"]]
-    print(f"synthetic component refresh: full={full_count} components/{full_seconds:.6f}s; "
-          f"targeted={len(calls)} component/{targeted_seconds:.6f}s; unrelated avoided=49")

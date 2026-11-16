@@ -4,8 +4,8 @@ from __future__ import annotations
 import json
 import threading
 
-from ..util import InvalidInput, now_iso
-from .context import (Policy, SUMMARY_SYSTEM, context_error, data_version, live_data_version, encoded,
+from ..util import InvalidInput, now_iso, sha256_text
+from .context import (Policy, SUMMARY_SYSTEM, calibration, context_error, data_version, live_data_version, encoded,
                       estimate, neutral_message, parse_summary, split_for_summary, summary_message)
 from .providers import ProviderError, Stopped
 from .usage import stored_usage, usage_totals
@@ -14,17 +14,38 @@ from .source_context import restore_source_context, with_source_context
 
 
 class ContextService:
+    @staticmethod
+    def _calibration_key(cfg):
+        # Codex adds its own large instructions to every request, so a ratio would not carry over.
+        if cfg.get("provider") not in ("anthropic", "openai_compatible", "allowance_gateway"):
+            return None
+        return sha256_text(encoded([cfg.get("provider"), (cfg.get("base_url") or "").strip(), (cfg.get("model") or "").strip()]))
+
+    def _calibration(self, cfg):
+        """Correct estimates with what this provider and model reported for its last few requests."""
+        key = self._calibration_key(cfg)
+        if key is None:
+            return calibration([])
+        rows = self.hub.db.query("SELECT provider, raw_estimated_tokens, usage_json FROM assistant_context_usage WHERE calibration_key=? "
+                                 "AND status IN ('completed','incomplete') AND raw_estimated_tokens IS NOT NULL AND usage_json IS NOT NULL "
+                                 "ORDER BY id DESC LIMIT 9", (key,))
+        return calibration([(r["raw_estimated_tokens"], stored_usage(json.loads(r["usage_json"]), r["provider"]).get("input_tokens"))
+                            for r in rows])
+
     def _complete_with_usage(self, cid, cfg, provider, system, transcript, tools, on_text):
         """Persist a dispatch before calling, including failures with no reply.
 
         The linked message is only a display copy; totals use this row once.
         A process interruption leaves 'started', marked interrupted on startup.
         """
-        estimated = (self._context_reports.get(cid) or {}).get("estimated_tokens", 0)
+        report = self._context_reports.get(cid) or {}
+        estimated = report.get("estimated_tokens", 0)
         with self.hub.db.tx() as c:
             attempt = c.execute("INSERT INTO assistant_context_usage(conversation_id,provider,model,status,"
-                                "estimated_input_tokens,created_at,purpose) VALUES (?,?,?,'started',?,?,'chat')",
-                                (cid, cfg["provider"], cfg.get("model"), estimated, now_iso())).lastrowid
+                                "estimated_input_tokens,created_at,purpose,raw_estimated_tokens,calibration_key) "
+                                "VALUES (?,?,?,'started',?,?,'chat',?,?)",
+                                (cid, cfg["provider"], cfg.get("model"), estimated, now_iso(),
+                                 report.get("raw_estimated_tokens"), self._calibration_key(cfg))).lastrowid
         status, usage, model = "failed", None, cfg.get("model")
         try:
             turn = provider.complete(system, transcript, stable_tools(tools), on_text=on_text)
@@ -106,7 +127,7 @@ class ContextService:
         request = [{"role": "user", "sent_text": encoded({"max_summary_tokens": policy.summary_tokens,
                                                            "conversation": [neutral_message(m) for m in prefix]})}]
         input_tokens = estimate(SUMMARY_SYSTEM) + estimate(request) + 512
-        if not policy.limit_disabled and input_tokens + policy.summary_tokens > int(policy.capacity * .9):
+        if policy.enforced and input_tokens + policy.summary_tokens > int(policy.capacity * .9):
             raise ProviderError("Older history is too large for one safe summary request. Original context is retained; start a focused chat. No summary request was sent.")
         version = data_version(self.hub, account_id)
         live_version = live_data_version(self.hub, account_id)
@@ -185,8 +206,9 @@ class ContextService:
             request_context = restore_source_context(self.hub, account_id, request_context)
         transcript = self._context_projection(cid, account_id, transcript)
         projected = with_source_context(transcript, request_context)
-        report = policy.measure(cfg, system, projected, tools)
-        if not policy.limit_disabled and report["overhead_tokens"] + report["response_reserved"] >= int(policy.capacity * .9):
+        calibrated = self._calibration(cfg)
+        report = policy.measure(cfg, system, projected, tools, calibrated)
+        if policy.enforced and report["overhead_tokens"] + report["response_reserved"] >= report["effective_capacity"]:
             self._context_reports[cid] = report
             raise context_error(report)
         attempted = False
@@ -204,7 +226,7 @@ class ContextService:
             if request_context:
                 request_context = restore_source_context(self.hub, account_id, request_context)
             projected = with_source_context(transcript, request_context)
-            report = policy.measure(cfg, system, projected, tools)
+            report = policy.measure(cfg, system, projected, tools, calibrated)
         self._context_reports[cid] = report
         if report["over_budget"]:
             raise context_error(report)
@@ -247,6 +269,11 @@ class ContextService:
                                                     "assistant_context_usage WHERE conversation_id=? ORDER BY id", (cid,))]
         for attempt in attempts:
             attempt["usage"] = stored_usage(json.loads(attempt.pop("usage_json") or "null"), attempt["provider"])
+        # The newest finished chat request: what was estimated beforehand and what the provider then counted.
+        finished = next((a for a in reversed(attempts) if a["purpose"] == "chat" and a["status"] in ("completed", "incomplete")), None)
+        last_request = finished and {"model": finished["model"], "estimated_input_tokens": finished["estimated_input_tokens"],
+                                     "reported_input_tokens": finished["usage"].get("input_tokens"),
+                                     "reported_output_tokens": finished["usage"].get("output_tokens")}
         uses = [stored_usage(m.get("usage"), (m.get("raw") or {}).get("provider")) for m in transcript
                 if m["role"] == "assistant" and not m.get("usage_request_id")
                 and (m.get("raw") or {}).get("provider") != "canvas_hub"]
@@ -260,4 +287,4 @@ class ContextService:
                 "summary_usage": usage_totals(summary_uses), "total_usage": usage_totals(uses + [a["usage"] for a in attempts]),
                 "usage_scope": "recorded assistant attempts and compaction attempts; earlier failed requests may be absent",
                 "summary_requests": len(summaries), "last_summary_status": summaries[-1]["status"] if summaries else None,
-                "budget": self._context_reports.get(cid), "history_preserved": True}
+                "budget": self._context_reports.get(cid), "last_request": last_request, "history_preserved": True}

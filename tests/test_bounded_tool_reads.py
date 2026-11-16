@@ -10,7 +10,7 @@ import pytest
 
 from canvas_hub.agent_tools import ToolContext, run_tool_display
 from canvas_hub.assistant import AssistantService
-from canvas_hub.assistant.context import Policy, context_error, valid_groups
+from canvas_hub.assistant.context import Policy, valid_groups
 from canvas_hub.assistant.providers import ToolCall, Turn
 from canvas_hub.assistant.read_results import READ_BYTES, bound, read
 from canvas_hub.boundary import HubAPI
@@ -224,19 +224,6 @@ def test_snapshot_complete_retrieval_restart_scope_and_live_change(hub, account,
     for other in [ToolContext(api, account_id=account['id']+1, conversation_id=cid, read_results={}),
                   ToolContext(api, account_id=account['id'], conversation_id=cid+1, read_results={})]:
         with pytest.raises(NotFound): read(other, {'read_id': reply['read_id']})
-
-
-def test_margin_is_explicit_and_verified_capacity_never_overrides_application_limit():
-    cfg = {'provider': 'openai_compatible', 'base_url': 'https://api.deepseek.com/v1', 'model': 'deepseek-flash'}
-    assert Policy.for_config(cfg).capacity == 1048576
-    assert Policy.for_config({**cfg, 'context': {'capacity': 32768}}).capacity == 32768
-    policy = Policy.for_config({'provider': 'codex'})
-    report = policy.measure({'provider': 'codex'}, '', [], [])
-    report.update(used={'history': 4494, 'tools': 32110, 'documents': 7413}, schema_tokens=6946, system_tokens=1863,
-                  framing_tokens=1472, total_with_response=58394)
-    message = str(context_error(report))
-    assert 'effective budget 57600' in message and '10% safety margin (6400)' in message
-    assert 'aggregate excess 794' in message and 'retains the same history' in message
 
 
 def test_real_tool_indexes_keep_full_fields_and_existing_page_cursors(hub, account, fixture_pkg, scenario):

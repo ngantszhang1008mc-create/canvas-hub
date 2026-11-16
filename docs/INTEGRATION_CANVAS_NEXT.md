@@ -192,7 +192,8 @@ The integration also fixes a shutdown race so a timed-out close still closes the
 browser and clears queued credentials after the active request returns.
 Real course-site Basic/SSO/MFA has not been exercised. Popup-only SSO,
 cross-origin resources and JavaScript-generated course content remain limited;
-see [connection boundaries](EXTERNAL_LOGIN_RESEARCH.md).
+this restricted connection was later replaced by link inspection, which uses an
+ordinary sign-in window: see [External links](EXTERNAL_LINKS.md).
 
 One combined run passed **29 focused checks in 58.96 seconds**. The added
 timed-out-close regression passed separately (1.80 seconds), followed by three

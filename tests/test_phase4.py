@@ -71,7 +71,9 @@ def test_formula_lines_compute_the_same_in_the_page(hub, account):
 
 
 def test_local_grading_rules_apply_to_drafts(hub, account, fixture_pkg):
-    hub.importer.import_package(fixture_pkg)
+    # An unsubmitted assignment whose deadline has passed is scored as lost, so keep the deadline
+    # ahead of the clock: this test is about applying the rules, not about a missed deadline.
+    hub.importer.import_package(_future_fixture(fixture_pkg, days=30)[0])
     aid = account["id"]
     ctx = ToolContext(api=HubAPI(hub), account_id=aid)
     rules = {"groups": {"Assignments": {"weight": 40, "drop_lowest": 1}},

@@ -891,3 +891,10 @@ body.chat-focus .chat-scroll { overscroll-behavior: contain; }     /* the page i
 .job-core-notice { padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; }
 .collection-job { min-width: 0; overflow-wrap: anywhere; }
 .job-current-task { white-space: normal; overflow-wrap: anywhere; }
+
+/* Assistant settings: reply length and context window choices */
+.limit-choice { border: 1px solid var(--rule); border-radius: 8px; padding: 10px 14px 12px; margin: 0 0 12px; display: grid; gap: 8px; min-width: 0; }
+.limit-choice legend { padding: 0 6px; font-size: 13px; font-weight: 600; color: var(--text-2); }
+.limit-choice p { margin: 0; }
+.limit-choice label.check { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: baseline; gap: 8px; }
+.limit-choice label.check input[type=number] { margin: 0 4px; }

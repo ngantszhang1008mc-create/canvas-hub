@@ -84,9 +84,28 @@ After the runs above, check in Canvas:
 - favorites and the dashboard are unchanged;
 - invitations were not accepted.
 
-## 7. COMP1023 external website (brief §3)
+## 7. External links: course website, Oxygen/Zinc, Piazza
 
-Canvas Hub does not open the separate COMP1023 course website and never imports your Chrome profile `ngan`. If you want that site's content in Canvas Hub later, the documented route is user-controlled. You open it in your own Chrome profile, and a trusted collector produces an observation package that you import, under the same identity checks as the built-in collector. That collector could be the future Codex Canvas Reader adaptation. See `CODEX_HANDOFF.md` §5.
+Canvas Hub now opens sites outside Canvas itself, in a browser profile of its own. It never imports your Chrome profile `ngan` or any other browser's data; you sign in again, once, in Canvas Hub's own window or form. How it works: [EXTERNAL_LINKS.md](EXTERNAL_LINKS.md). To see the whole flow first with made-up sites, run `uv run python scripts/preview-link-inspection.py`.
+
+These three sites could not be reached from the build environment, so each step below is unverified until you run it. If a row behaves differently, note the status label and the message shown on the row; that is enough to fix it.
+
+| # | Step | Expected |
+| --- | --- | --- |
+| 7.1 | Run a collection (or open **External links** if you already have data) | A notice says how many external links were found and offers **Inspect all**. No extra tab or window opens. |
+| 7.2 | If a site is not listed, add it under **External links → Add a link yourself** | The link appears as *Not inspected yet* |
+| 7.3 | Press **Inspect all** | Each row settles on a status within about half a minute. Public pages become *Read and saved*. |
+| 7.4 | **COMP1023 course website** | *Sign-in needed · Username and password*, with a form on the row. Enter the site's username and password, press **Sign in and continue** → *Read and saved*. **View saved page** shows the course page text. |
+| 7.5 | A wrong password on 7.4 | "…did not accept that username and password", and the form is shown again |
+| 7.6 | **Oxygen or Zinc** | *Sign-in needed · University / single sign-on*. **Open sign-in window** opens a separate window on the HKUST login. Sign in with MFA as usual → the window closes by itself and the row becomes *Read and saved*. |
+| 7.7 | The other of Oxygen/Zinc, after 7.6 | Read automatically without asking again (or at most one more **Open sign-in window** that passes straight through) |
+| 7.8 | **Piazza** (a plain `piazza.com` link) | *Sign-in needed · The site's own sign-in page*. **Open sign-in window**, log in → *Read and saved* with the class feed text |
+| 7.9 | If a window does not close by itself after you are in | Press **I've signed in — continue** on the row |
+| 7.10 | Turn Wi-Fi off and press **Try again** on any row | *Network problem* saying this computer looks offline. The page saved earlier is still there. |
+| 7.11 | Quit and restart Canvas Hub, press **Inspect again** on each | Either *Read and saved*, or *Sign-in needed* again for sites that only keep you signed in until the browser closes. Note which. |
+| 7.12 | Search for a phrase from one of the saved pages; ask the Assistant about it | The saved page is found and labelled as read by Canvas Hub, not reported by Canvas |
+
+If HKUST sign-in refuses the bundled browser in 7.6, quit and start with `CANVAS_HUB_BROWSER_CHANNEL=chrome uv run canvas-hub serve`, as in 1.6.
 
 ## 8. Assistant and MCP (needs your own API key for 8.1–8.4)
 
@@ -111,7 +130,7 @@ Don't paste your key into chat; enter it only in the app.
 | 9.2 | Tick **Suggest study blocks**, click **+ Add** on one | It becomes a to-do; nothing changes in Canvas |
 | 9.3 | **Export .ics** and open it in Calendar | Classes repeat weekly; deadlines appear 30 minutes before their due time |
 | 9.4 | Ask the assistant "Plan my study time this week" | It answers with an interactive timetable and buttons, not just text |
-| 9.5 | **Agent requests**: leave one for the COMP1023 website with the note "Use Chrome profile ngan" | Status *Waiting for an agent* |
+| 9.5 | **Agent requests**: leave one for a Canvas page (requests for sites outside Canvas are paused; use section 7 for those) | Status *Waiting for an agent* |
 | 9.6 | In Codex or Claude Code (MCP started with `--allow-fulfil`), ask it to fulfil open Canvas Hub requests | Status becomes *Done*; the content is searchable and labelled as agent-provided |
 
 ## 10. Score models, checklists and artifacts

@@ -6,12 +6,12 @@ import httpx
 import pytest
 
 from canvas_hub.assistant import AssistantService
-from canvas_hub.assistant.context import Policy, valid_groups
-from canvas_hub.assistant.providers import ProviderError, ToolCall, Turn, compatible_output_tokens
+from canvas_hub.assistant.context import valid_groups
+from canvas_hub.assistant.providers import ToolCall, Turn
 from canvas_hub.assistant.usage import normalize_usage
 from canvas_hub.boundary import HubAPI
 
-from .test_provider_usage import sdk_peer
+from .test_provider_usage import sdk_peer  # noqa: F401 - fixture
 
 
 COUNTS = {"prompt_tokens": 44833, "completion_tokens": 4096, "total_tokens": 48929,
@@ -109,30 +109,6 @@ def test_incomplete_terminal_reply_stops_without_dispatch_or_retry(hub, account,
         assert rejected["error"] == "response_incomplete" and rejected["executed"] is False
 
 
-def test_reply_budget_respects_explicit_limits_endpoint_mode_and_wire_cap(sdk_peer):
-    cfg = {"provider": "openai_compatible", "preset": "deepseek", "base_url": "https://api.deepseek.com/v1",
-           "model": "deepseek-flash", "thinking": "low"}
-    cases = [({}, 16384), ({"thinking": ""}, 16384), ({"thinking": "off"}, 4096),
-             ({"base_url": "https://proxy.invalid/v1"}, 4096), ({"model": "unverified-alias"}, 4096),
-             ({"context": {"capacity": 32768}}, 8192), ({"context": {"response_tokens": 4096}}, 4096),
-             ({"extra_params": {"max_tokens": 2048}}, 2048)]
-    for changes, expected in cases:
-        configured = {**cfg, **changes}
-        policy = Policy.for_config(configured)
-        assert policy.response_tokens == expected and not policy.auto_compact
-        assert compatible_output_tokens(configured) == expected
-        assert policy.measure(configured, "System", [], [])["request_max_tokens"] == expected
-    configured = {**cfg, "context": {"response_tokens": 8192}, "extra_params": {"max_tokens": 2048}}
-    policy = Policy.for_config(configured)
-    assert policy.response_tokens == 8192 and compatible_output_tokens(configured) == 2048
-    for chosen, cap in ((cfg, 16384), (configured, 2048)):
-        p, requests = sdk_peer({**chosen, "_response_tokens": Policy.for_config(chosen).response_tokens})
-        p.complete("System", [{"role": "user", "sent_text": "Synthetic"}], [], on_text=lambda _: None)
-        assert requests[-1]["max_tokens"] == cap
-    with pytest.raises(ProviderError, match="conflict"):
-        Policy.for_config({**cfg, "extra_params": {"max_tokens": 2048, "max_completion_tokens": 4096}})
-    assert compatible_output_tokens({**cfg, "context": {"response_tokens": 16000}, "_response_tokens": 2000}) == 2000
-
 
 def test_sdk_reasoning_only_length_stream_keeps_usage_and_does_not_retry(sdk_peer):
     def chunk(delta, finish=None, usage=None):
@@ -178,9 +154,9 @@ def test_incomplete_warning_and_reply_limit_in_browser(hub, account, monkeypatch
             assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
             # A later preflight/compaction failure must not inherit the older
             # reply's cause or re-enable answer retry when context is too large.
-            svc._set_state(cid, "error", "Context budget exceeded (synthetic)")
+            svc._set_state(cid, "error", "This request is too large for the model's context window. (synthetic)")
             page.reload()
-            expect(page.get_by_text("Context budget exceeded (synthetic)", exact=True)).to_be_visible()
+            expect(page.get_by_text("This request is too large for the model's context window. (synthetic)", exact=True)).to_be_visible()
             expect(page.get_by_text("Output limit reached — details", exact=True)).to_have_count(0)
             expect(page.get_by_role("button", name="Retry answer", exact=True)).to_have_count(0)
             svc.send(account["id"], "Only continue the answer; no actions", cid); svc.wait(cid, 5)
@@ -192,12 +168,22 @@ def test_incomplete_warning_and_reply_limit_in_browser(hub, account, monkeypatch
             page.screenshot(path=str(tmp_path / "incomplete-1280.png"), full_page=True)
             pid = svc.public_config()["active_profile"]
             page.goto(f"{base}/#/assistant/settings?p={pid}")
-            page.get_by_label("Reply token limit", exact=True).fill("8192")
+            # The user decides how long a reply may be: their own number, or no limit at all.
+            reply = page.get_by_role("group", name="Reply length", exact=True)
+            page.get_by_label("Maximum tokens per reply", exact=True).fill("8192")
+            expect(reply.get_by_role("radio", name="Limit each reply to", exact=False)).to_be_checked()
             with page.expect_response(lambda r: r.url == base + "/api/assistant/config" and r.request.method == "PUT") as saved:
                 page.get_by_role("button", name="Save", exact=True).click()
             assert saved.value.status == 200
-            expect(page.get_by_label("Reply token limit", exact=True)).to_have_value("8192")
-            assert svc._load(pid)["context"]["response_tokens"] == 8192
+            expect(page.get_by_label("Maximum tokens per reply", exact=True)).to_have_value("8192")
+            assert svc._load(pid)["context"] | {"response_tokens": 8192, "reply_limit": "custom"} == svc._load(pid)["context"]
+            reply.get_by_role("radio", name="No limit", exact=False).check()
+            with page.expect_response(lambda r: r.url == base + "/api/assistant/config" and r.request.method == "PUT") as saved:
+                page.get_by_role("button", name="Save", exact=True).click()
+            assert saved.value.status == 200
+            assert svc._load(pid)["context"]["reply_limit"] == "none" and "response_tokens" not in svc._load(pid)["context"]
+            page.reload()
+            expect(reply.get_by_role("radio", name="No limit", exact=False)).to_be_checked()
             assert len(requests) == 2 and not errors
         finally:
             browser.close()

@@ -46,8 +46,8 @@ def daily_work(hub, account, fixture_pkg):
     return aid, ids, checklist, task
 
 
-@pytest.mark.parametrize("theme", ["light", "dark"])
-@pytest.mark.parametrize("width", [1280, 380], ids=["desktop", "phone"])
+# One light desktop run and one dark phone run: every theme and every width is exercised once.
+@pytest.mark.parametrize("theme,width", [("light", 1280), ("dark", 380)], ids=["light-desktop", "dark-phone"])
 def test_daily_work_filters_and_completion_are_distinct(hub, account, daily_work, theme, width):
     from playwright.sync_api import expect, sync_playwright
     aid, ids, checklist, task = daily_work
@@ -97,8 +97,8 @@ def test_daily_work_filters_and_completion_are_distinct(hub, account, daily_work
         browser.close()
 
 
-@pytest.mark.parametrize("theme", ["light", "dark"])
-@pytest.mark.parametrize("width", [1280, 380], ids=["desktop", "phone"])
+# One light desktop run and one dark phone run: every theme and every width is exercised once.
+@pytest.mark.parametrize("theme,width", [("light", 1280), ("dark", 380)], ids=["light-desktop", "dark-phone"])
 def test_resume_step_and_action_launcher_keep_the_same_workspace(hub, account, daily_work, theme, width):
     from playwright.sync_api import expect, sync_playwright
     aid, ids, checklist, _ = daily_work

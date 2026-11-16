@@ -177,6 +177,26 @@ The course, type and archive filters still apply; **Completed**, **Past 30 days*
 The in-app assistant can manage these tabs, filters and archives too. **Assistant → Settings → The assistant may →
 Manage deadline tabs, filters and archives** is on by default; switch it off to disable assistant changes.
 
+## External links
+
+Course websites, graders and forums outside Canvas are listed under **External links**, and on the course
+or item that links to them. When a collection finds new ones, a notice asks whether Canvas Hub may open
+them; nothing is opened until you say so. **Inspect** opens a link in Canvas Hub's own background browser
+and saves the page text, which then becomes searchable and available to the Assistant. No AI provider is
+involved.
+
+If a link cannot be read, its row says why: sign-in needed, this computer offline, address not found,
+page gone, access refused, and so on. For a sign-in the row offers one clear step, depending on the site:
+
+- a **username and password form** for sites that use the browser's basic sign-in prompt;
+- an **Open sign-in window** button for university single sign-on (including MFA) and for sites with
+  their own sign-in page. You sign in there as usual; Canvas Hub never sees what you type.
+
+After you sign in, the read continues by itself, and other links behind the same sign-in are read too.
+These sign-ins live in a browser profile that belongs to Canvas Hub only and is never backed up or
+exported. Try the whole flow with made-up sites: `uv run python scripts/preview-link-inspection.py`.
+Details and limits: [docs/EXTERNAL_LINKS.md](docs/EXTERNAL_LINKS.md).
+
 ## Academic workspace
 
 Overall brings together upcoming work across courses and a saved Continue action. Assignment and course workspaces keep checklists beside requirements and source material, with an optional contextual Agent pane and a compact `‹` action launcher. Checklist progress, local whole-assignment completion and Canvas submission state stay separate. Grade planning and optional hours tools remain secondary.
@@ -189,6 +209,7 @@ Declared Canvas field bindings refresh trackers deterministically after collecti
   - **Supported providers:** Anthropic (Claude), OpenAI, Google Gemini, OpenRouter, DeepSeek, a local Ollama model, or any OpenAI-compatible endpoint.
   - **What it can do:** answer from the stored data. If you allow it, it can also check Canvas for updates through the app's signed-in browser (with the same read-only rules as Quick check) and create or edit your local notes and to-dos.
   - **Your key:** stays in a private file on this computer and is never included in backups or exports. Your questions, and the course data the assistant reads, go to the provider you choose.
+  - **Limits you control:** each setup shows the model's real context window (asked from the provider when you press **Save & test**, never guessed) and lets you choose the reply length: no limit, or your own maximum number of tokens. Token counts shown in a chat are corrected with what the provider itself reports. Details: [docs/ASSISTANT_CONTEXT.md](docs/ASSISTANT_CONTEXT.md).
 - **MCP:** other agents such as Codex, Claude Code or Claude Desktop can use your data through a local MCP server:
 
   ```bash
@@ -223,7 +244,7 @@ Declared Canvas field bindings refresh trackers deterministically after collecti
 - **Custom blocks (advanced, off by default):** when no built-in view fits, the assistant can write its own HTML. It runs only when you press **Run**, in an isolated frame with no network access.
 - **Text from scans and photos (optional):** with [Tesseract](https://tesseract-ocr.github.io/) and [Poppler](https://poppler.freedesktop.org/) installed, Canvas Hub can read photographed forms and scanned PDFs. Install `tesseract poppler` with Homebrew on macOS, or the Windows builds and add their program folders to `PATH` on Windows. Each document shows a confidence score, and low-confidence text is flagged.
 - **Planner page:** add your class times, see your week with deadlines and to-dos, get suggested study blocks, and export to Apple Calendar (`.ics`). It's a local plan only.
-- **Agent requests page:** for sites outside Canvas (like a separate course website), leave a request that a connected agent with its own browser access can fulfil. Run the MCP server with `--allow-fulfil` for that agent. The text it sends back is stored, searchable, and labelled as agent-provided.
+- **Agent requests page:** leave a request for a Canvas page that a connected agent with its own browser access can fulfil. Run the MCP server with `--allow-fulfil` for that agent. The text it sends back is stored, searchable, and labelled as agent-provided. Sites outside Canvas are read by Canvas Hub itself: see [External links](#external-links).
 - **Direct Codex connection:** the assistant can use your locally installed Codex CLI and its existing login, with the same Canvas Hub tools and permissions. No Codex credentials are saved in Canvas Hub.
 
 ### Use Codex in the assistant
@@ -248,7 +269,7 @@ If the app cannot find `codex`, restart it after installing the CLI or set `CANV
 | --- | --- |
 | Course data (SQLite database, downloaded originals, extracted text) | macOS: `~/Library/Application Support/CanvasHub/data/`; Windows: `%LOCALAPPDATA%\CanvasHub\data\` |
 | Backups and exports | `…/CanvasHub/data/backups/` |
-| App browser profiles (your Canvas sign-in) | `…/CanvasHub/browser-profiles/` (separate; never backed up or exported) |
+| App browser profiles (your Canvas sign-in, and sign-ins for external sites) | `…/CanvasHub/browser-profiles/` (separate; never backed up or exported) |
 
 Run `uv run canvas-hub paths` to print the exact locations. To use a different folder, set `CANVAS_HUB_HOME` or pass `--home`.
 
@@ -272,8 +293,8 @@ Run `uv run canvas-hub paths` to print the exact locations. To use a different f
 
 ```bash
 uv sync
-uv run pytest -q                    # all tests, including real-Chromium end-to-end runs (~35 s)
-uv run pytest -q -m "not browser"   # fast tests (~2 s)
+uv run pytest -q                    # all tests, including real-Chromium end-to-end runs (several minutes)
+uv run pytest -q -m "not browser"   # fast tests (about a minute)
 ```
 
 To use an existing Chromium installation for both collection and browser tests, set `CANVAS_HUB_CHROMIUM` to its executable path before running these commands.
@@ -285,8 +306,10 @@ Code map:
 | `canvas_hub/boundary.py` | Service API used by the UI and the future Codex adapter |
 | `canvas_hub/services/` | Storage and domain logic |
 | `canvas_hub/collector/` | Browser, sign-in, traversal, job runner |
+| `canvas_hub/services/link_inspection.py` | Opening external links, diagnosing failures, site sign-in |
 | `canvas_hub/web/` | HTTP server and UI (no build step) |
 | `canvas_hub/testing/fake_canvas.py` | Synthetic Canvas for tests |
+| `canvas_hub/testing/fake_sites.py` | Synthetic external sites (three kinds of sign-in) for tests and the demo |
 
 Keep credentials, browser profiles, real course data and databases out of git; `.gitignore` covers the defaults.
 
@@ -304,9 +327,8 @@ Assistant runs default to four concurrent conversations; set
 `CANVAS_HUB_ASSISTANT_CONCURRENCY` to 1–16 to change this per process. Requests
 above the limit receive a busy response before a message is saved.
 
-External-link inspection and site sign-in are temporarily paused, including
-Analyse all and adapter refreshes. Saved links and source content remain available;
-normal Canvas collection continues. See [external-source status](docs/EXTERNAL_SOURCES.md).
+The earlier AI link analysis, adapters and connected-agent site reads are paused;
+[External links](#external-links) replaces them. See [their status](docs/EXTERNAL_SOURCES.md).
 
 When storage is temporarily unavailable, completed-turn recovery information
 is kept in bounded memory and retried on access or normal shutdown. If storage

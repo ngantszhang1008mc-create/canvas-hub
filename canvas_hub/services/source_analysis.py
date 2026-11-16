@@ -1,12 +1,14 @@
 """Explicit, single-attempt public reads using the existing Assistant setup.
 
+Paused (see ``external_inspection``): link inspection in ``link_inspection`` is the
+working path for reading external sites. This module is kept for stored data.
+
 No tool loop: untrusted page text gets no credentials, history, or tools. The
 server owns evidence and scope. A consumed disclosure never dispatches again.
 """
 import json
 import secrets
 import threading
-import time
 from datetime import datetime, timezone
 from urllib.parse import urlsplit, urlunsplit
 
@@ -14,7 +16,6 @@ from ..assistant.providers import ANTHROPIC_DEFAULT_MODEL, Stopped, make_provide
 from ..util import Conflict, InvalidInput, NotFound, canonical_json, now_iso, parse_iso, sha256_text
 from .external_reader import validate_spec
 from .source_evidence import classification_evidence
-from .login_detection import LoginDetection
 from .. import external_inspection
 
 AGENT = 'Canvas Hub built-in Assistant'
@@ -38,10 +39,7 @@ class SourceAnalysis:
         self.api, self.hub = api, api.hub
         self.db = self.hub.db
         self.sources = self.hub.external_sources
-        self.login_detection = LoginDetection(self.hub)
         self.threads = {}
-        self._connected_offers = {}
-        self._connected_lock = threading.Lock()
         self.batch_threads = {}
         self._slots = threading.BoundedSemaphore(2)
         # Bound active and waiting workers without blocking request handlers.
@@ -104,31 +102,7 @@ class SourceAnalysis:
                                if cfg['provider'] == 'allowance_gateway' else None),
                 'model': cfg.get('model') or (ANTHROPIC_DEFAULT_MODEL if cfg['provider'] == 'anthropic' else 'Provider default')}
 
-    def connected_disclosure(self, aid, sid, connections):
-        external_inspection.require_enabled()
-        from .connected_content import sanitize_connected_text, validate_evidence_url
-        snapshot = connections.action(aid, sid, 'analysis_snapshot')
-        validate_evidence_url(snapshot.get('url', ''))
-        content = sanitize_connected_text(snapshot['content'])
-        account = self.hub.identity.get_account(aid)
-        owner = sha256_text(account['origin'] + '\0' + account['canvas_user_id'])
-        if snapshot.get('owner') != owner:
-            raise Conflict('Account changed; inspect the source again')
-        offer = self.disclosure(aid, sid)
-        if not offer['available']:
-            return offer
-        if offer['urls'] != [snapshot.get('url')]:
-            raise Conflict('Source changed; inspect it again')
-        with self._connected_lock:
-            now = time.monotonic()
-            self._connected_offers = {k:v for k,v in self._connected_offers.items() if v['expires'] > now}
-            if len(self._connected_offers) >= 20:
-                raise Conflict('Too many pending connected-page reviews')
-            self._connected_offers[offer['token']] = {'aid':aid, 'sid':sid, 'owner':owner, 'url':snapshot['url'],
-                                                      'content':content, 'connections':connections, 'expires':now+300}
-        return {**offer, 'content':content, 'access_mode':'connected_local'}
-
-    def start(self, aid, sid, token, *, consent=False, reanalyze=False, connected=False):
+    def start(self, aid, sid, token, *, consent=False, reanalyze=False):
         external_inspection.require_enabled()
         if not self._admission.acquire(blocking=False):
             raise Conflict("Source analysis is busy. Wait for an analysis to finish, then retry.", code="source_analysis_busy")
@@ -136,22 +110,6 @@ class SourceAnalysis:
         try:
             if consent is not True or not isinstance(token, str):
                 raise InvalidInput('Review and approve the source/provider disclosure first.', code='disclosure_required')
-            with self._connected_lock:
-                private = self._connected_offers.get(token)
-                if connected:
-                    account = self.hub.identity.get_account(aid)
-                    owner = sha256_text(account['origin'] + '\0' + account['canvas_user_id'])
-                    if not private or private['aid'] != aid or private['sid'] != sid or private['owner'] != owner or private['expires'] <= time.monotonic():
-                        raise Conflict('Connected-page review expired or changed; review it again')
-                elif private:
-                    raise Conflict('Use the connected-page approval for this review')
-            if connected:
-                # Re-read the exact requested page just before dispatch so an
-                # expired session or changed content invalidates the disclosure.
-                from .connected_content import sanitize_connected_text
-                current = private['connections'].action(aid, sid, 'analysis_snapshot')
-                if current.get('owner') != private['owner'] or current.get('url') != private['url'] or sanitize_connected_text(current['content']) != private['content']:
-                    raise Conflict('The connected page changed; review it again')
             with self.sources._lock, self.db.tx() as c:
                 s = self.sources._source(aid, sid)
                 offer = c.execute('SELECT * FROM source_analysis_attempts WHERE token=? AND account_id=? AND source_id=?', (token, aid, sid)).fetchone()
@@ -175,13 +133,7 @@ class SourceAnalysis:
                 rid = source['analysis_request_id']
                 self.hub.requests._set(rid, status='claimed', claimed_by=AGENT, claimed_at=now_iso())
                 c.execute("UPDATE source_analysis_attempts SET request_id=?,state='running' WHERE token=?", (rid, token))
-            if connected:
-                with self._connected_lock:
-                    private = self._connected_offers.pop(token, None)
-                if not private:
-                    self._finish(aid, sid, rid, token, 'Connected-page review expired; review it again.')
-                    raise Conflict('Connected-page review expired; review it again')
-            thread = threading.Thread(target=self._run_reserved, args=(aid, sid, rid, token, cfg, private['content'] if connected else None), daemon=True, name=f'source-analysis-{rid}')
+            thread = threading.Thread(target=self._run_reserved, args=(aid, sid, rid, token, cfg), daemon=True, name=f'source-analysis-{rid}')
             self.threads[token] = thread
             try:
                 handed_off = True
@@ -219,30 +171,10 @@ class SourceAnalysis:
                 c.execute("UPDATE view_requests SET status='declined',result_note=?,completed_at=? WHERE id=? AND account_id=? AND status='claimed' AND claimed_by=?", (error, now_iso(), rid, aid, AGENT))
             c.execute("UPDATE source_analysis_attempts SET state='finished' WHERE token=?", (token,))
 
-    def _submit(self, aid, sid, rid, token, result, *, reader_failure=None, connected=False, classification_coverage=None):
+    def _submit(self, aid, sid, rid, token, result, *, reader_failure=None, classification_coverage=None):
         # Bind publication to the durable attempt too: deleted/recreated account
         # and request integer IDs must never accept an old worker's result.
-        return self.sources.submit_analysis(aid, rid, AGENT, result, _builtin=True, _attempt_token=token, _reader_failure=reader_failure, _connected=connected, _classification_coverage=classification_coverage)
-
-    def check_failed_source(self, aid, sid):
-        """Also recover a saved failed attempt after an app restart, once per run."""
-        if not external_inspection.ENABLED:
-            return
-        source = self.sources._source(aid, sid)
-        rid = source['analysis_request_id']
-        if rid and self.hub.requests._get(aid, rid)['status'] == 'declined':
-            self.login_detection.start(aid, sid, failure_id=rid)
-
-    def login_status(self, aid, source):
-        """Only expose a probe belonging to the current failed attempt (or manual check)."""
-        if not external_inspection.ENABLED:
-            return {'state':'paused'}
-        result = self.login_detection.get(aid, source['id'])
-        request = source.get('request') or {}
-        if result.get('failure_id') and not result.get('manual') and (
-                request.get('status') != 'declined' or request.get('id') != result['failure_id']):
-            return {'state':'not_checked'}
-        return result
+        return self.sources.submit_analysis(aid, rid, AGENT, result, _builtin=True, _attempt_token=token, _reader_failure=reader_failure, _classification_coverage=classification_coverage)
 
     def _run_reserved(self, *args):
         try:
@@ -251,7 +183,7 @@ class SourceAnalysis:
             self.threads.pop(args[3], None)
             self._admission.release()
 
-    def _run(self, aid, sid, rid, token, cfg, connected_content=None):
+    def _run(self, aid, sid, rid, token, cfg):
         while not self._slots.acquire(timeout=0.2):
             try:
                 self._active(aid, sid, rid, token)
@@ -262,25 +194,22 @@ class SourceAnalysis:
                     self.threads.pop(token, None)
                 return
         try:
-            self._execute(aid, sid, rid, token, cfg, connected_content)
+            self._execute(aid, sid, rid, token, cfg)
         finally:
             self._slots.release()
 
-    def _execute(self, aid, sid, rid, token, cfg, connected_content=None):
+    def _execute(self, aid, sid, rid, token, cfg):
         provider = None
         error = None
         try:
             with self.sources._lock, self.db.tx():
                 self._active(aid, sid, rid, token)
                 s = self.sources._source(aid, sid)
-            if connected_content is None:
-                response = self.sources.reader.fetch(s['url'], [s['url']])
-                fmt = {'text/html':'html','application/xhtml+xml':'html','text/plain':'text','application/pdf':'pdf'}.get(response.content_type)
-                if not fmt:
-                    raise InvalidInput('Unsupported page type; use a connected Agent.', code='needs_attention')
-                page = self.sources.reader.extract(response, {'format': fmt})
-            else:
-                fmt, page = 'text', {'content':connected_content}
+            response = self.sources.reader.fetch(s['url'], [s['url']])
+            fmt = {'text/html':'html','application/xhtml+xml':'html','text/plain':'text','application/pdf':'pdf'}.get(response.content_type)
+            if not fmt:
+                raise InvalidInput('Unsupported page type; use a connected Agent.', code='needs_attention')
+            page = self.sources.reader.extract(response, {'format': fmt})
             when = now_iso()
             self._active(aid, sid, rid, token)
             provider = make_provider({**cfg, '_single_attempt': True})
@@ -288,11 +217,8 @@ class SourceAnalysis:
             # Codex polls this callback while waiting on its private app-server.
             # Cancellation closes that process in finally; never retry the turn.
             options = {'on_text': lambda _text: self._active(aid, sid, rid, token)} if cfg['provider'] in ('codex', 'allowance_gateway') else {}
-            instructions = SYSTEM if connected_content is None else SYSTEM + '\nThis is a user-reviewed connected-site snapshot. Do not propose an adapter_spec.'
-            model_url = s['url'] if connected_content is None else urlunsplit((*urlsplit(s['url'])[:2], '', '', ''))
-            evidence = classification_evidence(page['content'], url=model_url, fmt=fmt,
-                                               response=response if connected_content is None else None)
-            turn = provider.complete(instructions, [{'role':'user','sent_text':canonical_json(evidence)}], [], **options)
+            evidence = classification_evidence(page['content'], url=s['url'], fmt=fmt, response=response)
+            turn = provider.complete(SYSTEM, [{'role':'user','sent_text':canonical_json(evidence)}], [], **options)
             self._active(aid, sid, rid, token)
             if turn.tool_calls or turn.stop != 'end' or len(turn.text) > 20_000:
                 raise InvalidInput('Model returned unsupported or incomplete output.')
@@ -300,8 +226,6 @@ class SourceAnalysis:
             if not isinstance(result, dict) or set(result) - {'roles','confidence','summary','access_error','adapter_spec'}:
                 raise InvalidInput('Model returned invalid source analysis fields.')
             if result.get('adapter_spec'):
-                if connected_content is not None:
-                    raise InvalidInput('Connected-site snapshots cannot create public adapters')
                 spec = validate_spec(result['adapter_spec'])
                 if spec['pages'] != [s['url']] or spec['format'] != fmt:
                     raise InvalidInput('Model attempted to expand the approved source scope.')
@@ -312,14 +236,9 @@ class SourceAnalysis:
                     ids = [record['fields']['id'] for record in checked['records']]
                     if len(ids) != len(set(ids)):
                         raise InvalidInput('Duplicate record IDs in the observed DOM')
-            if connected_content is not None and result.get('access_error'):
-                result['access_error'] = 'Connected page could not be classified. Previous data retained.'
             if not result.get('access_error'):
-                if connected_content is not None:
-                    result['summary'] = 'Classification of user-reviewed connected-site content.'
                 result.update(evidence_url=s['url'], read_at=when, content=page['content'])
-            self._submit(aid, sid, rid, token, result, connected=connected_content is not None,
-                         classification_coverage=evidence['coverage'])
+            self._submit(aid, sid, rid, token, result, classification_coverage=evidence['coverage'])
         except Stopped:
             pass
         except InvalidInput as e:
@@ -343,13 +262,6 @@ class SourceAnalysis:
                     pass
             try:
                 self._finish(aid, sid, rid, token, error)
-                if connected_content is None:
-                    request = self.hub.requests._get(aid, rid)
-                    source = self.sources._source(aid, sid)
-                    if request['status'] == 'declined' and source['analysis_request_id'] == rid:
-                        # A failed attempt gets one independent, anonymous probe.
-                        # It cannot use saved sessions, call a model, or retry analysis.
-                        self.login_detection.start(aid, sid, failure_id=rid)
             except (NotFound, Conflict):
                 pass  # Account/source deletion or another check must not replay work.
             finally:
@@ -382,7 +294,6 @@ class SourceAnalysis:
         if not external_inspection.ENABLED:
             return {'available':False, **external_inspection.status(), 'scope':scope}
         sources = self.eligible(self.sources.list(aid, course_id, item_id))
-        sources = [s for s in sources if self.login_status(aid, s).get('outcome') != 'login_required']
         if not sources:
             return {'available': False, 'message': 'No new or failed public links in this scope.', 'scope': scope}
         entries, disclosure = [], None

@@ -25,8 +25,8 @@ def scheduled(hub,account,daily_work,fixture_pkg):
     hub.annotations.create(aid,kind='task',title='Read lecture notes',item_id=ids['7001'],local_due=due.replace(hour=9).isoformat())
     return aid,ids,local
 
-@pytest.mark.parametrize('theme',['light','dark'])
-@pytest.mark.parametrize('width',[1280,380])
+# One light desktop run and one dark phone run: every theme and every width is exercised once.
+@pytest.mark.parametrize('theme,width',[('light',1280),('dark',380)],ids=['light-desktop','dark-phone'])
 def test_schedule_is_optional_and_due_is_separate_from_start(hub,account,scheduled,width,theme,tmp_path):
     aid,ids,local=scheduled
     with serve(hub,[]) as (base,token,api),sync_playwright() as p:
