@@ -7,8 +7,9 @@ check Canvas for updates or edits the user's local notes and to-dos.
 Settings, including the API key, live in <home>/runtime/assistant.json (mode
 0600), outside the data directory, so backups and exports never contain the
 key. The key is only sent to the provider endpoint the user configured, and
-is never returned to the UI. Codex keeps its own CLI authentication; Canvas Hub
-does not read or store its credentials.
+is never returned to the UI. Codex keeps its own CLI authentication. Vertex AI
+uses Google Application Default Credentials and refreshes tokens in memory;
+Canvas Hub does not save either provider's credentials.
 
 Privacy: questions, and whatever course data the model reads through tools,
 are sent to the chosen provider. The assistant is off until configured.
@@ -39,6 +40,7 @@ from .context_service import ContextService
 from .source_context import source_manifest, restore_source_context, followup_source_context
 from .gateway_settings import GATEWAY_FIELDS, GatewaySettings, apply_gateway, gateway_consent_valid
 from .tool_catalog import ToolCatalog, ToolSession
+from .vertex import VERTEX_FIELDS, validate_vertex
 
 log = logging.getLogger("canvas_hub.assistant")
 CONFIG_FILE = "assistant.json"
@@ -53,6 +55,8 @@ PRESETS = [
      "model": "", "key_hint": "sk-…"},
     {"id": "gemini", "label": "Google Gemini (OpenAI-compatible endpoint)", "provider": "openai_compatible",
      "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/", "model": "", "key_hint": "AIza…"},
+    {"id": "vertex_ai", "label": "Google Vertex AI (Gemini)", "provider": "vertex_ai",
+     "base_url": "", "model": "", "key_hint": ""},
     {"id": "openrouter", "label": "OpenRouter", "provider": "openai_compatible", "base_url": "https://openrouter.ai/api/v1",
      "model": "", "key_hint": "sk-or-…"},
     {"id": "deepseek", "label": "DeepSeek", "provider": "openai_compatible", "base_url": "https://api.deepseek.com/v1",
@@ -69,7 +73,7 @@ PRESETS = [
 MAX_PROFILES = 20
 # Reasoning effort is chosen per message in the chat, not saved with a setup.
 PROFILE_FIELDS = {"id", "name", "preset", "provider", "base_url", "model", "api_key", "extra_params", "context",
-                  "detected_limits"} | GATEWAY_FIELDS
+                  "detected_limits"} | GATEWAY_FIELDS | VERTEX_FIELDS
 
 
 def reasoning_levels(cfg: dict) -> list[str]:
@@ -78,7 +82,7 @@ def reasoning_levels(cfg: dict) -> list[str]:
         return ["low", "medium", "high", "xhigh", "max"]     # output_config.effort
     if cfg.get("preset") == "deepseek":
         return ["off", "low", "high", "max"]                 # thinking + reasoning_effort
-    if cfg.get("provider") == "openai_compatible":
+    if cfg.get("provider") in ("openai_compatible", "vertex_ai"):
         return ["low", "medium", "high"]                     # reasoning_effort
     if cfg.get("provider") == "codex":
         return ["low", "medium", "high", "xhigh", "max"]     # the chat narrows this to what the chosen model supports
@@ -86,6 +90,7 @@ def reasoning_levels(cfg: dict) -> list[str]:
 DEFAULT_CONFIG = {
     "preset": None, "provider": None, "base_url": "", "model": "", "api_key": "", "effort": "",
     "thinking": "", "extra_params": {}, "context": {},
+    "vertex_project": "", "vertex_location": "global",
     "permissions": {"notes": True, "collect": True, "settings": False, "deadlines": True},
 }
 
@@ -264,6 +269,7 @@ class AssistantService(ContextService, GatewaySettings):
             "reasoning_levels": reasoning_levels(prof), "extra_params": prof["extra_params"],
             "context": prof.get("context") or {},
             "limits": self._limits_view(prof),
+            **{k: prof[k] for k in VERTEX_FIELDS},
             **self._gateway_public(prof),
             "api_key_saved": bool(prof["api_key"]), "api_key_hint": _mask(prof["api_key"]), "api_key_from_env": env_key,
         }
@@ -302,6 +308,8 @@ class AssistantService(ContextService, GatewaySettings):
             return True    # key may come from the saved key, ANTHROPIC_API_KEY or an `ant auth login` profile
         if cfg.get("provider") == "openai_compatible":
             return bool(cfg.get("model") and cfg.get("base_url"))
+        if cfg.get("provider") == "vertex_ai":
+            return bool(cfg.get("model") and cfg.get("vertex_project") and cfg.get("vertex_location"))
         if cfg.get("provider") == "codex":
             return True    # the connection test checks the CLI and its own login
         if cfg.get("provider") == "allowance_gateway":
@@ -318,7 +326,7 @@ class AssistantService(ContextService, GatewaySettings):
         store = self._load_store()
         allowed = {"profile_id", "name", "activate", "preset", "provider", "base_url", "model", "api_key",
                    "extra_params", "permissions", "clear_key", "context", "gateway_mode", "gateway_consent",
-                   "gateway_tools", "clear_gateway_session"}
+                   "gateway_tools", "clear_gateway_session"} | VERTEX_FIELDS
         bad = set(data) - allowed
         if bad:
             raise InvalidInput(f"unknown settings {sorted(bad)}")
@@ -403,6 +411,17 @@ class AssistantService(ContextService, GatewaySettings):
             if data.get("api_key") or data.get("base_url") or data.get("extra_params"):
                 raise InvalidInput("Codex uses its own CLI login and configuration; do not enter an API key, base URL, or extra request settings here.")
             cfg.update(api_key="", base_url="", extra_params={})
+        for k in VERTEX_FIELDS:
+            if k in data:
+                if not isinstance(data[k], str) or len(data[k]) > 100:
+                    raise InvalidInput(f"{k} must be a string of at most 100 characters")
+                cfg[k] = data[k].strip()
+        if cfg["provider"] == "vertex_ai":
+            if data.get("api_key") or data.get("base_url"):
+                raise InvalidInput("Vertex AI uses Google Application Default Credentials and a project/location; "
+                                   "do not enter an API key or base URL.")
+            validate_vertex(cfg)
+            cfg.update(api_key="", base_url="")
         apply_gateway(cfg, data, previous)
 
     def activate_profile(self, profile_id: str) -> dict:
@@ -676,7 +695,7 @@ class AssistantService(ContextService, GatewaySettings):
                 raise InvalidInput(f"{name} must be text")
         cfg = self._load(profile_id)
         if not self.configured(cfg):
-            raise InvalidInput("Set up the assistant first (provider, model and API key).", code="assistant_not_configured")
+            raise InvalidInput("Set up the assistant first in Assistant settings (provider, model and credentials).", code="assistant_not_configured")
         reasoning = reasoning or ""
         if reasoning:
             levels = reasoning_levels(cfg)
@@ -698,6 +717,8 @@ class AssistantService(ContextService, GatewaySettings):
         model = cfg.get("model") or (ANTHROPIC_DEFAULT_MODEL if cfg["provider"] == "anthropic" else "Provider default")
         scope = {"course_id": course_id, "item_id": item_id}
         fields = [account_id, cfg.get("id"), cfg["provider"], cfg.get("base_url"), model, scope]
+        if cfg.get('provider') == 'vertex_ai':
+            fields += [cfg.get('vertex_project'), cfg.get('vertex_location')]
         if cfg.get('provider') == 'allowance_gateway':
             fields += [cfg.get('gateway_mode'), cfg.get('gateway_session_id'), cfg.get('gateway_tools')]
         return hashlib.sha256(json.dumps(fields, sort_keys=True).encode()).hexdigest()
