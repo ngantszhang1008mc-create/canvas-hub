@@ -1809,7 +1809,7 @@ TOOLS += [
 from .widget_tools import widget_tools
 TOOLS.extend(widget_tools(AgentTool, _account, _scoped_component))
 TOOLS.extend([
-    AgentTool("read_tool_result", "Read an immutable tool snapshot using read_id and read_path (or JSON pointer). offset pages keys/items or text characters. Follow next_offset, nested read_path and key_paths (full oversized keys) for original data. Does not rerun tools; call original tool for current state.", "read",
+    AgentTool("read_tool_result", "Read an immutable tool or compaction-manifest snapshot using read_id and read_path (or JSON pointer). offset pages keys/items or text characters. Follow next_offset, nested read_path and key_paths (full oversized keys) for original data. Does not rerun tools; call original tool for current state.", "read",
               {"read_id": {"type": "string"}, "path": {"type": "string"},
                "offset": {"type": "integer", "minimum": 0}, "limit": {"type": "integer", "minimum": 1, "maximum": 20},
                "chars": {"type": "integer", "minimum": 1, "maximum": 4000}}, ['read_id'],

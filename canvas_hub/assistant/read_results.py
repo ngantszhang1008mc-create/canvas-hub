@@ -1,8 +1,9 @@
-"""Bounded new tool replies with immutable, conversation-owned read snapshots.
+"""Bounded replies with immutable, conversation-owned read snapshots.
 
-Snapshots live beside their result in the original tool message transaction.
-They are data artifacts, not hidden provider messages. Existing history is never
-rewritten; readers can deliberately retrieve every value after restart.
+Tool snapshots live beside their result in the original message transaction;
+large compaction manifests are stored atomically with their checkpoint. They are
+data artifacts, not hidden provider messages. Existing history is never rewritten;
+readers can deliberately retrieve every value after restart.
 """
 import hashlib
 import json
@@ -83,9 +84,13 @@ def stored(ctx, read_id):
     row = ctx.api.hub.db.one("SELECT json_extract(content_json,?) AS snapshot FROM assistant_messages "
                             "WHERE conversation_id=? AND role='tool' AND json_type(content_json,?)='object' ORDER BY id DESC LIMIT 1",
                             (path, ctx.conversation_id, path))
-    if not row:
-        raise NotFound('Read snapshot is not available in this conversation')
-    return json.loads(row['snapshot'])
+    if row:
+        return json.loads(row['snapshot'])
+    row = ctx.api.hub.db.one('SELECT snapshot_json AS snapshot FROM assistant_context_snapshots '
+                             'WHERE conversation_id=? AND read_id=?', (ctx.conversation_id, read_id))
+    if row and hashlib.sha256(row['snapshot'].encode('utf-8')).hexdigest() == read_id:
+        return json.loads(row['snapshot'])
+    raise NotFound('Read snapshot is not available in this conversation')
 
 
 def bound(ctx, tool, result):

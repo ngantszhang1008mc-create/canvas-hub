@@ -17,7 +17,15 @@ Compaction retains the latest two user turns and all their assistant/tool groups
 The checkpoint includes goals, decisions, unresolved questions, source/tracker
 references and a deterministic tool execution manifest. Native reasoning and tool
 pairs in retained turns are replayed unchanged. The checkpoint and usage survive
-restart. Failed, invalid, non-reducing, cancelled or concurrently stale summaries
+restart. When references or read outcomes are too numerous to fit in the checkpoint,
+the complete lists are saved as an immutable conversation-owned snapshot. The
+checkpoint includes a bounded selection, the counts and `read_tool_result` paths
+for paging the full lists. All action outcomes, including unknown or unrecognized
+tools, remain in the checkpoint; if those alone do not fit, compaction stops rather
+than silently dropping them. The snapshot and earlier snapshots remain available
+after restart and later compactions. If a setup does not permit `read_tool_result`,
+review the saved conversation and verify uncertain history before relying on it.
+Failed, invalid, non-reducing, cancelled or concurrently stale summaries
 do not replace context. Automatic compaction makes at most one summary attempt
 per user run, with SDK retries/fallbacks disabled. With the application limit enabled, an oversized active turn or
 history too large for a single summary stops with an actionable budget error;
@@ -279,7 +287,8 @@ instructions. Account ownership is checked on every retrieval.
 
 Migration `0017_assistant_context.sql` adds checkpoint/usage tables, a conversation
 notice field and derived source/chunk/FTS tables. Migration `0018` distinguishes
-ordinary chat attempts from summary usage. No API keys or credentials enter these tables. Existing
+ordinary chat attempts from summary usage. Migration `0022` stores large immutable
+checkpoint manifests. No API keys or credentials enter these tables. Existing
 backups include checkpoints; portable source imports rebuild the derived index.
 
 Integration surfaces: Assistant runner/config/provider adapters, the new compact

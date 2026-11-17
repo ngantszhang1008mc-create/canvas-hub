@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import threading
 
+from ..agent_tools import TOOLS_BY_NAME
 from ..util import InvalidInput, now_iso, sha256_text
 from .context import (Policy, SUMMARY_SYSTEM, calibration, context_error, data_version, live_data_version, encoded,
                       estimate, neutral_message, parse_summary, split_for_summary, summary_message)
@@ -11,6 +12,51 @@ from .providers import ProviderError, Stopped
 from .usage import stored_usage, usage_totals
 from .request_shape import stable_tools
 from .source_context import restore_source_context, with_source_context
+
+
+def _read_only_execution(execution):
+    """Unknown tools and unresolved dispatches must be treated as actions."""
+    name = execution.get('tool')
+    tool = TOOLS_BY_NAME.get(name)
+    return name == 'discover_tools' or bool(tool and tool.permission == 'read')
+
+
+def _bounded_manifests(anchors, executions, token_budget):
+    """Keep action receipts inline; archive overflowing references/read receipts."""
+    if estimate(anchors) + estimate(executions) <= token_budget:
+        return anchors, executions, None, None
+
+    snapshot = {'tool': 'compaction_manifest',
+                'result': {'reference_manifest': anchors, 'tool_execution_manifest': executions}}
+    snapshot_json = encoded(snapshot)
+    read_id = sha256_text(snapshot_json)
+    archive = {'read_id': read_id, 'tool': 'read_tool_result',
+               'reference_path': '/reference_manifest', 'execution_path': '/tool_execution_manifest',
+               'reference_count': len(anchors), 'execution_count': len(executions), 'complete': False}
+    actions = [(i, item) for i, item in enumerate(executions) if not _read_only_execution(item)]
+    # Never silently drop an action outcome to make the summary fit. In particular,
+    # an unrecognized tool or dispatch could have changed state.
+    remaining = token_budget - estimate(archive) - estimate([item for _, item in actions]) - 32
+    if remaining < 0:
+        raise ProviderError('Too many action outcomes to retain safely in one compaction; original history is retained. '
+                            'Review the completed actions and start a focused chat. No summary request was sent.')
+
+    kept_anchors = []
+    for item in reversed(anchors):
+        cost = estimate(item) + 1
+        if cost <= remaining:
+            kept_anchors.append(item)
+            remaining -= cost
+    kept_anchors.reverse()
+    kept_executions = dict(actions)
+    for i in range(len(executions) - 1, -1, -1):
+        if i in kept_executions:
+            continue
+        cost = estimate(executions[i]) + 1
+        if cost <= remaining:
+            kept_executions[i] = executions[i]
+            remaining -= cost
+    return kept_anchors, [kept_executions[i] for i in sorted(kept_executions)], archive, snapshot_json
 
 
 class ContextService:
@@ -107,8 +153,18 @@ class ContextService:
                 previous = self.hub.db.one("SELECT summary_json FROM assistant_context WHERE conversation_id=?", (cid,))
                 if previous:
                     previous_summary = json.loads(previous["summary_json"])
-                    anchors.extend(previous_summary.get("reference_manifest", []))
-                    executions.extend(previous_summary.get("tool_execution_manifest", []))
+                    archive = previous_summary.get('manifest_archive')
+                    if archive:
+                        saved = self.hub.db.one('SELECT snapshot_json FROM assistant_context_snapshots '
+                                                'WHERE conversation_id=? AND read_id=?', (cid, archive['read_id']))
+                        if not saved or sha256_text(saved['snapshot_json']) != archive['read_id']:
+                            raise ProviderError('The earlier compaction manifest is unavailable; original history is retained. '
+                                                'Review the saved conversation before continuing.')
+                        previous_manifest = json.loads(saved['snapshot_json'])['result']
+                    else:
+                        previous_manifest = previous_summary
+                    anchors.extend(previous_manifest.get("reference_manifest", []))
+                    executions.extend(previous_manifest.get("tool_execution_manifest", []))
             for result in m.get("results", []):
                 error = None
                 try:
@@ -121,9 +177,7 @@ class ContextService:
                                    "outcome": "unknown" if error == "interrupted" else "error" if result.get("is_error") else "completed",
                                    "error": error})
         anchors = list({encoded(x): x for x in anchors}.values())
-        # A large manifest must not silently consume the whole working budget.
-        if estimate(anchors) + estimate(executions) > policy.summary_tokens:
-            raise ProviderError("Too many source references for one safe compaction; the original context is retained. Start a focused chat.")
+        anchors, executions, archive, snapshot_json = _bounded_manifests(anchors, executions, policy.summary_tokens)
         request = [{"role": "user", "sent_text": encoded({"max_summary_tokens": policy.summary_tokens,
                                                            "conversation": [neutral_message(m) for m in prefix]})}]
         input_tokens = estimate(SUMMARY_SYSTEM) + estimate(request) + 512
@@ -161,6 +215,8 @@ class ContextService:
             summary = parse_summary(turn.text, policy.summary_tokens)
             summary["reference_manifest"] = anchors
             summary["tool_execution_manifest"] = executions
+            if archive:
+                summary['manifest_archive'] = archive
             summary['_live_state_version'] = live_version
             # Re-summarizing old evidence cannot certify it against new sources.
             # Newly read, versioned tool results remain independently usable.
@@ -175,6 +231,13 @@ class ContextService:
                 candidate = [summary_message(summary, live_state_changed=live_version != live_data_version(self.hub, account_id)), *tail]
                 if estimate([neutral_message(m) for m in candidate]) >= estimate([neutral_message(m) for m in transcript]):
                     raise ProviderError("The summary would not reduce context; original context is retained.")
+                if archive:
+                    existing = c.execute('SELECT snapshot_json FROM assistant_context_snapshots '
+                                         'WHERE conversation_id=? AND read_id=?', (cid, archive['read_id'])).fetchone()
+                    if existing and existing['snapshot_json'] != snapshot_json:
+                        raise ProviderError('The compaction manifest is unavailable; original history is retained.')
+                    c.execute('INSERT OR IGNORE INTO assistant_context_snapshots(conversation_id,read_id,snapshot_json) VALUES (?,?,?)',
+                              (cid, archive['read_id'], snapshot_json))
                 c.execute("INSERT INTO assistant_context VALUES (?,?,?,?,?) ON CONFLICT(conversation_id) DO UPDATE SET "
                           "through_seq=excluded.through_seq,summary_json=excluded.summary_json,data_version=excluded.data_version,created_at=excluded.created_at",
                           (cid, through, encoded(summary), version, now_iso()))

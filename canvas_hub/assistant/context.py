@@ -414,6 +414,11 @@ def summary_message(summary, *, live_state_changed=False, sources_changed=False)
                    "Recorded source IDs/versions are historical references, not current evidence. Revalidate relevant versions "
                    "with list_context_sources and read the required current ranges before using rules; use get_component_context "
                    "for fresh tracker guards. A summary never establishes source coverage. Do not replay completed actions.\n")
+    if summary.get('manifest_archive'):
+        notice += ("The reference and read-outcome lists below are incomplete. The full historical lists are available "
+                   "through read_tool_result using manifest_archive.read_id and the indicated paths. If that tool is "
+                   "unavailable, review the saved conversation and ask the user to verify uncertain history before "
+                   "relying on it. Action outcomes remain listed; never repeat completed or uncertain actions.\n")
     public = {k: v for k, v in summary.items() if not k.startswith('_')}
     if sources_changed:
         public['source_evidence_status'] = 'stale_revalidation_required'
