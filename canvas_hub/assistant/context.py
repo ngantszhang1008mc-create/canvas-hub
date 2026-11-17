@@ -16,6 +16,7 @@ import hashlib
 import json
 import math
 from dataclasses import dataclass
+from types import SimpleNamespace
 from urllib.parse import urlsplit
 
 from ..util import InvalidInput
@@ -222,7 +223,7 @@ class Policy:
         extra = cfg.get("extra_params") or {}
         if provider == "anthropic":
             sent = anthropic_output_tokens(cfg)
-        elif provider == "openai_compatible":
+        elif provider in ("openai_compatible", "vertex_ai"):
             sent = compatible_output_tokens(cfg)
         else:
             sent = settings.get("response_tokens") if mode == "custom" else None
@@ -258,14 +259,14 @@ class Policy:
         scale = lambda n: math.ceil(n * factor)     # noqa: E731
         if provider == "anthropic":
             messages = AnthropicProvider._messages(None, transcript)
-        elif provider == "openai_compatible":
-            messages = OpenAICompatibleProvider._messages(None, "", transcript)[1:]
+        elif provider in ("openai_compatible", "vertex_ai"):
+            messages = OpenAICompatibleProvider._messages(SimpleNamespace(name=provider), "", transcript)[1:]
         else:
             messages = [neutral_message(m) for m in transcript]
         history = tool_total = documents = 0
         pos = 0
         for m in transcript:
-            n = len(m.get("results", [])) if provider == "openai_compatible" and m["role"] == "tool" else 1
+            n = len(m.get("results", [])) if provider in ("openai_compatible", "vertex_ai") and m["role"] == "tool" else 1
             cost = _message_estimate(messages[pos:pos+n], message_format) + 8 * max(1, n)
             pos += n
             if m["role"] != "tool":

@@ -180,6 +180,9 @@ class WorkspaceService:
         conv = self.conversation(account_id, **scope)
         # Never expose API keys or user-info/query secrets from custom endpoints.
         raw_endpoint = cfg.get("base_url") or ("https://api.anthropic.com" if cfg["provider"] == "anthropic" else "Local Codex CLI")
+        if cfg["provider"] == "vertex_ai":
+            from ..assistant.vertex import vertex_base_url
+            raw_endpoint = vertex_base_url(cfg)
         split = urlsplit(raw_endpoint)
         endpoint = urlunsplit((split.scheme, split.netloc.rsplit("@", 1)[-1], split.path, "", "")) if split.scheme else raw_endpoint
         fingerprint = assistant._disclosure_fingerprint(account_id, cfg, **scope)

@@ -2,6 +2,7 @@
 
 * ``anthropic``         - Claude through the official Anthropic SDK (streamed).
 * ``codex``             - the locally installed Codex app-server and its own login.
+* ``vertex_ai``         - Gemini on Vertex AI with automatically refreshed Google ADC.
 * ``openai_compatible`` - any Chat Completions-compatible endpoint through the
   official OpenAI SDK with a configurable base URL (OpenAI, Google Gemini's
   OpenAI endpoint, OpenRouter, DeepSeek, local Ollama/LM Studio, ...).
@@ -326,13 +327,19 @@ class OpenAICompatibleProvider:
             elif m["role"] == "assistant":
                 text, calls = _neutral_assistant(m)
                 d: dict = {"role": "assistant", "content": text or None}
-                reasoning = (m.get("raw") or {}).get("reasoning_content")
+                raw = m.get("raw") or {}
+                native = raw if raw.get("provider") == getattr(self, "name", "openai_compatible") else {}
+                if native.get("extra_content"):
+                    d["extra_content"] = native["extra_content"]
+                reasoning = raw.get("reasoning_content")
                 if reasoning is not None:
                     # Thinking models (e.g. DeepSeek) require their reasoning to be sent
                     # back on later requests once tools are involved.
                     d["reasoning_content"] = reasoning
                 if calls:
                     d["tool_calls"] = [{"id": c["id"], "type": "function",
+                                        **({"extra_content": native["tool_call_extra_content"][c["id"]]}
+                                           if c["id"] in native.get("tool_call_extra_content", {}) else {}),
                                         "function": {"name": c["name"], "arguments": stable_json(c.get("input") or {})}}
                                        for c in calls]
                 elif not text:
@@ -374,8 +381,9 @@ class OpenAICompatibleProvider:
                     raise
 
     def _streamed(self, kwargs: dict, on_text) -> tuple | None:
-        """Stream a Chat Completions reply; returns (content, reasoning, calls, finish, model, usage)."""
+        """Stream text, tool calls and native metadata needed for later turns."""
         text, reasoning, calls = "", None, {}
+        extra_content = {}
         finish = model = usage = None
         opened = self._open_stream(kwargs)
         if opened is None:
@@ -391,6 +399,7 @@ class OpenAICompatibleProvider:
                 ch = chunk.choices[0]
                 d = ch.delta
                 if d is not None:
+                    _merge_extra_content(extra_content, getattr(d, "extra_content", None))
                     if getattr(d, "content", None):
                         text += d.content
                         on_text(text)
@@ -401,6 +410,8 @@ class OpenAICompatibleProvider:
                         slot = calls.setdefault(tc.index, {"id": None, "name": "", "arguments": ""})
                         if tc.id:
                             slot["id"] = tc.id
+                        if isinstance(getattr(tc, "extra_content", None), dict):
+                            _merge_extra_content(slot.setdefault("extra_content", {}), tc.extra_content)
                         fn = getattr(tc, "function", None)
                         if fn is not None:
                             if fn.name:
@@ -410,7 +421,7 @@ class OpenAICompatibleProvider:
                     finish = ch.finish_reason
         if finish is None:      # the connection ended mid-reply: never keep half an answer or run half a tool call
             raise ProviderError("The provider's reply was cut off before it finished. Try again.", retryable=True)
-        return text, reasoning, [calls[i] for i in sorted(calls)], finish, model, usage
+        return text, reasoning, [calls[i] for i in sorted(calls)], finish, model, usage, extra_content
 
     def complete(self, system: str, transcript: list[dict], tools: list[dict], on_text=None) -> Turn:
         self.last_usage = normalize_usage(None, self.usage_provider, final=False)
@@ -442,7 +453,7 @@ class OpenAICompatibleProvider:
         except sdk.APIConnectionError as e:
             raise ProviderError("Could not reach the provider. Check the base URL and your connection.", retryable=True) from e
         if streamed:
-            content, reasoning, raw_calls, finish, model, usage = streamed
+            content, reasoning, raw_calls, finish, model, usage, extra_content = streamed
         else:
             self.last_usage = normalize_usage(getattr(resp, "usage", None), self.usage_provider)
             if not resp.choices:
@@ -451,7 +462,9 @@ class OpenAICompatibleProvider:
             m = ch.message
             content, reasoning, finish = m.content or "", getattr(m, "reasoning_content", None), ch.finish_reason
             model, usage = getattr(resp, "model", None), getattr(resp, "usage", None)
+            extra_content = getattr(m, "extra_content", None)
             raw_calls = [{"id": tc.id, "name": tc.function.name, "arguments": tc.function.arguments}
+                         | ({"extra_content": tc.extra_content} if isinstance(getattr(tc, "extra_content", None), dict) else {})
                          for tc in m.tool_calls or [] if getattr(tc, "function", None) is not None]
         self.last_usage = normalize_usage(usage, self.usage_provider)
         calls = []
@@ -468,11 +481,31 @@ class OpenAICompatibleProvider:
         if stop == "truncated" and calls:
             for c in calls:
                 c.input_error = "tool input was cut off by the output limit; not executed"
-        raw = {"provider": "openai_compatible"}
+        raw = {"provider": self.name}
+        # Google requires the opaque thought signature on tool calls in later
+        # turns, including signatures that arrive in a separate stream chunk.
+        if isinstance(extra_content, dict) and extra_content:
+            raw["extra_content"] = extra_content
+        call_extra = {tc["id"]: tc["extra_content"] for tc in raw_calls if tc.get("extra_content")}
+        if call_extra:
+            raw["tool_call_extra_content"] = call_extra
         if reasoning is not None:
             raw["reasoning_content"] = reasoning
         return Turn(text=content or "", tool_calls=calls, stop=stop, raw=raw, model=model,
                     usage=self.last_usage)
+
+
+def _merge_extra_content(target, source):
+    """Merge metadata objects; opaque signatures are complete values, not text deltas."""
+    if not isinstance(source, dict):
+        return
+    for key, value in source.items():
+        if isinstance(value, dict):
+            if not isinstance(target.get(key), dict):
+                target[key] = {}
+            _merge_extra_content(target[key], value)
+        else:
+            target[key] = value
 
 
 def _unsupported_stream_parameter(error, parameter):
@@ -529,6 +562,9 @@ def make_provider(cfg: dict):
         return AnthropicProvider(cfg)
     if kind == "openai_compatible":
         return OpenAICompatibleProvider(cfg)
+    if kind == "vertex_ai":
+        from .vertex import VertexAIProvider
+        return VertexAIProvider(cfg)
     if kind == "codex":
         from .codex import CodexProvider
         return CodexProvider(cfg)

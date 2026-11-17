@@ -464,6 +464,7 @@ canvas-hub mcp --allow-settings     # + scope changes
 - **Providers:**
   - `anthropic` uses the official Anthropic SDK (2.x) with streaming. The default model is `claude-opus-5-5`.
   - `openai_compatible` uses the official OpenAI SDK with a configurable base URL. Presets are OpenAI, Google Gemini's OpenAI endpoint, OpenRouter, DeepSeek, a local Ollama server and a custom endpoint.
+  - `vertex_ai` uses Gemini's Vertex AI Chat Completions endpoint through the same SDK. `assistant/vertex.py` validates `vertex_project` / `vertex_location`, constructs the regional or global Google endpoint, and refreshes Google Application Default Credentials before each turn. No pasted API key or custom endpoint is accepted. Gemini model IDs accept an optional `google/` prefix. Google thought signatures in message/tool-call `extra_content` are saved and replayed for continued tool use; context estimates include them. Tests use synthetic Google credentials and HTTP transports.
 - **Requests on the real Claude API:**
   - Requests stream, with `eager_input_streaming` on each tool. Inputs are validated before execution; truncated or invalid inputs are returned to the model as errors and never executed.
   - For `claude-fable-5-1`, `claude-opus-5-5`, `claude-opus-5` and `claude-sonnet-5-5`, requests opt into the server-side refusal fallback (`fallbacks: "default"`, beta `server-side-fallback-2026-07-01`). Remove that in `assistant/providers.py` if it isn't wanted.

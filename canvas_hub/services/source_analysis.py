@@ -57,7 +57,7 @@ class SourceAnalysis:
             raise InvalidInput('Set up a provider in Assistant settings.', code='assistant_not_configured')
         with assistant._cfg_lock:
             cfg, _, _ = assistant._message_config()
-        if cfg['provider'] not in ('anthropic', 'openai_compatible', 'codex', 'allowance_gateway'):
+        if cfg['provider'] not in ('anthropic', 'openai_compatible', 'vertex_ai', 'codex', 'allowance_gateway'):
             raise InvalidInput('Choose an API setup in Assistant settings, or use a connected MCP Agent.', code='assistant_not_configured')
         return cfg
 
@@ -67,12 +67,17 @@ class SourceAnalysis:
             s['analysis_request_id'], s['decision'], s['proposed_revision'], cfg.get('id'), cfg['provider'], cfg.get('base_url'), cfg.get('model'), cfg.get('extra_params')]
         if cfg['provider'] == 'allowance_gateway':
             fields += [cfg.get('gateway_mode'), cfg.get('gateway_session_id')]
+        if cfg['provider'] == 'vertex_ai':
+            fields += [cfg.get('vertex_project'), cfg.get('vertex_location')]
         return sha256_text(canonical_json(fields))
 
     @staticmethod
     def _endpoint(cfg):
         if cfg['provider'] == 'codex':
             return 'Codex CLI (OpenAI)'
+        if cfg['provider'] == 'vertex_ai':
+            from ..assistant.vertex import vertex_base_url
+            return vertex_base_url(cfg)
         if not cfg.get('base_url'):
             return 'Anthropic API'
         p = urlsplit(cfg['base_url'])

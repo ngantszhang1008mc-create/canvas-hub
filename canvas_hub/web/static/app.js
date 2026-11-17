@@ -1759,7 +1759,7 @@ VIEWS.assistant = async (main, parts, params) => {
 };
 
 function assistantSetupSummary(x) {
-  return [x.model || "default model", x.provider === "allowance_gateway" ? `${x.gateway_mode || "mock"} gateway · ${x.gateway_session_saved ? "session saved" : "not connected"}` : x.api_key_saved ? "key saved" : null].filter(Boolean).join(" · ");
+  return [x.model || "default model", x.provider === "vertex_ai" ? `${x.vertex_project} · ${x.vertex_location} · Google credentials` : x.provider === "allowance_gateway" ? `${x.gateway_mode || "mock"} gateway · ${x.gateway_session_saved ? "session saved" : "not connected"}` : x.api_key_saved ? "key saved" : null].filter(Boolean).join(" · ");
 }
 
 function assistantSettingsView(main, head, tabs, cfg, params) {
@@ -1826,6 +1826,10 @@ function assistantSettingsCard(cfg, prof) {
   const key = h("input", { type: "password", autocomplete: "off", placeholder: cur.api_key_saved ? `saved (${cur.api_key_hint}) — type to replace` : "paste your API key" });
   const keyField = h("label", { class: "field" }, h("span", null, "API key"), key);
   const baseField = h("label", { class: "field" }, h("span", null, "Base URL"), base);
+  const vertexProject = h("input", { type: "text", value: cur.vertex_project || "", placeholder: "my-google-cloud-project", maxlength: 30 });
+  const vertexLocation = h("input", { type: "text", value: cur.vertex_location || "global", placeholder: "global or us-central1", maxlength: 100 });
+  const vertexProjectField = h("label", { class: "field", hidden: true }, h("span", null, "Google Cloud project ID"), vertexProject);
+  const vertexLocationField = h("label", { class: "field", hidden: true }, h("span", null, "Vertex AI location"), vertexLocation);
   const extra = h("textarea", { rows: 2, class: "mono", placeholder: "optional, e.g. {\"temperature\": 0.3}" });
   extra.value = cur.extra_params && Object.keys(cur.extra_params).length ? JSON.stringify(cur.extra_params) : "";
   const extraField = h("label", { class: "field", style: "grid-column:1/-1" },
@@ -2006,13 +2010,15 @@ function assistantSettingsCard(cfg, prof) {
     const p = cfg.presets.find((x) => x.id === presetSel.value);
     const isAnthropic = p && p.provider === "anthropic";
     const isCodex = p && p.provider === "codex";
+    const isVertex = p && p.provider === "vertex_ai";
     const gateway = isGateway();
     extraField.hidden = !p || isAnthropic || isCodex || gateway;
     responseField.hidden = !!isCodex;
-    baseField.hidden = !!isCodex;
-    keyField.hidden = !!isCodex || gateway;
+    baseField.hidden = !!isCodex || !!isVertex;
+    keyField.hidden = !!isCodex || !!isVertex || gateway;
+    vertexProjectField.hidden = vertexLocationField.hidden = !isVertex;
     gatewayField.hidden = !gateway; reasoningHint.hidden = gateway;
-    model.placeholder = isCodex ? "Codex default (optional)" : gateway ? "Model alias supplied by your operator" : "model name";
+    model.placeholder = isCodex ? "Codex default (optional)" : isVertex ? "google/gemini-3.8-flash" : gateway ? "Model alias supplied by your operator" : "model name";
     base.placeholder = gateway ? "https://your-gateway.example" : "https://…/v1";
 
     baseField.querySelector("span").textContent = gateway ? "Gateway URL" : isAnthropic ? "Base URL (leave empty for the Claude API)" : "Base URL";
@@ -2021,9 +2027,9 @@ function assistantSettingsCard(cfg, prof) {
     modelPick.hidden = !isCodex || !modelPick.options.length || modelPick.options[0].textContent.startsWith("Loading");
     model.hidden = !!isCodex && !modelPick.hidden;
     if (!modelPick.hidden) modelPick.value = model.value;
-    mount(hint, p ? (gateway ? "Use your operator's gateway origin, model alias and invitation. The URL must have no /v1 path, query or fragment. Production requires HTTPS; mock mode also permits HTTP on localhost, 127.0.0.1 or [::1]. Mock responses are synthetic. The saved session stays on this computer, outside course backups." : isCodex ? "Install Codex CLI 0.163.0 or newer and run `codex login` on this computer, then Save & test. Canvas Hub uses that login without storing its credentials. Pick a model or keep your Codex default; you can also switch models next to the message box. Questions and selected course data are sent to Codex." : isAnthropic ? "Without a pasted key, ANTHROPIC_API_KEY or an `ant auth login` profile is used." : p.id === "ollama" ? "Runs on your own computer; no key and nothing leaves it." : `Key format: ${p.key_hint || "provider API key"}. For OpenAI-compatible providers OPENAI_API_KEY is used if no key is saved.`) : "");
+    mount(hint, p ? (gateway ? "Use your operator's gateway origin, model alias and invitation. The URL must have no /v1 path, query or fragment. Production requires HTTPS; mock mode also permits HTTP on localhost, 127.0.0.1 or [::1]. Mock responses are synthetic. The saved session stays on this computer, outside course backups." : isVertex ? "Enable the Vertex AI API and billing in your Google Cloud project, and choose a Gemini model available in the selected location. Sign in on the computer running Canvas Hub with `gcloud auth application-default login`, or set GOOGLE_APPLICATION_CREDENTIALS to your credential file. Save & test checks access using Google Application Default Credentials; access tokens refresh automatically. No API key is needed here." : isCodex ? "Install Codex CLI 0.163.0 or newer and run `codex login` on this computer, then Save & test. Canvas Hub uses that login without storing its credentials. Pick a model or keep your Codex default; you can also switch models next to the message box. Questions and selected course data are sent to Codex." : isAnthropic ? "Without a pasted key, ANTHROPIC_API_KEY or an `ant auth login` profile is used." : p.id === "ollama" ? "Runs on your own computer; no key and nothing leaves it." : `Key format: ${p.key_hint || "provider API key"}. For OpenAI-compatible providers OPENAI_API_KEY is used if no key is saved.`) : "");
     testBtn.textContent = gateway ? "Check allowance" : "Save & test";
-    removeKeyBtn.hidden = gateway || !cur.api_key_saved;
+    removeKeyBtn.hidden = gateway || !!isVertex || !cur.api_key_saved;
     renderGateway();
   };
   presetSel.addEventListener("change", () => {
@@ -2040,6 +2046,7 @@ function assistantSettingsCard(cfg, prof) {
     if (!presetSel.value) { toast("Choose a provider first", true); return null; }
     let extraParams = {};
     const isCodex = presetSel.value === "codex";
+    const isVertex = presetSel.value === "vertex_ai";
     const gateway = isGateway();
     if (gateway) {
       let url;
@@ -2073,6 +2080,7 @@ function assistantSettingsCard(cfg, prof) {
     }
     if (gateway) Object.assign(body, { base_url: base.value, gateway_mode: gatewayMode.value, gateway_consent: gatewayConsent.checked,
       ...(gatewayToolsChanged && sameGateway() ? { gateway_tools: [...gatewaySelectedTools] } : {}) });
+    else if (isVertex) Object.assign(body, { vertex_project: vertexProject.value, vertex_location: vertexLocation.value, extra_params: extraParams });
     else if (!isCodex) Object.assign(body, { base_url: base.value, extra_params: extraParams, ...(key.value ? { api_key: key.value } : {}) });
     const r = await guard(() => api("/api/assistant/config", { method: "PUT", body }));
     if (r) { key.value = ""; cur.id = r.saved_profile; adoptProfile(r); renderGateway(); toast("Setup saved"); return r; }   // later saves edit this setup
@@ -2163,7 +2171,7 @@ function assistantSettingsCard(cfg, prof) {
   const fields = h("fieldset", { class: "grid cols-2", style: "border:0;padding:0;margin:0;min-width:0", "aria-label": "Assistant provider settings" },
     h("label", { class: "field", style: "grid-column:1/-1" }, h("span", null, "Name"), name),
     h("label", { class: "field" }, h("span", null, "Provider"), presetSel), h("label", { class: "field" }, h("span", null, "Model"), model, modelPick),
-    baseField, keyField, extraField, gatewayField, contextField);
+    baseField, keyField, vertexProjectField, vertexLocationField, extraField, gatewayField, contextField);
   const card = h("div", { class: "card" },
     h("div", { class: "card-head" }, h("h2", null, isNew ? "New setup" : cur.name),
       !isNew && cur.id === cfg.active_profile ? pill("ok", "In use") : h("span", { class: "sub" }, "provider settings stored only on this computer")),
