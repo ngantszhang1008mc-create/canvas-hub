@@ -133,7 +133,9 @@ def incomplete_reply(text, stop, tool_calls) -> str | None:
 
 def incomplete_reply_message(turn) -> str:
     if turn.incomplete_reason == "output_limit":
-        message = "The provider reached its output limit before finishing. "
+        chatgpt = (turn.raw or {}).get("provider") == "chatgpt"
+        message = ("The ChatGPT response ended before finishing. " if chatgpt
+                   else "The provider reached its output limit before finishing. ")
         usage = turn.usage or {}
         output, reasoning = usage.get("output_tokens"), usage.get("reasoning_output_tokens")
         if type(output) is int:
@@ -142,7 +144,8 @@ def incomplete_reply_message(turn) -> str:
                 message += f" (including {reasoning} reasoning tokens)"
             message += ". "
         message += ("Partial text is saved as incomplete. " if turn.text.strip() else "No final answer was returned. ")
-        message += "Raise the reply limit, or choose no limit, in Assistant settings (or lower reasoning) before retrying; a higher limit can use more quota. "
+        message += ("Try a narrower question or lower the reasoning effort. " if chatgpt else
+                    "Raise the reply limit, or choose no limit, in Assistant settings (or lower reasoning) before retrying; a higher limit can use more quota. ")
     else:
         message = "The provider returned no answer or tool call. Check the provider and output-format settings before retrying. "
     return message + ("Earlier tool results are saved; no tools from this incomplete reply were executed. "
@@ -558,6 +561,9 @@ def make_provider(cfg: dict):
     if kind == 'allowance_gateway':
         from .gateway import AllowanceGatewayProvider
         return AllowanceGatewayProvider(cfg)
+    if kind == "chatgpt":
+        from .chatgpt import ChatGPTProvider
+        return ChatGPTProvider(cfg)
     if kind == "anthropic":
         return AnthropicProvider(cfg)
     if kind == "openai_compatible":

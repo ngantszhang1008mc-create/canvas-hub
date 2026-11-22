@@ -1462,7 +1462,7 @@ VIEWS.assistant = async (main, parts, params) => {
   }
   if (onSettings) return assistantSettingsView(main, head, tabs, cfg, params);
   if (!cfg.configured) {
-    mount(main, head, tabs, empty("Set up the assistant first", "Add an API provider or connect your Codex CLI login. You can save several setups and switch between them.",
+    mount(main, head, tabs, empty("Set up the assistant first", "Connect ChatGPT, add an API provider, or use your Codex CLI login.",
       h("a", { class: "btn primary", href: "#/assistant/settings" }, "Open settings")));
     return;
   }
@@ -1582,14 +1582,15 @@ VIEWS.assistant = async (main, parts, params) => {
       cx.last_request ? h("p", null, `Last request: the provider counted ${count(cx.last_request.reported_input_tokens)} input and ${count(cx.last_request.reported_output_tokens)} output tokens`
         + (cx.last_request.estimated_input_tokens ? ` (estimated beforehand: ${count(cx.last_request.estimated_input_tokens)}).` : ".")) : null,
       d.conversation.context_notice ? h("p", null, d.conversation.context_notice) : null);
+    const chatgpt = cfg.profiles.find((p) => p.id === (setupSel.value || cfg.active_profile))?.provider === "chatgpt";
     mount(status, busy ? h("span", { class: "working" }, st === "cancelling" ? "Stopping…" : "Working…")
       : st === "error" ? h("div", { class: "banner bad", style: "margin:0" }, h("div", { class: "b-body" }, h("div", { class: "b-title" }, "The assistant stopped"),
         incompleteError ? h("div", { class: "small" }, h("details", null,
-          h("summary", null, incompleteError === "output_limit" ? "Output limit reached — details" : "Empty reply — details"),
+          h("summary", null, incompleteError === "output_limit" ? (chatgpt ? "Incomplete response — details" : "Output limit reached — details") : "Empty reply — details"),
           h("div", null, d.conversation.run_error || "")), h("p", null, "Review saved results before continuing tool work."))
           : h("div", { class: "small" }, d.conversation.run_error || ""),
         !settingsUnavailable && !contextBlocked ? h("div", null, h("button", { onclick: retry }, "Retry answer"),
-          incompleteError ? h("a", { class: "btn ghost sm", href: `#/assistant/settings?p=${encodeURIComponent(setupSel.value || cfg.active_profile)}` }, "Output settings") : null,
+          incompleteError && !chatgpt ? h("a", { class: "btn ghost sm", href: `#/assistant/settings?p=${encodeURIComponent(setupSel.value || cfg.active_profile)}` }, "Output settings") : null,
           h("span", { class: "small" }, incompleteError ? " New request; tools disabled. Charges may apply."
             : " Retry makes a new provider request with tools disabled. If more tools are needed, review previous results and send a new message.")) : null)) : null);
     const seq = all.length ? all[all.length - 1].seq : 0;
@@ -1759,6 +1760,9 @@ VIEWS.assistant = async (main, parts, params) => {
 };
 
 function assistantSetupSummary(x) {
+  if (x.provider === "chatgpt") {
+    return [x.model, x.chatgpt_connected ? x.chatgpt_account : "ChatGPT disconnected"].filter(Boolean).join(" · ");
+  }
   return [x.model || "default model", x.provider === "vertex_ai" ? `${x.vertex_project} · ${x.vertex_location} · Google credentials` : x.provider === "allowance_gateway" ? `${x.gateway_mode || "mock"} gateway · ${x.gateway_session_saved ? "session saved" : "not connected"}` : x.api_key_saved ? "key saved" : null].filter(Boolean).join(" · ");
 }
 
@@ -1823,6 +1827,42 @@ function assistantSettingsCard(cfg, prof) {
       model.hidden = !modelPick.hidden;
     }).catch(() => { codexListed = false; });
   };
+  const chatgptPick = h("select", { "aria-label": "ChatGPT model", hidden: true });
+  const chatgptStatus = h("p", { class: "small", "aria-live": "polite" });
+  const chatgptConnect = h("button", { type: "button" }, "Continue with ChatGPT");
+  const chatgptDisconnect = h("button", { type: "button", class: "ghost" }, "Disconnect");
+  const chatgptRefresh = h("button", { type: "button", class: "ghost" }, "Refresh models");
+  const chatgptField = h("div", { class: "field", style: "grid-column:1/-1", hidden: true },
+    chatgptStatus, h("div", { class: "row" }, chatgptConnect, chatgptDisconnect, chatgptRefresh,
+      h("a", { href: "https://chatgpt.com/settings/usage", target: "_blank", rel: "noreferrer" }, "Manage ChatGPT usage")));
+  let chatgptModelRequest = null;
+  const isChatGPT = () => presetSel.value === "chatgpt";
+  const loadChatGPTModels = async () => {
+    if (!isChatGPT() || !cur.chatgpt_connected || chatgptModelRequest) return;
+    chatgptPick.disabled = true;
+    mount(chatgptPick, h("option", { value: "" }, "Loading ChatGPT models…"));
+    const pending = api("/api/assistant/chatgpt/models" + qs({ profile_id: cur.id }));
+    chatgptModelRequest = pending;
+    updateButtons();
+    try {
+      const data = await pending;
+      if (chatgptModelRequest !== pending) return;
+      if (data.error) throw new Error(data.error);
+      mount(chatgptPick, h("option", { value: "" }, data.models.length ? "Choose a ChatGPT model…" : "No models available"),
+        data.models.map((m) => h("option", { value: m.id }, m.name)));
+      chatgptPick.value = data.models.some((m) => m.id === model.value) ? model.value : "";
+      chatgptPick.disabled = !data.models.length;
+    } catch (error) {
+      if (chatgptModelRequest !== pending) return;
+      mount(chatgptPick, h("option", { value: "" }, "Could not load ChatGPT models"));
+      mount(chatgptStatus, error.message);
+    } finally {
+      if (chatgptModelRequest === pending) chatgptModelRequest = null;
+      updateButtons();
+    }
+  };
+  chatgptPick.addEventListener("change", () => { model.value = chatgptPick.value; updateButtons(); });
+  chatgptRefresh.addEventListener("click", loadChatGPTModels);
   const key = h("input", { type: "password", autocomplete: "off", placeholder: cur.api_key_saved ? `saved (${cur.api_key_hint}) — type to replace` : "paste your API key" });
   const keyField = h("label", { class: "field" }, h("span", null, "API key"), key);
   const baseField = h("label", { class: "field" }, h("span", null, "Base URL"), base);
@@ -1865,7 +1905,8 @@ function assistantSettingsCard(cfg, prof) {
   const renderLimits = () => {
     const l = cur.limits || {};
     replyNoneText.textContent = l.max_output ? `No limit (the model stops by itself; its own maximum is ${tokens(l.max_output)} tokens)` : "No limit (the model stops by itself)";
-    windowInfo.textContent = l.model_context_window
+    windowInfo.textContent = isChatGPT() ? "ChatGPT enforces the selected model’s context window."
+      : l.model_context_window
       ? `This model's context window is ${tokens(l.model_context_window)} tokens (${l.model_context_source}).`
       : cur.id ? "This model's context window is not known. Save & test asks the provider for it; if the provider does not say, enter it below or leave requests unlimited."
         : "Save & test asks the provider for this model's context window.";
@@ -2012,10 +2053,11 @@ function assistantSettingsCard(cfg, prof) {
     const isCodex = p && p.provider === "codex";
     const isVertex = p && p.provider === "vertex_ai";
     const gateway = isGateway();
-    extraField.hidden = !p || isAnthropic || isCodex || gateway;
-    responseField.hidden = !!isCodex;
-    baseField.hidden = !!isCodex || !!isVertex;
-    keyField.hidden = !!isCodex || !!isVertex || gateway;
+    const chatgpt = isChatGPT();
+    extraField.hidden = !p || isAnthropic || isCodex || gateway || chatgpt;
+    responseField.hidden = !!isCodex || chatgpt;
+    baseField.hidden = !!isCodex || !!isVertex || chatgpt;
+    keyField.hidden = !!isCodex || !!isVertex || gateway || chatgpt;
     vertexProjectField.hidden = vertexLocationField.hidden = !isVertex;
     gatewayField.hidden = !gateway; reasoningHint.hidden = gateway;
     model.placeholder = isCodex ? "Codex default (optional)" : isVertex ? "google/gemini-3.8-flash" : gateway ? "Model alias supplied by your operator" : "model name";
@@ -2025,12 +2067,32 @@ function assistantSettingsCard(cfg, prof) {
     if (p && presetSel.value !== cur.preset) { base.value = p.base_url || ""; if (p.model) model.value = p.model; else if (cur.provider !== p.provider) model.value = ""; }
     if (isCodex) listCodexModels();
     modelPick.hidden = !isCodex || !modelPick.options.length || modelPick.options[0].textContent.startsWith("Loading");
-    model.hidden = !!isCodex && !modelPick.hidden;
+    model.hidden = chatgpt || (!!isCodex && !modelPick.hidden);
+    chatgptField.hidden = chatgptPick.hidden = !chatgpt;
+    if (chatgpt) {
+      const local = location.hostname === "127.0.0.1";
+      chatgptConnect.disabled = !local;
+      chatgptConnect.textContent = cur.chatgpt_needs_consent ? "Enable ChatGPT plan usage"
+        : cur.chatgpt_account ? "Reconnect with ChatGPT" : "Continue with ChatGPT";
+      chatgptDisconnect.hidden = chatgptRefresh.hidden = !cur.chatgpt_connected;
+      mount(chatgptStatus, !local ? "Open Canvas Hub at its 127.0.0.1 launch URL to connect ChatGPT."
+        : cur.chatgpt_connected ? `Connected as ${cur.chatgpt_account}`
+        : cur.chatgpt_needs_consent ? `${cur.chatgpt_account} verified. Enable plan usage to send requests.`
+        : "Connect your account to use an eligible ChatGPT plan for Assistant requests.");
+      if (cur.chatgpt_connected) loadChatGPTModels();
+      else {
+        chatgptModelRequest = null;
+        chatgptPick.disabled = true;
+        mount(chatgptPick, h("option", { value: "" }, "Connect ChatGPT first"));
+      }
+    } else chatgptModelRequest = null;
+    renderLimits();
     if (!modelPick.hidden) modelPick.value = model.value;
-    mount(hint, p ? (gateway ? "Use your operator's gateway origin, model alias and invitation. The URL must have no /v1 path, query or fragment. Production requires HTTPS; mock mode also permits HTTP on localhost, 127.0.0.1 or [::1]. Mock responses are synthetic. The saved session stays on this computer, outside course backups." : isVertex ? "Enable the Vertex AI API and billing in your Google Cloud project, and choose a Gemini model available in the selected location. Sign in on the computer running Canvas Hub with `gcloud auth application-default login`, or set GOOGLE_APPLICATION_CREDENTIALS to your credential file. Save & test checks access using Google Application Default Credentials; access tokens refresh automatically. No API key is needed here." : isCodex ? "Install Codex CLI 0.163.0 or newer and run `codex login` on this computer, then Save & test. Canvas Hub uses that login without storing its credentials. Pick a model or keep your Codex default; you can also switch models next to the message box. Questions and selected course data are sent to Codex." : isAnthropic ? "Without a pasted key, ANTHROPIC_API_KEY or an `ant auth login` profile is used." : p.id === "ollama" ? "Runs on your own computer; no key and nothing leaves it." : `Key format: ${p.key_hint || "provider API key"}. For OpenAI-compatible providers OPENAI_API_KEY is used if no key is saved.`) : "");
+    mount(hint, p ? (gateway ? "Use your operator's gateway origin, model alias and invitation. The URL must have no /v1 path, query or fragment. Production requires HTTPS; mock mode also permits HTTP on localhost, 127.0.0.1 or [::1]. Mock responses are synthetic. The saved session stays on this computer, outside course backups." : chatgpt ? "" : isVertex ? "Enable the Vertex AI API and billing in your Google Cloud project, and choose a Gemini model available in the selected location. Sign in on the computer running Canvas Hub with `gcloud auth application-default login`, or set GOOGLE_APPLICATION_CREDENTIALS to your credential file. Save & test checks access using Google Application Default Credentials; access tokens refresh automatically. No API key is needed here." : isCodex ? "Install Codex CLI 0.163.0 or newer and run `codex login` on this computer, then Save & test. Canvas Hub uses that login without storing its credentials. Pick a model or keep your Codex default; you can also switch models next to the message box. Questions and selected course data are sent to Codex." : isAnthropic ? "Without a pasted key, ANTHROPIC_API_KEY or an `ant auth login` profile is used." : p.id === "ollama" ? "Runs on your own computer; no key and nothing leaves it." : `Key format: ${p.key_hint || "provider API key"}. For OpenAI-compatible providers OPENAI_API_KEY is used if no key is saved.`) : "");
     testBtn.textContent = gateway ? "Check allowance" : "Save & test";
-    removeKeyBtn.hidden = gateway || !!isVertex || !cur.api_key_saved;
+    removeKeyBtn.hidden = gateway || !!isVertex || chatgpt || !cur.api_key_saved;
     renderGateway();
+    updateButtons();
   };
   presetSel.addEventListener("change", () => {
     key.value = ""; invitation.value = ""; gatewayConsent.checked = false; reportedAllowance = null;
@@ -2060,10 +2122,10 @@ function assistantSettingsCard(cfg, prof) {
       }
       base.value = url.origin;
     }
-    if (!isCodex && !gateway && extra.value.trim()) {
+    if (!isCodex && !gateway && !isChatGPT() && extra.value.trim()) {
       try { extraParams = JSON.parse(extra.value); } catch { toast("Extra request settings must be valid JSON", true); return null; }
     }
-    const body = { profile_id: cur.id, name: name.value, preset: presetSel.value, model: model.value };
+    const body = { profile_id: cur.id, name: name.value, preset: presetSel.value, model: isChatGPT() && !chatgptPick.disabled ? chatgptPick.value : model.value };
     body.context = { ...(cur.context || {}), auto_compact: autoCompact.checked && !autoCompact.disabled, limit_disabled: limitDisabled.checked };
     delete body.context.capacity;
     if (windowOwn.checked) {
@@ -2072,8 +2134,8 @@ function assistantSettingsCard(cfg, prof) {
     }
     if (!isCodex) {
       delete body.context.response_tokens;
-      body.context.reply_limit = replyCustom.checked ? "custom" : "none";
-      if (replyCustom.checked) {
+      body.context.reply_limit = !isChatGPT() && replyCustom.checked ? "custom" : "none";
+      if (body.context.reply_limit === "custom") {
         if (!responseTokens.value.trim()) { toast("Enter the maximum tokens per reply, or choose No limit", true); return null; }
         body.context.response_tokens = Number(responseTokens.value);
       }
@@ -2081,7 +2143,7 @@ function assistantSettingsCard(cfg, prof) {
     if (gateway) Object.assign(body, { base_url: base.value, gateway_mode: gatewayMode.value, gateway_consent: gatewayConsent.checked,
       ...(gatewayToolsChanged && sameGateway() ? { gateway_tools: [...gatewaySelectedTools] } : {}) });
     else if (isVertex) Object.assign(body, { vertex_project: vertexProject.value, vertex_location: vertexLocation.value, extra_params: extraParams });
-    else if (!isCodex) Object.assign(body, { base_url: base.value, extra_params: extraParams, ...(key.value ? { api_key: key.value } : {}) });
+    else if (!isCodex && !isChatGPT()) Object.assign(body, { base_url: base.value, extra_params: extraParams, ...(key.value ? { api_key: key.value } : {}) });
     const r = await guard(() => api("/api/assistant/config", { method: "PUT", body }));
     if (r) { key.value = ""; cur.id = r.saved_profile; adoptProfile(r); renderGateway(); toast("Setup saved"); return r; }   // later saves edit this setup
     return null;
@@ -2096,7 +2158,7 @@ function assistantSettingsCard(cfg, prof) {
   const updateButtons = () => {
     const gateway = isGateway();
     saveBtn.disabled = deleteBtn.disabled = removeKeyBtn.disabled = busy;
-    testBtn.disabled = busy || (gateway && (!gatewayConsent.checked || !sameGateway() || !gatewayProfile.gateway_session_saved));
+    testBtn.disabled = busy || (isChatGPT() && (!cur.chatgpt_connected || !chatgptPick.value || chatgptPick.disabled)) || (gateway && (!gatewayConsent.checked || !sameGateway() || !gatewayProfile.gateway_session_saved));
     enrollBtn.disabled = busy || !gatewayConsent.checked || !!activeGatewaySession();
     invitation.disabled = !!activeGatewaySession();
     removeSessionBtn.disabled = busy;
@@ -2108,6 +2170,28 @@ function assistantSettingsCard(cfg, prof) {
     busy = true; fields.disabled = true; updateButtons();
     try { await fn(); } finally { busy = false; fields.disabled = false; updateButtons(); }
   };
+  chatgptConnect.addEventListener("click", exclusive(async () => {
+    if (!isChatGPT() || location.hostname !== "127.0.0.1") return;
+    const saved = cur.id !== "new" && cur.provider === "chatgpt" ? cur.id : (await save())?.saved_profile;
+    if (!saved) return;
+    const signIn = await guard(() => api("/api/assistant/chatgpt/start", {
+      method: "POST", body: { profile_id: saved },
+    }), result);
+    if (signIn) location.assign(signIn.url);
+  }));
+  chatgptDisconnect.addEventListener("click", exclusive(async () => {
+    const disconnected = await guard(() => api("/api/assistant/chatgpt/disconnect", {
+      method: "POST", body: { profile_id: cur.id },
+    }), result);
+    if (!disconnected) return;
+    const latest = await guard(() => api("/api/assistant/config"), result);
+    if (latest) {
+      adoptProfile({ ...latest, saved_profile: cur.id });
+      sync();
+    }
+    mount(result, disconnected.revoked ? "ChatGPT disconnected."
+      : "Disconnected on this computer. Open ChatGPT Settings to remove remote access.");
+  }));
   saveBtn.addEventListener("click", exclusive(async () => { const r = await save(); if (r && card.isConnected) goTo(r.saved_profile); }));
   testBtn.addEventListener("click", exclusive(async () => {
     const gateway = isGateway();
@@ -2170,8 +2254,8 @@ function assistantSettingsCard(cfg, prof) {
   const goTo = (pid) => { const h2 = `#/assistant/settings?p=${encodeURIComponent(pid)}`; if (location.hash === h2) route(); else location.hash = h2; };
   const fields = h("fieldset", { class: "grid cols-2", style: "border:0;padding:0;margin:0;min-width:0", "aria-label": "Assistant provider settings" },
     h("label", { class: "field", style: "grid-column:1/-1" }, h("span", null, "Name"), name),
-    h("label", { class: "field" }, h("span", null, "Provider"), presetSel), h("label", { class: "field" }, h("span", null, "Model"), model, modelPick),
-    baseField, keyField, vertexProjectField, vertexLocationField, extraField, gatewayField, contextField);
+    h("label", { class: "field" }, h("span", null, "Provider"), presetSel), h("label", { class: "field" }, h("span", null, "Model"), model, modelPick, chatgptPick),
+    baseField, keyField, chatgptField, vertexProjectField, vertexLocationField, extraField, gatewayField, contextField);
   const card = h("div", { class: "card" },
     h("div", { class: "card-head" }, h("h2", null, isNew ? "New setup" : cur.name),
       !isNew && cur.id === cfg.active_profile ? pill("ok", "In use") : h("span", { class: "sub" }, "provider settings stored only on this computer")),

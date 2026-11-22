@@ -100,6 +100,7 @@ dependencies = [
     { name = "anthropic" },
     { name = "beautifulsoup4" },
     { name = "fastapi" },
+    { name = "filelock" },
     { name = "google-auth", extra = ["requests"] },
     { name = "httpx" },
     { name = "markitdown", extra = ["docx", "pdf", "pptx", "xls", "xlsx"] },
@@ -109,6 +110,7 @@ dependencies = [
     { name = "pdfminer-six" },
     { name = "playwright" },
     { name = "pydantic" },
+    { name = "pyjwt", extra = ["crypto"] },
     { name = "uvicorn" },
 ]
 
@@ -123,6 +125,7 @@ requires-dist = [
     { name = "anthropic", specifier = ">=1" },
     { name = "beautifulsoup4", specifier = ">=4.12,<5" },
     { name = "fastapi", specifier = ">=0.115,<1" },
+    { name = "filelock", specifier = ">=3.12,<4" },
     { name = "google-auth", extras = ["requests"], specifier = ">=2.29,<3" },
     { name = "httpx", specifier = ">=0.27,<1" },
     { name = "markitdown", extras = ["pdf", "docx", "pptx", "xlsx", "xls"], specifier = ">=0.1.2,<0.2" },
@@ -132,6 +135,7 @@ requires-dist = [
     { name = "pdfminer-six", specifier = ">=20240706" },
     { name = "playwright", specifier = "==1.63.0" },
     { name = "pydantic", specifier = ">=2.7,<3" },
+    { name = "pyjwt", extras = ["crypto"], specifier = ">=2.9,<3" },
     { name = "uvicorn", specifier = ">=0.30,<1" },
 ]
 
@@ -533,6 +537,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/e9/eb/2cf8c80abf09b2800aef0a83b41066fbfda8ee5495b7a08b9d1af40f7046/fastapi-0.162.0.tar.gz", hash = "sha256:6a22c1e2e6e32e0633ee7e170f00009a29b8228b16feb219ee42f32fd8d88a8f", size = 527867, upload-time = "2026-10-23T18:47:33.264Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b4/4f/3f2c25c9b43970b5e9a08beb5e04776247edea684ddc0930f4f02f0bb6cb/fastapi-0.162.0-py3-none-any.whl", hash = "sha256:3785963de305dd09912426cb81f2d230fce98ab3521cdfe97265c8d14983128c", size = 148912, upload-time = "2026-10-23T18:47:31.734Z" },
+]
+
+[[package]]
+name = "filelock"
+version = "3.32.7"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/0f/59/e19834834cb01a32febfbb0f8a23a9088088f5d45991824ff2bc3b5e8acb/filelock-3.32.7.tar.gz", hash = "sha256:37b8a3d9811b0f9aef7e5ec5c71bb320de52df51e6ca9bcd6f5ad81187660da7", size = 225154, upload-time = "2026-09-16T00:24:20.907Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/15/df/31098c5aeb4d966b553641472bd55fcf5fdfac953549894b8a765ba44e91/filelock-3.32.7-py3-none-any.whl", hash = "sha256:65ff0d0190ea42038b32bda4b77834fb05be2cad4c5b9b01aa4dfb3614536e52", size = 100157, upload-time = "2026-09-16T00:24:19.543Z" },
 ]
 
 [[package]]
