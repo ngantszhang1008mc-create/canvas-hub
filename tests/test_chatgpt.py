@@ -16,7 +16,7 @@ from fastapi.testclient import TestClient
 from canvas_hub.assistant import AssistantService
 from canvas_hub.assistant import chatgpt_auth as auth
 from canvas_hub.assistant.chatgpt import ChatGPTProvider
-from canvas_hub.assistant.providers import ProviderError
+from canvas_hub.assistant.providers import ProviderError, incomplete_reply_message
 from canvas_hub.boundary import HubAPI
 from canvas_hub.web.app import create_app
 
@@ -152,6 +152,11 @@ def test_chatgpt_responses_stream_tools_and_usage(monkeypatch):
     replay = json.loads(requests[1].content)["input"]
     assert replay[-2]["namespace"] == "canvas_hub"
     assert replay[-1] == {"type": "function_call_output", "call_id": "call_123", "output": "course"}
+
+    events[-1] = {"type": "response.incomplete", "response": {"model": "gpt-test", "output": [call], "usage": usage}}
+    incomplete = provider.complete("System instructions", transcript, tools)
+    assert incomplete.incomplete_reason and not incomplete.tool_calls
+    assert "lower the reasoning effort" in incomplete_reply_message(incomplete)
 
     events.clear()
     with pytest.raises(ProviderError, match="ended before completion"):

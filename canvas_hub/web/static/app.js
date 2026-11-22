@@ -1582,14 +1582,15 @@ VIEWS.assistant = async (main, parts, params) => {
       cx.last_request ? h("p", null, `Last request: the provider counted ${count(cx.last_request.reported_input_tokens)} input and ${count(cx.last_request.reported_output_tokens)} output tokens`
         + (cx.last_request.estimated_input_tokens ? ` (estimated beforehand: ${count(cx.last_request.estimated_input_tokens)}).` : ".")) : null,
       d.conversation.context_notice ? h("p", null, d.conversation.context_notice) : null);
+    const chatgpt = cfg.profiles.find((p) => p.id === (setupSel.value || cfg.active_profile))?.provider === "chatgpt";
     mount(status, busy ? h("span", { class: "working" }, st === "cancelling" ? "Stopping…" : "Working…")
       : st === "error" ? h("div", { class: "banner bad", style: "margin:0" }, h("div", { class: "b-body" }, h("div", { class: "b-title" }, "The assistant stopped"),
         incompleteError ? h("div", { class: "small" }, h("details", null,
-          h("summary", null, incompleteError === "output_limit" ? "Output limit reached — details" : "Empty reply — details"),
+          h("summary", null, incompleteError === "output_limit" ? (chatgpt ? "Incomplete response — details" : "Output limit reached — details") : "Empty reply — details"),
           h("div", null, d.conversation.run_error || "")), h("p", null, "Review saved results before continuing tool work."))
           : h("div", { class: "small" }, d.conversation.run_error || ""),
         !settingsUnavailable && !contextBlocked ? h("div", null, h("button", { onclick: retry }, "Retry answer"),
-          incompleteError ? h("a", { class: "btn ghost sm", href: `#/assistant/settings?p=${encodeURIComponent(setupSel.value || cfg.active_profile)}` }, "Output settings") : null,
+          incompleteError && !chatgpt ? h("a", { class: "btn ghost sm", href: `#/assistant/settings?p=${encodeURIComponent(setupSel.value || cfg.active_profile)}` }, "Output settings") : null,
           h("span", { class: "small" }, incompleteError ? " New request; tools disabled. Charges may apply."
             : " Retry makes a new provider request with tools disabled. If more tools are needed, review previous results and send a new message.")) : null)) : null);
     const seq = all.length ? all[all.length - 1].seq : 0;
