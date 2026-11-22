@@ -1,5 +1,6 @@
 """Sign in with ChatGPT through the local web API and synthetic OpenAI responses."""
 import json
+import os
 import stat
 import time
 from types import SimpleNamespace
@@ -77,7 +78,8 @@ def test_chatgpt_sign_in_callback_refresh_and_disconnect(hub, monkeypatch):
     public = owner.get(cfg_url)
     assert public.json()["configured"] and public.json()["chatgpt_account"] == "example@example.test"
     assert "initial-access-secret" not in public.text and "refresh_token" not in public.text
-    assert stat.S_IMODE(api.assistant._path.stat().st_mode) == 0o600
+    if os.name != "nt":
+        assert stat.S_IMODE(api.assistant._path.stat().st_mode) == 0o600
     new_params = start()
     assert new_params["client_id"] == "oaiapp_test" and new_params["ext_agent_host_id"] == params["ext_agent_host_id"]
 
