@@ -180,6 +180,9 @@ class WorkspaceService:
         conv = self.conversation(account_id, **scope)
         # Never expose API keys or user-info/query secrets from custom endpoints.
         raw_endpoint = cfg.get("base_url") or ("https://api.anthropic.com" if cfg["provider"] == "anthropic" else "Local Codex CLI")
+        if cfg["provider"] == "chatgpt":
+            from ..assistant.chatgpt_auth import RESOURCE
+            raw_endpoint = RESOURCE + "/responses"
         if cfg["provider"] == "vertex_ai":
             from ..assistant.vertex import vertex_base_url
             raw_endpoint = vertex_base_url(cfg)

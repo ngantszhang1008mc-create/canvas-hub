@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from html import escape
 import logging
 import mimetypes
 import os
@@ -11,7 +12,7 @@ import sys
 from importlib import resources as importlib_resources
 from pathlib import Path
 from contextlib import asynccontextmanager
-from urllib.parse import urlsplit
+from urllib.parse import urlencode, urlsplit
 
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
@@ -821,6 +822,36 @@ def create_app(api: HubAPI, *, token: str, port: int) -> FastAPI:
     async def assistant_set_config(request: Request):
         data = await body(request)
         return await run_in_threadpool(_assistant().update_config, data)
+
+    @app.post("/api/assistant/chatgpt/start")
+    async def assistant_chatgpt_start(request: Request):
+        if request.headers.get("host") != f"127.0.0.1:{port}":
+            raise InvalidInput("Open Canvas Hub at its 127.0.0.1 launch URL to connect ChatGPT.")
+        profile_id = (await body(request)).get("profile_id")
+        return await run_in_threadpool(_assistant().chatgpt_start, profile_id, f"http://127.0.0.1:{port}/auth/chatgpt/callback")
+
+    @app.get("/auth/chatgpt/callback")
+    def assistant_chatgpt_callback(request: Request):
+        # OpenAI's cross-site redirect cannot carry the Strict app cookie. The
+        # one-time OAuth state authenticates this specific pending callback.
+        if request.headers.get("host") != f"127.0.0.1:{port}":
+            return Response(status_code=403)
+        profile_id, message = _assistant().chatgpt_callback(request.query_params)
+        link = "/#/assistant/settings" + ("?" + urlencode({"p": profile_id}) if profile_id else "")
+        return Response(
+            f'<!doctype html><html lang="en"><meta charset="utf-8"><title>Canvas Hub · ChatGPT</title>'
+            f'<h1>Canvas Hub</h1><p>{escape(message)}</p><p><a href="{escape(link)}">Return to Assistant settings</a></p>',
+            media_type="text/html",
+        )
+
+    @app.get("/api/assistant/chatgpt/models")
+    def assistant_chatgpt_models(profile_id: str):
+        return _assistant().chatgpt_models(profile_id)
+
+    @app.post("/api/assistant/chatgpt/disconnect")
+    async def assistant_chatgpt_disconnect(request: Request):
+        profile_id = (await body(request)).get("profile_id")
+        return await run_in_threadpool(_assistant().chatgpt_disconnect, profile_id)
 
     @app.post("/api/assistant/test")
     async def assistant_test(request: Request):

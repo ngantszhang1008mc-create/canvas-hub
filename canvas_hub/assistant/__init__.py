@@ -29,6 +29,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from filelock import FileLock
+
 from ..agent_tools import ToolContext, run_tool_display
 from ..table_display import TableLinks
 from ..util import HubError, InvalidInput, NotFound, now_iso
@@ -40,6 +42,8 @@ from .context_service import ContextService
 from .source_context import source_manifest, restore_source_context, followup_source_context
 from .gateway_settings import GATEWAY_FIELDS, GatewaySettings, apply_gateway, gateway_consent_valid
 from .tool_catalog import ToolCatalog, ToolSession
+from .chatgpt_auth import connected as chatgpt_connected
+from .chatgpt_settings import ChatGPTSettings
 from .vertex import VERTEX_FIELDS, validate_vertex
 
 log = logging.getLogger("canvas_hub.assistant")
@@ -53,6 +57,8 @@ PRESETS = [
      "model": ANTHROPIC_DEFAULT_MODEL, "key_hint": "sk-ant-…"},
     {"id": "openai", "label": "OpenAI", "provider": "openai_compatible", "base_url": "https://api.openai.com/v1",
      "model": "", "key_hint": "sk-…"},
+    {"id": "chatgpt", "label": "ChatGPT (use your plan)", "provider": "chatgpt", "base_url": "",
+     "model": "", "key_hint": ""},
     {"id": "gemini", "label": "Google Gemini (OpenAI-compatible endpoint)", "provider": "openai_compatible",
      "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/", "model": "", "key_hint": "AIza…"},
     {"id": "vertex_ai", "label": "Google Vertex AI (Gemini)", "provider": "vertex_ai",
@@ -73,7 +79,7 @@ PRESETS = [
 MAX_PROFILES = 20
 # Reasoning effort is chosen per message in the chat, not saved with a setup.
 PROFILE_FIELDS = {"id", "name", "preset", "provider", "base_url", "model", "api_key", "extra_params", "context",
-                  "detected_limits"} | GATEWAY_FIELDS | VERTEX_FIELDS
+                  "detected_limits", "chatgpt_registration"} | GATEWAY_FIELDS | VERTEX_FIELDS
 
 
 def reasoning_levels(cfg: dict) -> list[str]:
@@ -82,7 +88,7 @@ def reasoning_levels(cfg: dict) -> list[str]:
         return ["low", "medium", "high", "xhigh", "max"]     # output_config.effort
     if cfg.get("preset") == "deepseek":
         return ["off", "low", "high", "max"]                 # thinking + reasoning_effort
-    if cfg.get("provider") in ("openai_compatible", "vertex_ai"):
+    if cfg.get("provider") in ("openai_compatible", "vertex_ai", "chatgpt"):
         return ["low", "medium", "high"]                     # reasoning_effort
     if cfg.get("provider") == "codex":
         return ["low", "medium", "high", "xhigh", "max"]     # the chat narrows this to what the chosen model supports
@@ -166,13 +172,24 @@ def _mask(key: str) -> str | None:
     return ("•" * 6) + key[-4:] if len(key) > 8 else "•" * len(key)
 
 
-class AssistantService(ContextService, GatewaySettings):
+class _AssistantConfigLock(FileLock):
+    def __enter__(self):
+        try:
+            return super().__enter__()
+        except OSError as exc:
+            raise HubError("Assistant settings could not be locked. Free resources or check file access, then retry.",
+                           code="assistant_settings_unavailable", status=503) from exc
+
+
+class AssistantService(ContextService, GatewaySettings, ChatGPTSettings):
     def __init__(self, hub, api, worker=None):
         self.hub = hub
         self.api = api
         self.worker = worker
         self._lock = threading.RLock()
-        self._cfg_lock = threading.RLock()     # serialises read-modify-write of the settings file
+        # Also serialize rotating ChatGPT refresh tokens across local server processes.
+        self._cfg_lock = _AssistantConfigLock(self.hub.paths.runtime / "assistant.lock")
+        self._chatgpt_pending: dict[str, dict] = {}
         self._threads: dict[int, threading.Thread] = {}
         self._context_reports: dict[int, dict] = {}
         self._pending_states: dict[int, tuple[str, str | None]] = {}
@@ -227,7 +244,8 @@ class AssistantService(ContextService, GatewaySettings):
             profiles, active = [], None
         if active is None and profiles:
             active = profiles[0]["id"]
-        return {"profiles": profiles, "active": active, "permissions": perms}
+        return {"profiles": profiles, "active": active, "permissions": perms,
+                **({"chatgpt_host": data["chatgpt_host"]} if data.get("chatgpt_host") else {})}
 
     @staticmethod
     def _profile(data: dict) -> dict:
@@ -251,6 +269,12 @@ class AssistantService(ContextService, GatewaySettings):
         if cfg.get('provider') == 'allowance_gateway':
             cfg['_gateway_journal'] = str(self.hub.paths.runtime / 'gateway-attempts')
             cfg['_gateway_authorize'] = self._gateway_authorizer(cfg)
+        if cfg.get("provider") == "chatgpt":
+            record = cfg.pop("chatgpt_registration", None) or {}
+            registration = record.get("client_id")
+            cfg["_chatgpt_registration"] = registration
+            cfg["_chatgpt_connected"] = chatgpt_connected(record)
+            cfg["_chatgpt_access"] = lambda: self._chatgpt_access(pid, registration)
         return cfg
 
     def _save_store(self, store: dict) -> None:
@@ -271,6 +295,7 @@ class AssistantService(ContextService, GatewaySettings):
             "limits": self._limits_view(prof),
             **{k: prof[k] for k in VERTEX_FIELDS},
             **self._gateway_public(prof),
+            **self._chatgpt_public(prof),
             "api_key_saved": bool(prof["api_key"]), "api_key_hint": _mask(prof["api_key"]), "api_key_from_env": env_key,
         }
 
@@ -308,6 +333,9 @@ class AssistantService(ContextService, GatewaySettings):
             return True    # key may come from the saved key, ANTHROPIC_API_KEY or an `ant auth login` profile
         if cfg.get("provider") == "openai_compatible":
             return bool(cfg.get("model") and cfg.get("base_url"))
+        if cfg.get("provider") == "chatgpt":
+            return bool(cfg.get("model") and (cfg.get("_chatgpt_connected")
+                        or chatgpt_connected(cfg.get("chatgpt_registration") or {})))
         if cfg.get("provider") == "vertex_ai":
             return bool(cfg.get("model") and cfg.get("vertex_project") and cfg.get("vertex_location"))
         if cfg.get("provider") == "codex":
@@ -360,6 +388,8 @@ class AssistantService(ContextService, GatewaySettings):
                 raise InvalidInput("permissions must map notes/collect/settings/deadlines to true or false")
             store["permissions"].update(p)
         self._save_store(store)
+        if prof is not None and prof["provider"] != "chatgpt":
+            self._cancel_chatgpt_sign_in(pid)
         return {**self.public_config(), "saved_profile": pid}
 
     def _apply(self, cfg: dict, data: dict) -> None:
@@ -380,7 +410,8 @@ class AssistantService(ContextService, GatewaySettings):
                 cfg["base_url"] = p["base_url"]
             if "model" not in data and p["model"]:
                 cfg["model"] = p["model"]
-            elif p["provider"] == "codex" and "model" not in data:
+            elif "model" not in data and (p["provider"] == "codex" or
+                                           (p["provider"] == "chatgpt" and previous["provider"] != "chatgpt")):
                 cfg["model"] = ""
         for k in ("base_url", "model"):
             if k in data:
@@ -411,6 +442,17 @@ class AssistantService(ContextService, GatewaySettings):
             if data.get("api_key") or data.get("base_url") or data.get("extra_params"):
                 raise InvalidInput("Codex uses its own CLI login and configuration; do not enter an API key, base URL, or extra request settings here.")
             cfg.update(api_key="", base_url="", extra_params={})
+        if cfg["provider"] == "chatgpt":
+            if data.get("api_key") or data.get("base_url") or data.get("extra_params"):
+                raise InvalidInput("ChatGPT uses your connected account and the official Responses API.")
+            if cfg["model"] and not _MODEL_NAME.fullmatch(cfg["model"]):
+                raise InvalidInput("Choose a valid ChatGPT model.")
+            cfg.update(api_key="", base_url="", extra_params={})
+            context = dict(cfg.get("context") or {})
+            context.pop("response_tokens", None)
+            cfg["context"] = {**context, "reply_limit": "none"}
+        else:
+            cfg.pop("chatgpt_registration", None)
         for k in VERTEX_FIELDS:
             if k in data:
                 if not isinstance(data[k], str) or len(data[k]) > 100:
@@ -444,6 +486,7 @@ class AssistantService(ContextService, GatewaySettings):
         store = self._load_store()
         if not any(x["id"] == profile_id for x in store["profiles"]):
             raise NotFound("that assistant setup no longer exists", code="assistant_profile_not_found")
+        self._cancel_chatgpt_sign_in(profile_id)
         store["profiles"] = [x for x in store["profiles"] if x["id"] != profile_id]
         if store["active"] == profile_id:
             store["active"] = store["profiles"][0]["id"] if store["profiles"] else None
@@ -717,6 +760,8 @@ class AssistantService(ContextService, GatewaySettings):
         model = cfg.get("model") or (ANTHROPIC_DEFAULT_MODEL if cfg["provider"] == "anthropic" else "Provider default")
         scope = {"course_id": course_id, "item_id": item_id}
         fields = [account_id, cfg.get("id"), cfg["provider"], cfg.get("base_url"), model, scope]
+        if cfg.get("provider") == "chatgpt":
+            fields += [cfg.get("_chatgpt_registration")]
         if cfg.get('provider') == 'vertex_ai':
             fields += [cfg.get('vertex_project'), cfg.get('vertex_location')]
         if cfg.get('provider') == 'allowance_gateway':

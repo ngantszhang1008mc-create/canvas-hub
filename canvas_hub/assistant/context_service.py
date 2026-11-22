@@ -63,7 +63,7 @@ class ContextService:
     @staticmethod
     def _calibration_key(cfg):
         # Codex adds its own large instructions to every request, so a ratio would not carry over.
-        if cfg.get("provider") not in ("anthropic", "openai_compatible", "allowance_gateway"):
+        if cfg.get("provider") not in ("anthropic", "openai_compatible", "allowance_gateway", "chatgpt"):
             return None
         return sha256_text(encoded([cfg.get("provider"), (cfg.get("base_url") or "").strip(), (cfg.get("model") or "").strip()]))
 

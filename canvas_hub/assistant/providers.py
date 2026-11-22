@@ -558,6 +558,9 @@ def make_provider(cfg: dict):
     if kind == 'allowance_gateway':
         from .gateway import AllowanceGatewayProvider
         return AllowanceGatewayProvider(cfg)
+    if kind == "chatgpt":
+        from .chatgpt import ChatGPTProvider
+        return ChatGPTProvider(cfg)
     if kind == "anthropic":
         return AnthropicProvider(cfg)
     if kind == "openai_compatible":

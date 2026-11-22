@@ -78,7 +78,7 @@ def cmd_serve(args):
     if not args.no_open:
         _open_browser_when_ready(url, "127.0.0.1", args.port)
     try:
-        uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="warning")
+        uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="warning", access_log=False)
     finally:
         runner.stop()
         worker.stop()
