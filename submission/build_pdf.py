@@ -140,7 +140,7 @@ ARCH_SVG = """
 
 def build_html() -> str:
     demo_url = os.environ.get("DEMO_URL", "https://canvas-hub-demo-1002757101526.asia-east2.run.app")
-    team_info = os.environ.get("TEAM_INFO", "[Insert Team Name & Member Names / ITSC IDs]")
+    team_info = os.environ.get("TEAM_INFO", "Canvas Hub Team (Submitted via FeedbackFruits)")
 
     return f"""<!doctype html>
 <html lang="en">

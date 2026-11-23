@@ -5,7 +5,7 @@
 | **Course** | AISC1000A — Academic Integrity & AI Orchestration (Fall 2026, HKUST) |
 | **Deliverable** | `3. Final Submission and Voting` (18% of course grade) |
 | **Project Name** | **Canvas Hub** — Local-First, Provenance-Tracked Agentic Canvas Workspace |
-| **Team / Authors** | *(Insert Team Name & Member Names / ITSC IDs before final PDF upload)* |
+| **Team / Authors** | Canvas Hub Team *(Submitted via FeedbackFruits)* |
 | **Source Repository** | [github.com/ngantszhang1008mc-create/canvas-hub](https://github.com/ngantszhang1008mc-create/canvas-hub) |
 | **Public Demo Link (Item #5)** | [https://canvas-hub-demo-1002757101526.asia-east2.run.app](https://canvas-hub-demo-1002757101526.asia-east2.run.app) *(Hosted on GCP Cloud Run `asia-east2` + Vertex AI `gemini-3.8-flash`)* |
 
