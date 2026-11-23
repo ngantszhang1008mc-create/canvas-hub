@@ -2,7 +2,7 @@
 
 | Field | Details |
 | :--- | :--- |
-| **Course** | AISC1000A — Academic Integrity & AI Orchestration (Fall 2026, HKUST) |
+| **Course** | AISC1000A — Foundations of AI Literacy: Human-AI Orchestration (Fall 2026, HKUST) |
 | **Deliverable** | `3. Final Submission and Voting` (18% of course grade) |
 | **Project Name** | **Canvas Hub** — Local-First, Provenance-Tracked Agentic Canvas Workspace |
 | **Team / Authors** | Canvas Hub Team *(Submitted via FeedbackFruits)* |

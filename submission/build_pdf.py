@@ -428,7 +428,7 @@ def build_html() -> str:
 
   <!-- HEADER -->
   <div class="hero">
-    <div class="hero-kicker">HKUST &middot; AISC1000A Academic Integrity &amp; AI Orchestration &middot; Fall 2026</div>
+    <div class="hero-kicker">HKUST &middot; AISC1000A Foundations of AI Literacy: Human-AI Orchestration &middot; Fall 2026</div>
     <h1>Canvas Hub &mdash; Final Submission Package</h1>
     <p class="hero-sub">A Local-First, Provenance-Tracked, Human-in-the-Loop Agentic Workspace for Multi-Course Canvas Management</p>
   </div>

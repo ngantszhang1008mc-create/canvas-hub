@@ -103,11 +103,11 @@ def build_demo_packages(now: datetime | None = None) -> tuple[dict, dict]:
             {
                 "type": "course", "course_id": "72312", "canvas_id": "72312",
                 "url": f"{DEMO_ORIGIN}/courses/72312",
-                "title": "AISC1000A Academic Integrity & AI Orchestration (Fall 2026)",
+                "title": "AISC1000A Foundations of AI Literacy: Human-AI Orchestration (Fall 2026)",
                 "observed_at": t1, "method": "dom:all_courses", "depth": "index",
                 "fields": {
-                    "name": "AISC1000A Academic Integrity & AI Orchestration (Fall 2026)",
-                    "title": "AISC1000A Academic Integrity & AI Orchestration (Fall 2026)",
+                    "name": "AISC1000A Foundations of AI Literacy: Human-AI Orchestration (Fall 2026)",
+                    "title": "AISC1000A Foundations of AI Literacy: Human-AI Orchestration (Fall 2026)",
                     "course_code": "AISC1000A", "term": "2026-27 Fall",
                     "listing_section": "current", "published": True, "access": "accessible",
                     "navigation": [
