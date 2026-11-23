@@ -136,7 +136,7 @@ def test_public_demo_vertex_ai_config_and_zero_cost_seeding(tmp_path: Path, monk
     monkeypatch.setenv("CANVAS_HUB_DEMO_VERTEX_PROJECT", "aisc-demo-12345")
     monkeypatch.setenv("CANVAS_HUB_DEMO_VERTEX_LOCATION", "global")
     monkeypatch.setenv("CANVAS_HUB_DEMO_VERTEX_MODEL", "gemini-3.8-flash")
-    monkeypatch.setenv("CANVAS_HUB_DEMO_MAX_OUTPUT_TOKENS", "1536")
+    monkeypatch.delenv("CANVAS_HUB_DEMO_MAX_OUTPUT_TOKENS", raising=False)
     monkeypatch.delenv("CANVAS_HUB_DEMO_LLM_API_KEY", raising=False)
 
     app, hub, demo_llm, seeded = build_public_demo_runtime(tmp_path / "vertex-demo", port=8730, seed_showcase_chat=True)
@@ -152,7 +152,7 @@ def test_public_demo_vertex_ai_config_and_zero_cost_seeding(tmp_path: Path, monk
         assert prof["vertex_project"] == "aisc-demo-12345"
         assert prof["vertex_location"] == "global"
         assert prof["model"] == "gemini-3.8-flash"
-        assert prof["context"]["response_tokens"] == 1536
+        assert prof["context"]["reply_limit"] == "none"
         assert not prof.get("has_key")
         # Showcase conversation was pre-seeded at zero cost before activating Vertex AI.
         scid = seeded["showcase_conversation_id"]

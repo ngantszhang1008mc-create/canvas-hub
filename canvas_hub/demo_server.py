@@ -1116,7 +1116,12 @@ def build_public_demo_runtime(home: Path, *, port: int = 8730, seed_showcase_cha
     demo_llm: DemoToolLLM | None = None
     vertex_project = os.environ.get("CANVAS_HUB_DEMO_VERTEX_PROJECT", "").strip()
     real_key = os.environ.get("CANVAS_HUB_DEMO_LLM_API_KEY", "").strip()
-    max_out = max(256, min(16384, _env_int("CANVAS_HUB_DEMO_MAX_OUTPUT_TOKENS", 2048)))
+    raw_max_out = _env_int("CANVAS_HUB_DEMO_MAX_OUTPUT_TOKENS", 0)
+    reply_ctx = (
+        {"reply_limit": "custom", "response_tokens": max(256, min(65536, raw_max_out))}
+        if raw_max_out > 0
+        else {"reply_limit": "none"}
+    )
     shared_perms = {"collect": False, "notes": True, "settings": False, "deadlines": True}
 
     def _seed_zero_cost_then_cleanup():
@@ -1150,7 +1155,7 @@ def build_public_demo_runtime(home: Path, *, port: int = 8730, seed_showcase_cha
             "vertex_project": vertex_project,
             "vertex_location": location,
             "model": model,
-            "context": {"reply_limit": "custom", "response_tokens": max_out},
+            "context": reply_ctx,
             "permissions": shared_perms,
         })
         seeded["ai_backend"] = f"vertex_ai:{model}@{location}"
@@ -1167,7 +1172,7 @@ def build_public_demo_runtime(home: Path, *, port: int = 8730, seed_showcase_cha
             "base_url": "" if provider == "anthropic" else base_url,
             "model": model,
             "api_key": real_key,
-            "context": {"reply_limit": "custom", "response_tokens": max_out},
+            "context": reply_ctx,
             "permissions": shared_perms,
         })
         seeded["ai_backend"] = f"{provider}:{model}"
