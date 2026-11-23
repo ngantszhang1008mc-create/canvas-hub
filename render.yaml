@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: canvas-hub-demo
+    runtime: docker
+    dockerfilePath: ./Dockerfile.demo
+    plan: free
+    healthCheckPath: /healthz
+    envVars:
+      - key: PORT
+        value: "8730"
+      # Optional: plug in a real LLM API key if you want live model completions
+      # instead of the built-in zero-cost real-tool-calling DemoToolLLM.
+      # - key: CANVAS_HUB_DEMO_LLM_API_KEY
+      #   sync: false
+      # - key: CANVAS_HUB_DEMO_LLM_BASE_URL
+      #   value: "https://api.openai.com/v1"
+      # - key: CANVAS_HUB_DEMO_LLM_MODEL
+      #   value: "gpt-4o-mini"

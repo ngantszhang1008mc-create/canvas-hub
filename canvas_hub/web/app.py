@@ -44,7 +44,131 @@ def mcp_command() -> list[str]:
     return [cmd, "mcp"]
 
 
-def create_app(api: HubAPI, *, token: str, port: int) -> FastAPI:
+def _demo_block_reason(method: str, path: str) -> tuple[str, str] | None:
+    """Return (code, message) if a route is restricted in Public Sandbox Demo mode."""
+    if method in ("GET", "HEAD", "OPTIONS"):
+        if path.startswith("/api/backups/") and path.endswith("/download"):
+            return ("demo_mode_restricted", "Backup downloads are disabled in the public sandbox demo.")
+        return None
+    if path.startswith("/api/accounts/") and path.endswith("/confirm") and "/writes/" in path:
+        return (
+            "demo_write_confirm_disabled",
+            "Public Sandbox Demo: Preparing and inspecting write previews works end-to-end, "
+            "but sending to a live Canvas server is disabled because no real Canvas account is connected. "
+            "In local Canvas Hub, pressing Send here submits through your signed-in browser.",
+        )
+    blocked_exact = {
+        "/api/instances",
+        "/api/backups",
+        "/api/import-archive",
+        "/api/ocr",
+        "/api/ocr/run",
+        "/api/assistant/config",
+        "/api/assistant/test",
+        "/api/assistant/chatgpt/start",
+        "/api/assistant/chatgpt/disconnect",
+        "/api/assistant/gateway/enroll",
+    }
+    if path in blocked_exact:
+        return ("demo_mode_restricted", "This administrative or local-browser action is disabled in the public sandbox demo.")
+    blocked_prefixes = (
+        "/api/instances/",
+        "/api/backups/",
+        "/api/assistant/profiles/",
+    )
+    if any(path.startswith(p) for p in blocked_prefixes):
+        return ("demo_mode_restricted", "This administrative or local-browser action is disabled in the public sandbox demo.")
+    blocked_substrings = (
+        "/jobs",
+        "/observations",
+        "/delete-data",
+        "/export",
+        "/link-inspection/",
+        "/write-settings",
+        "/refresh-settings",
+        "/custom-html",
+        "/scope",
+        "/external-analysis/",
+    )
+    if any(sub in path for sub in blocked_substrings):
+        return ("demo_mode_restricted", "Live browser collection and account-level settings are disabled in the public sandbox demo.")
+    if "/external-sources/" in path:
+        return ("demo_mode_restricted", "Outbound external link crawling is disabled in the public sandbox demo.")
+    return None
+
+
+class _DemoRateLimiter:
+    """Thread-safe sliding-window rate limiter protecting paid AI endpoints in Public Sandbox Demo."""
+
+    def __init__(self, *, per_ip_per_min: int = 6, global_per_hour: int = 120, global_per_day: int = 600):
+        import threading
+        from collections import deque
+
+        self._lock = threading.Lock()
+        self.per_ip_per_min = max(0, int(per_ip_per_min))
+        self.global_per_hour = max(0, int(global_per_hour))
+        self.global_per_day = max(0, int(global_per_day))
+        self._ip_hits: dict[str, deque[float]] = {}
+        self._hour_hits: deque[float] = deque()
+        self._day_hits: deque[float] = deque()
+
+    def check(self, client_ip: str, now: float | None = None) -> tuple[bool, int, str]:
+        import time
+        from collections import deque
+
+        ts = time.monotonic() if now is None else now
+        with self._lock:
+            if self.per_ip_per_min > 0:
+                q = self._ip_hits.setdefault(client_ip, deque())
+                while q and ts - q[0] >= 60.0:
+                    q.popleft()
+                if len(q) >= self.per_ip_per_min:
+                    retry = max(1, int(60.0 - (ts - q[0])) + 1)
+                    return False, retry, f"Public Sandbox Demo limit: max {self.per_ip_per_min} AI messages per minute per visitor. Try again in {retry}s."
+            if self.global_per_hour > 0:
+                while self._hour_hits and ts - self._hour_hits[0] >= 3600.0:
+                    self._hour_hits.popleft()
+                if len(self._hour_hits) >= self.global_per_hour:
+                    retry = max(1, int(3600.0 - (ts - self._hour_hits[0])) + 1)
+                    return False, retry, "Public Sandbox Demo hourly AI quota reached. Please try again shortly."
+            if self.global_per_day > 0:
+                while self._day_hits and ts - self._day_hits[0] >= 86400.0:
+                    self._day_hits.popleft()
+                if len(self._day_hits) >= self.global_per_day:
+                    retry = max(1, int(86400.0 - (ts - self._day_hits[0])) + 1)
+                    return False, retry, "Public Sandbox Demo daily AI quota reached. Please try again tomorrow."
+            if self.per_ip_per_min > 0:
+                self._ip_hits[client_ip].append(ts)
+            if self.global_per_hour > 0:
+                self._hour_hits.append(ts)
+            if self.global_per_day > 0:
+                self._day_hits.append(ts)
+            return True, 0, ""
+
+
+def _is_demo_ai_spend_route(method: str, path: str) -> bool:
+    if method != "POST":
+        return False
+    return (
+        path.endswith("/assistant/messages")
+        or path.endswith("/retry") and "/assistant/conversations/" in path
+        or path.endswith("/compact") and "/assistant/conversations/" in path
+        or path.endswith("/workspace/action/start")
+    )
+
+
+def _client_ip(request: Request) -> str:
+    xff = request.headers.get("x-forwarded-for", "").strip()
+    if xff:
+        first = xff.split(",")[0].strip()
+        if first:
+            return first
+    return request.client.host if request.client else "unknown"
+
+
+def create_app(api: HubAPI, *, token: str, port: int, public_demo: bool = False,
+               allowed_public_hosts: set[str] | None = None,
+               demo_ai_limits: dict | None = None) -> FastAPI:
     from ..services.link_inspection import LinkInspector
     inspector = getattr(api, "link_inspector", None) or LinkInspector(api.hub)
     api.link_inspector = inspector
@@ -63,27 +187,48 @@ def create_app(api: HubAPI, *, token: str, port: int) -> FastAPI:
     app.state.link_inspector = inspector
     hosts = allowed_hosts(port)
     own_origins = {f"http://{h}" for h in hosts}
+    ai_limiter = _DemoRateLimiter(**(demo_ai_limits or {})) if public_demo else None
 
     @app.middleware("http")
     async def guard(request: Request, call_next):
         host = request.headers.get("host", "")
-        if host not in hosts:
-            return JSONResponse({"error": "forbidden_host", "message": "Canvas Hub only answers on 127.0.0.1"}, 403)
         path = request.url.path
+        if public_demo:
+            if not host or any(ord(c) <= 32 or ord(c) == 127 for c in host):
+                return JSONResponse({"error": "forbidden_host", "message": "Invalid Host header"}, 403)
+            if allowed_public_hosts and host not in hosts and host not in allowed_public_hosts:
+                return JSONResponse({"error": "forbidden_host", "message": "Host is not permitted for this demo"}, 403)
+        elif host not in hosts:
+            return JSONResponse({"error": "forbidden_host", "message": "Canvas Hub only answers on 127.0.0.1"}, 403)
         if path.startswith("/api/"):
-            presented = request.cookies.get(COOKIE)
-            auth = request.headers.get("authorization", "")
-            if auth.lower().startswith("bearer "):
-                presented = auth[7:].strip()
-            if not token_ok(token, presented):
-                return JSONResponse({"error": "unauthorized",
-                                     "message": "Open Canvas Hub through the link printed by `canvas-hub serve`."}, 401)
+            if not public_demo:
+                presented = request.cookies.get(COOKIE)
+                auth = request.headers.get("authorization", "")
+                if auth.lower().startswith("bearer "):
+                    presented = auth[7:].strip()
+                if not token_ok(token, presented):
+                    return JSONResponse({"error": "unauthorized",
+                                         "message": "Open Canvas Hub through the link printed by `canvas-hub serve`."}, 401)
             if request.method not in ("GET", "HEAD", "OPTIONS"):
                 origin = request.headers.get("origin")
-                if origin and origin not in own_origins:
-                    return JSONResponse({"error": "forbidden_origin", "message": "cross-origin request refused"}, 403)
+                if origin:
+                    origin_ok = origin in own_origins or (public_demo and urlsplit(origin).netloc == host)
+                    if not origin_ok:
+                        return JSONResponse({"error": "forbidden_origin", "message": "cross-origin request refused"}, 403)
                 if request.headers.get("x-canvas-hub") != "1":
                     return JSONResponse({"error": "missing_header", "message": "X-Canvas-Hub header required"}, 403)
+            if public_demo:
+                blocked = _demo_block_reason(request.method, path)
+                if blocked:
+                    return JSONResponse({"error": blocked[0], "message": blocked[1]}, 403)
+                if ai_limiter is not None and _is_demo_ai_spend_route(request.method, path):
+                    ok, retry_after, msg = ai_limiter.check(_client_ip(request))
+                    if not ok:
+                        return JSONResponse(
+                            {"error": "demo_rate_limited", "message": msg},
+                            status_code=429,
+                            headers={"Retry-After": str(retry_after)},
+                        )
         resp = await call_next(request)
         sandbox = path == "/sandbox"
         resp.headers["Content-Security-Policy"] = SANDBOX_CSP if sandbox else CSP
@@ -115,8 +260,14 @@ def create_app(api: HubAPI, *, token: str, port: int) -> FastAPI:
         return data
 
     # ---- launch / static ------------------------------------------------------
+    @app.get("/healthz")
+    async def healthz():
+        return {"ok": True, "demo_mode": public_demo}
+
     @app.get("/")
     async def index(request: Request):
+        if public_demo:
+            return FileResponse(STATIC / "index.html", media_type="text/html")
         t = request.query_params.get("token")
         if t:
             if not token_ok(token, t):
@@ -148,6 +299,9 @@ def create_app(api: HubAPI, *, token: str, port: int) -> FastAPI:
         d = api.app_info()
         d["mcp_command"] = mcp_command()
         d["runner"] = api.runner.status() if api.runner else None
+        d["demo_mode"] = public_demo
+        if public_demo:
+            d["demo_notice"] = "Public Sandbox Demo · Pre-loaded synthetic HKUST-style courses · No Canvas login required"
         return d
 
     @app.get("/api/identities")

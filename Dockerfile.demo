@@ -1,0 +1,30 @@
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    UV_LINK_MODE=copy \
+    PORT=8730
+
+WORKDIR /app
+
+# Install uv for reproducible dependency installation from uv.lock
+RUN pip install --no-cache-dir uv
+
+# Copy project metadata first for Docker layer caching
+COPY pyproject.toml uv.lock README.md ./
+COPY canvas_hub ./canvas_hub
+
+# Install locked runtime dependencies (no Playwright Chromium needed in Public Sandbox Demo)
+RUN uv sync --locked --no-dev
+
+# Run as an unprivileged user
+RUN useradd --create-home --shell /usr/sbin/nologin demo \
+    && chown -R demo:demo /app
+USER demo
+
+EXPOSE 8730
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+  CMD python3 -c "import os, urllib.request; urllib.request.urlopen(f'http://127.0.0.1:{os.environ.get(\"PORT\", \"8730\")}/healthz', timeout=3)"
+
+CMD ["sh", "-c", "exec uv run --no-sync canvas-hub demo-server --host 0.0.0.0 --port ${PORT:-8730}"]

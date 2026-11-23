@@ -1,0 +1,14 @@
+services:
+  canvas-hub-demo:
+    build:
+      context: .
+      dockerfile: Dockerfile.demo
+    ports:
+      - "8730:8730"
+    environment:
+      PORT: "8730"
+      # Optional real LLM overrides (leave unset to use built-in zero-cost DemoToolLLM):
+      # CANVAS_HUB_DEMO_LLM_API_KEY: "${CANVAS_HUB_DEMO_LLM_API_KEY:-}"
+      # CANVAS_HUB_DEMO_LLM_BASE_URL: "${CANVAS_HUB_DEMO_LLM_BASE_URL:-https://api.openai.com/v1}"
+      # CANVAS_HUB_DEMO_LLM_MODEL: "${CANVAS_HUB_DEMO_LLM_MODEL:-gpt-4o-mini}"
+    restart: unless-stopped

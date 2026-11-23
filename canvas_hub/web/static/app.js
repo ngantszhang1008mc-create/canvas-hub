@@ -212,6 +212,7 @@ function currentInstance() {
 
 function renderTopbar() {
   const inst = currentInstance();
+  const demo = Boolean(S.info && S.info.demo_mode);
   const sess = inst ? inst.session : null;
   const st = sess ? sess.status : "unknown";
   const label = { signed_in: "Signed in", login_open: "Waiting for sign-in", expired: "Session expired",
@@ -220,19 +221,24 @@ function renderTopbar() {
   const kids = [];
   if (inst) {
     kids.push(h("div", { class: "row" }, h("span", { class: "strong" }, inst.label || inst.origin),
-      pill(cls, label, sess && sess.message ? sess.message : "")));
-    if (sess && sess.status === "signed_in" && sess.display_name)
+      demo ? pill("info", "Public Sandbox Demo", S.info.demo_notice || "Synthetic coursework; no Canvas login required")
+           : pill(cls, label, sess && sess.message ? sess.message : "")));
+    if (!demo && sess && sess.status === "signed_in" && sess.display_name)
       kids.push(h("span", { class: "muted small" }, `as ${sess.display_name}`));
   }
   kids.push(h("div", { class: "grow" }));
   kids.push(themeSwitcher());
-  if (inst && st !== "signed_in") {
-    kids.push(h("span", { class: "muted small" }, "Showing stored data. New collection needs Canvas access."));
-    if (st === "unknown") kids.push(h("button", { class: "ghost", onclick: () => refreshSession(true, true) }, "Check sign-in"));
-    kids.push(h("button", { class: "primary", onclick: () => openLogin(inst.id) }, st === "login_open" ? "Show sign-in window" : "Sign in"));
+  if (demo) {
+    kids.push(h("span", { class: "muted small" }, "Synthetic HKUST-style courses · No Canvas login required"));
+  } else {
+    if (inst && st !== "signed_in") {
+      kids.push(h("span", { class: "muted small" }, "Showing stored data. New collection needs Canvas access."));
+      if (st === "unknown") kids.push(h("button", { class: "ghost", onclick: () => refreshSession(true, true) }, "Check sign-in"));
+      kids.push(h("button", { class: "primary", onclick: () => openLogin(inst.id) }, st === "login_open" ? "Show sign-in window" : "Sign in"));
+    }
+    if (inst && st === "signed_in" && S.accountId)
+      kids.push(h("button", { onclick: () => startJob("quick") }, icon("search"), "Quick check"));
   }
-  if (inst && st === "signed_in" && S.accountId)
-    kids.push(h("button", { onclick: () => startJob("quick") }, icon("search"), "Quick check"));
   if (S.accountId) kids.push(bell());
   mount($("#topbar"), kids);
 }

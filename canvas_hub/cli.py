@@ -208,6 +208,14 @@ def cmd_fake_canvas(args):
     return 0
 
 
+def cmd_demo_server(args):
+    from .demo_server import serve_public_demo
+    raw_hosts = (args.allowed_hosts or os.environ.get("CANVAS_HUB_DEMO_ALLOWED_HOSTS", "")).strip()
+    allowed = {h.strip() for h in raw_hosts.split(",") if h.strip()} or None
+    data_home = Path(args.home) if args.home else None
+    return serve_public_demo(host=args.host, port=args.port, data_home=data_home, allowed_public_hosts=allowed)
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="canvas-hub", description="Personal local Canvas information hub")
     ap.add_argument("--home", help="data home (default: platform app-data dir or $CANVAS_HUB_HOME)")
@@ -278,6 +286,12 @@ def main(argv=None) -> int:
     s = sub.add_parser("fake-canvas", help="run the synthetic Canvas server (testing/demo)")
     s.add_argument("--port", type=int, default=8765)
     s.set_defaults(fn=cmd_fake_canvas)
+
+    s = sub.add_parser("demo-server", help="run the public sandbox demo server (pre-loaded synthetic HKUST courses)")
+    s.add_argument("--host", default=os.environ.get("CANVAS_HUB_DEMO_HOST", "0.0.0.0"))
+    s.add_argument("--port", type=int, default=int(os.environ.get("PORT", os.environ.get("CANVAS_HUB_PORT", "8730"))))
+    s.add_argument("--allowed-hosts", default="", help="optional comma-separated Host allowlist")
+    s.set_defaults(fn=cmd_demo_server)
 
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING,
