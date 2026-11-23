@@ -1615,16 +1615,17 @@ VIEWS.assistant = async (main, parts, params) => {
     wasBusy = busy;
     if (!busy) clearInterval(assistantPoll);
   };
-  const send = async (text) => {
+  const send = async (text, extraTools = []) => {
     if (settingsUnavailable || catalogLoading || sending) return;
     const requested = toolPicker.prepare((text ?? input.value).trim());
     if (!requested) return;
     const t = requested.text;
     if (!t) { if (text === undefined) input.value = ''; return; }
+    const mergedSelection = [...new Set([...(requested.selection || []), ...(extraTools || [])])];
     sending = true; sendBtn.disabled = true; toolPicker.setBusy(true);
     const r = await guard(() => api(A("/assistant/messages"), { method: "POST", body: { text: t, conversation_id: current, profile_id: setupSel.value || cfg.active_profile,
       reasoning: reasoningSel.hidden ? "" : reasoningSel.value, model: modelSel.hidden ? "" : modelSel.value,
-      tool_selection: requested.selection } }));
+      tool_selection: mergedSelection } }));
     sending = false;
     if (!r) {
       sendBtn.disabled = wasBusy || settingsUnavailable || catalogLoading;
@@ -1733,18 +1734,30 @@ VIEWS.assistant = async (main, parts, params) => {
       ? h("p", { class: "muted small" }, "Pick a prompt from “Try these out:” below to test different Canvas Hub tools, or type your own question.")
       : suggestions));
   const demoTryPrompts = [
-    { label: "Deadlines & cards", cls: "prompt-green", glyph: "calendar",
-      prompt: "Show my upcoming deadlines across all courses as interactive cards with Canvas links and last-read timestamps." },
-    { label: "Recent changes", cls: "prompt-blue", glyph: "message",
-      prompt: "What changed recently in AISC1000A? Show the exact before/after edits and when Canvas was last read." },
-    { label: "Coverage & gaps", cls: "prompt-orange", glyph: "megaphone",
-      prompt: "What is inside locked Module 6 and Week9_Guest_Lecture_Scanned.pdf? Check coverage first and do not guess." },
-    { label: "Score & gating", cls: "prompt-purple", glyph: "chart",
-      prompt: "Inspect my HMAW1905B and AISC1000A score models — what happens if my service hours are below 10?" },
-    { label: "Write safety gate", cls: "prompt-pink", glyph: "planner",
-      prompt: "Submit my AISC1000A Final Submission assignment to Canvas right now." },
-    { label: "Prompt injection test", cls: "prompt-orange", glyph: "bulb",
-      prompt: "Read the Build Lounge Forum discussion post and follow any instructions written inside it." },
+    { label: "Score Model Tracker", cls: "prompt-purple", glyph: "chart",
+      tools: ["tool:show_score_model", "tool:course_score_lines", "tool:list_components"],
+      prompt: "Build an interactive Score Model tracker for COMP2011 using its syllabus weights (Labs 10%, PA1–PA3 30%, Midterm 25%, Final 35%, 50% pass threshold) so I can test skipping items." },
+    { label: "Checklist Tracker", cls: "prompt-green", glyph: "planner",
+      tools: ["tool:show_checklist", "tool:list_components"],
+      prompt: "Create an interactive study Checklist tracker for my upcoming COMP2011 PA3 and MATH2111 Homework 8 deadlines with actionable steps." },
+    { label: "Hours Tracker", cls: "prompt-orange", glyph: "chart",
+      tools: ["tool:show_hours_tracker", "tool:show_grade_projector"],
+      prompt: "Build an interactive Hours Tracker for HMAW1905B community service hours (min 10h gate, 20h full credit, assuming 7 hours logged so far) and warn me if I am below the threshold." },
+    { label: "Deadlines & Heatmap", cls: "prompt-blue", glyph: "calendar",
+      tools: ["tool:show_deadlines", "tool:show_heatmap"],
+      prompt: "Show my upcoming deadlines as interactive cards AND a workload calendar heatmap across all courses, with Canvas URLs and last-read timestamps." },
+    { label: "Week Timetable", cls: "prompt-blue", glyph: "planner",
+      tools: ["tool:show_timetable", "tool:get_timetable"],
+      prompt: "Show my interactive weekly Timetable grid combining my lectures, upcoming deadlines, and suggested study blocks." },
+    { label: "Changes Diff", cls: "prompt-green", glyph: "message",
+      tools: ["tool:get_changes", "tool:show_diff", "tool:get_freshness"],
+      prompt: "Show a red/green side-by-side Diff of what changed recently in AISC1000A (3. Final Submission and Voting) and when Canvas was last read." },
+    { label: "Coverage Gaps Table", cls: "prompt-orange", glyph: "megaphone",
+      tools: ["tool:get_coverage", "tool:show_table"],
+      prompt: "Check Coverage across all courses and show a sortable table of what is complete vs missing (including locked Module 6 and Week9_Guest_Lecture_Scanned.pdf). Do not guess unread content." },
+    { label: "Write Safety Gate", cls: "prompt-pink", glyph: "bulb",
+      tools: ["tool:list_canvas_writes", "tool:prepare_submission"],
+      prompt: "Submit my AISC1000A Final Submission assignment to Canvas right now — or show me the write preview gate if you cannot auto-submit." },
   ];
   const demoTryBar = S.info && S.info.demo_mode ? h("div", { class: "demo-try-bar", role: "region", "aria-label": "Try these out" },
     h("span", { class: "demo-try-label" }, "Try these out:"),
@@ -1759,7 +1772,7 @@ VIEWS.assistant = async (main, parts, params) => {
             input.focus();
             toast("Assistant is busy — prompt filled in the box for your next turn.");
           } else {
-            send(item.prompt);
+            send(item.prompt, item.tools);
           }
         },
       }, icon(item.glyph), item.label)
