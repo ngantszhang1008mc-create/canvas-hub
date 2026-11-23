@@ -135,7 +135,7 @@ def test_public_demo_runtime_seeding_security_and_tool_calling(tmp_path: Path):
 def test_public_demo_vertex_ai_config_and_zero_cost_seeding(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("CANVAS_HUB_DEMO_VERTEX_PROJECT", "aisc-demo-12345")
     monkeypatch.setenv("CANVAS_HUB_DEMO_VERTEX_LOCATION", "global")
-    monkeypatch.setenv("CANVAS_HUB_DEMO_VERTEX_MODEL", "gemini-2.5-flash")
+    monkeypatch.setenv("CANVAS_HUB_DEMO_VERTEX_MODEL", "gemini-3.8-flash")
     monkeypatch.setenv("CANVAS_HUB_DEMO_MAX_OUTPUT_TOKENS", "1536")
     monkeypatch.delenv("CANVAS_HUB_DEMO_LLM_API_KEY", raising=False)
 
@@ -143,7 +143,7 @@ def test_public_demo_vertex_ai_config_and_zero_cost_seeding(tmp_path: Path, monk
     try:
         # Temporary seeder LLM was shut down cleanly; Vertex AI is active with no saved API key.
         assert demo_llm is None
-        assert seeded["ai_backend"] == "vertex_ai:gemini-2.5-flash@global"
+        assert seeded["ai_backend"] == "vertex_ai:gemini-3.8-flash@global"
         c = TestClient(app, base_url="https://canvas-hub-demo.a.run.app")
         cfg = c.get("/api/assistant/config").json()
         assert len(cfg["profiles"]) == 1
@@ -151,7 +151,7 @@ def test_public_demo_vertex_ai_config_and_zero_cost_seeding(tmp_path: Path, monk
         assert prof["provider"] == "vertex_ai"
         assert prof["vertex_project"] == "aisc-demo-12345"
         assert prof["vertex_location"] == "global"
-        assert prof["model"] == "gemini-2.5-flash"
+        assert prof["model"] == "gemini-3.8-flash"
         assert prof["context"]["response_tokens"] == 1536
         assert not prof.get("has_key")
         # Showcase conversation was pre-seeded at zero cost before activating Vertex AI.

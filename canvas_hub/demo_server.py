@@ -1142,7 +1142,7 @@ def build_public_demo_runtime(home: Path, *, port: int = 8730, seed_showcase_cha
     if vertex_project:
         _seed_zero_cost_then_cleanup()
         location = os.environ.get("CANVAS_HUB_DEMO_VERTEX_LOCATION", "global").strip() or "global"
-        model = os.environ.get("CANVAS_HUB_DEMO_VERTEX_MODEL", "gemini-2.5-flash").strip() or "gemini-2.5-flash"
+        model = os.environ.get("CANVAS_HUB_DEMO_VERTEX_MODEL", "gemini-3.8-flash").strip() or "gemini-3.8-flash"
         assistant.update_config({
             "preset": "vertex_ai",
             "name": f"Vertex AI · {model}",

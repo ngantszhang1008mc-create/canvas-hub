@@ -6,11 +6,11 @@
 #   bash scripts/deploy-cloudrun-demo.sh <GCP_PROJECT_ID> [GEMINI_MODEL]
 #
 # Example:
-#   bash scripts/deploy-cloudrun-demo.sh my-aisc-project gemini-2.5-flash
+#   bash scripts/deploy-cloudrun-demo.sh my-aisc-project gemini-3.8-flash
 set -euo pipefail
 
 PROJECT_ID="${1:-${GOOGLE_CLOUD_PROJECT:-}}"
-MODEL="${2:-gemini-2.5-flash}"
+MODEL="${2:-gemini-3.8-flash}"
 REGION="${CLOUDRUN_REGION:-asia-east2}"
 VERTEX_LOCATION="${VERTEX_LOCATION:-global}"
 SERVICE_NAME="${CLOUDRUN_SERVICE:-canvas-hub-demo}"

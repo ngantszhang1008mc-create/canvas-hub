@@ -24,7 +24,7 @@ If you have GCP trial credits (e.g., \$300 free credits), Cloud Run in Hong Kong
 gcloud auth login
 
 # 2. One-command build & deploy (enables APIs, creates least-privilege SA, deploys min=1 max=1)
-bash scripts/deploy-cloudrun-demo.sh <YOUR_GCP_PROJECT_ID> gemini-2.5-flash
+bash scripts/deploy-cloudrun-demo.sh <YOUR_GCP_PROJECT_ID> gemini-3.8-flash
 ```
 
 - **Why `--min-instances=1 --max-instances=1`**: eliminates cold-start delay for reviewers and keeps the in-container synthetic SQLite database and chat state consistent on a single instance (~USD \$3–\$6 for 2 weeks out of \$300 credits).
@@ -64,7 +64,7 @@ cloudflared tunnel --url http://127.0.0.1:8730
 | :--- | :--- | :--- |
 | `CANVAS_HUB_DEMO_VERTEX_PROJECT` | *(unset)* | GCP project ID/number to enable native **Vertex AI (Gemini via ADC)** |
 | `CANVAS_HUB_DEMO_VERTEX_LOCATION` | `global` | Vertex AI location (`global`, `us-central1`, `asia-southeast1`, etc.) |
-| `CANVAS_HUB_DEMO_VERTEX_MODEL` | `gemini-2.5-flash` | Gemini model ID on Vertex AI |
+| `CANVAS_HUB_DEMO_VERTEX_MODEL` | `gemini-3.8-flash` | Gemini model ID on Vertex AI |
 | `CANVAS_HUB_DEMO_LLM_API_KEY` | *(unset)* | Optional BYOK API key (used if Vertex project is unset) |
 | `CANVAS_HUB_DEMO_LLM_PROVIDER` | `openai_compatible` | `openai_compatible` or `anthropic` |
 | `CANVAS_HUB_DEMO_LLM_BASE_URL` | `https://api.openai.com/v1` | Upstream OpenAI-compatible base URL |
