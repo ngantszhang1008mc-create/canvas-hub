@@ -7,7 +7,7 @@
 | **Project Name** | **Canvas Hub** — Local-First, Provenance-Tracked Agentic Canvas Workspace |
 | **Team / Authors** | *(Insert Team Name & Member Names / ITSC IDs before final PDF upload)* |
 | **Source Repository** | [github.com/ngantszhang1008mc-create/canvas-hub](https://github.com/ngantszhang1008mc-create/canvas-hub) |
-| **Public Demo Link (Item #5)** | `https://<your-deployed-demo-url>` *(Deploy in 2 min via [`render.yaml`](../render.yaml) / [`Dockerfile.demo`](../Dockerfile.demo); see [`docs/DEMO_DEPLOYMENT.md`](../docs/DEMO_DEPLOYMENT.md))* |
+| **Public Demo Link (Item #5)** | [https://canvas-hub-demo-1002757101526.asia-east2.run.app](https://canvas-hub-demo-1002757101526.asia-east2.run.app) *(Hosted on GCP Cloud Run `asia-east2` + Vertex AI `gemini-3.8-flash`)* |
 
 ---
 
@@ -171,7 +171,7 @@ We engineered Canvas Hub around an explicit three-tier **Autonomy Dial**, enforc
 
 ## 5. Public Demo Link & Peer Evaluator Walkthrough
 
-- **Live Public Sandbox Demo URL**: `https://<your-deployed-demo-url>` *(Deploy in < 2 minutes via `render.yaml` / `Dockerfile.demo` — zero local installation and zero HKUST Canvas login required)*
+- **Live Public Sandbox Demo URL**: [https://canvas-hub-demo-1002757101526.asia-east2.run.app](https://canvas-hub-demo-1002757101526.asia-east2.run.app) *(Hosted on GCP Cloud Run in Hong Kong `asia-east2` with live Vertex AI `gemini-3.8-flash` — zero local installation and zero HKUST Canvas login required)*
 - **GitHub Repository**: [https://github.com/ngantszhang1008mc-create/canvas-hub](https://github.com/ngantszhang1008mc-create/canvas-hub)
 
 ### 2-Minute Peer Reviewer Testing Script

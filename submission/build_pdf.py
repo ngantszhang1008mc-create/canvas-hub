@@ -139,7 +139,7 @@ ARCH_SVG = """
 
 
 def build_html() -> str:
-    demo_url = os.environ.get("DEMO_URL", "https://<your-deployed-demo-url>  (Deploy via render.yaml / Dockerfile.demo)")
+    demo_url = os.environ.get("DEMO_URL", "https://canvas-hub-demo-1002757101526.asia-east2.run.app")
     team_info = os.environ.get("TEAM_INFO", "[Insert Team Name & Member Names / ITSC IDs]")
 
     return f"""<!doctype html>
@@ -436,8 +436,8 @@ def build_html() -> str:
   <div class="meta-grid">
     <div class="meta-item"><strong>Deliverable:</strong> 3. Final Submission and Voting (18%)</div>
     <div class="meta-item"><strong>Team / Members:</strong> {html.escape(team_info)}</div>
-    <div class="meta-item meta-full"><strong>Source Repository:</strong> <span class="demo-pill">https://github.com/ngantszhang1008mc-create/canvas-hub</span></div>
-    <div class="meta-item meta-full"><strong>Public Demo Link (Item #5):</strong> <span class="demo-pill">{html.escape(demo_url)}</span></div>
+    <div class="meta-item meta-full"><strong>Source Repository:</strong> <a class="demo-pill" style="text-decoration:none;" href="https://github.com/ngantszhang1008mc-create/canvas-hub">https://github.com/ngantszhang1008mc-create/canvas-hub</a></div>
+    <div class="meta-item meta-full"><strong>Public Demo Link (Item #5):</strong> <a class="demo-pill" style="text-decoration:none;" href="{html.escape(demo_url)}">{html.escape(demo_url)}</a></div>
   </div>
 
   <!-- SECTION 0: PIVOT -->
@@ -626,8 +626,8 @@ def build_html() -> str:
   <!-- SECTION 5: DEMO LINK & EVALUATOR WALKTHROUGH -->
   <h2>5. Public Demo Link &amp; Peer Evaluator Testing Guide <span class="badge">Zero-Install · No Canvas Login</span></h2>
   <div class="demo-box">
-    <p style="margin-bottom:5px;"><strong>Live Public Sandbox Demo:</strong> <span class="demo-pill">{html.escape(demo_url)}</span></p>
-    <p style="margin-bottom:6px;font-size:8.7pt;color:#1e3a8a;">Runs the real Canvas Hub FastAPI + SQLite/FTS5 backend in containerized Public Sandbox Demo mode (<code>Dockerfile.demo</code> / <code>render.yaml</code>) with 4 de-identified HKUST-style courses pre-loaded and a zero-cost real-tool-calling Sandbox Agent. No local setup or HKUST Canvas login is required.</p>
+    <p style="margin-bottom:5px;"><strong>Live Public Sandbox Demo:</strong> <a class="demo-pill" style="text-decoration:none;" href="{html.escape(demo_url)}">{html.escape(demo_url)}</a></p>
+    <p style="margin-bottom:6px;font-size:8.7pt;color:#1e3a8a;">Hosted on Google Cloud Run (<code>asia-east2</code>, Hong Kong) running the real Canvas Hub FastAPI + SQLite/FTS5 backend in Public Sandbox Demo mode (<code>Dockerfile.demo</code>) with 4 de-identified HKUST-style courses pre-loaded and live Google Vertex AI (<code>gemini-3.8-flash</code> via ADC, rate-limited for safe public evaluation). No local setup or HKUST Canvas login is required.</p>
     <ol style="margin:0;font-size:8.8pt;">
       <li><strong>Overall Workbench &amp; Trackers:</strong> Tick items in the <em>AISC1000A Final Submission Checklist</em> and drag the <em>HMAW1905B Service Hours</em> slider below/above <code>10 hours</code> to verify deterministic min-threshold gating.</li>
       <li><strong>Changes:</strong> Inspect the verified <code>field_changed</code> revision diff extending <code>3. Final Submission and Voting</code> by +48h.</li>
