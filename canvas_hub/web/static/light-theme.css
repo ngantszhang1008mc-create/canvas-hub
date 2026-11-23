@@ -145,3 +145,20 @@
 :where(:root[data-theme="light"]) .ui-icon { display: inline-block; }
 :where(:root[data-theme="light"]) .select-icon-wrap { display: inline-flex; }
 :where(:root[data-theme="light"]) .bell-n { background: var(--bad); color: #fff; }
+:where(:root[data-theme="light"]) .demo-assistant-cta {
+  background: linear-gradient(110deg, #0070ff, #4f46e5);
+  border-color: #2563eb;
+  color: #fff;
+  box-shadow: 0 4px 12px rgb(37 99 235 / 28%);
+}
+:where(:root[data-theme="light"]) .demo-assistant-cta:hover {
+  background: linear-gradient(110deg, #005ce6, #4338ca);
+  box-shadow: 0 5px 15px rgb(37 99 235 / 38%);
+}
+:where(:root[data-theme="light"]) .demo-try-bar { background: #f6f9fe; border-top-color: var(--rule); }
+:where(:root[data-theme="light"]) .demo-try-chip.prompt-green { background: #f0fbf6; border-color: #ccecd9; color: #1b5e3f; }
+:where(:root[data-theme="light"]) .demo-try-chip.prompt-blue { background: #eff6ff; border-color: #cde3ff; color: #0059d6; }
+:where(:root[data-theme="light"]) .demo-try-chip.prompt-pink { background: #fff1f6; border-color: #ffd6e6; color: #be1f5a; }
+:where(:root[data-theme="light"]) .demo-try-chip.prompt-orange { background: #fff7ed; border-color: #fde0c2; color: #b85000; }
+:where(:root[data-theme="light"]) .demo-try-chip.prompt-purple { background: #f6f0ff; border-color: #e2d2ff; color: #6d28d9; }
+:where(:root[data-theme="light"]) .demo-try-chip:hover { filter: brightness(.97); }

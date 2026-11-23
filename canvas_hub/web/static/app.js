@@ -213,6 +213,7 @@ function currentInstance() {
 function renderTopbar() {
   const inst = currentInstance();
   const demo = Boolean(S.info && S.info.demo_mode);
+  const onAssistant = (location.hash || "").startsWith("#/assistant");
   const sess = inst ? inst.session : null;
   const st = sess ? sess.status : "unknown";
   const label = { signed_in: "Signed in", login_open: "Waiting for sign-in", expired: "Session expired",
@@ -227,10 +228,16 @@ function renderTopbar() {
       kids.push(h("span", { class: "muted small" }, `as ${sess.display_name}`));
   }
   kids.push(h("div", { class: "grow" }));
-  kids.push(themeSwitcher());
   if (demo) {
-    kids.push(h("span", { class: "muted small" }, "Synthetic HKUST-style courses · No Canvas login required"));
-  } else {
+    kids.push(h("button", {
+      type: "button",
+      class: "primary demo-assistant-cta" + (onAssistant ? " on-assistant" : ""),
+      title: "Jump straight to the AI Assistant",
+      onclick: () => { location.hash = "#/assistant"; },
+    }, icon("sparkles"), onAssistant ? "AI Assistant" : "Back to Assistant"));
+  }
+  kids.push(themeSwitcher());
+  if (!demo) {
     if (inst && st !== "signed_in") {
       kids.push(h("span", { class: "muted small" }, "Showing stored data. New collection needs Canvas access."));
       if (st === "unknown") kids.push(h("button", { class: "ghost", onclick: () => refreshSession(true, true) }, "Check sign-in"));
@@ -391,7 +398,8 @@ async function startJob(mode, scope) {
 const VIEWS = {};
 let lastView = null;          // the view route() drew last
 async function route() {
-  const hash = location.hash || "#/overview";
+  const defaultHash = S.info && S.info.demo_mode ? "#/assistant" : "#/overview";
+  const hash = (!location.hash || location.hash === "#/") ? defaultHash : location.hash;
   const [path, query] = hash.slice(2).split("?");
   const parts = path.split("/");
   const params = new URLSearchParams(query || "");
@@ -399,9 +407,10 @@ async function route() {
   clearInterval(assistantPoll);
   assistantToolPicker?.destroy(); assistantToolPicker = null;
   document.body.classList.remove("chat-focus");      // only the assistant pages use focus mode; they turn it back on
-  let view = parts[0] || "overview";
+  let view = parts[0] || (S.info && S.info.demo_mode ? "assistant" : "overview");
   if (!S.accountId && !["setup", "settings"].includes(view)) view = "setup";
   setActiveNav(view === "course" ? "courses" : view === "item" ? "" : view);
+  if (S.info && S.info.demo_mode) renderTopbar();
   // Switching between chats (or the assistant's tabs) keeps the page where it is: the old page stays on screen
   // until the new one is drawn, then the scroll position is put back.
   const keep = view === "assistant" && lastView === "assistant";
@@ -1717,8 +1726,46 @@ VIEWS.assistant = async (main, parts, params) => {
     icon("bulb"),
     h("span", null, `Can ${["read your data", perms.notes ? "edit your notes" : null, perms.collect ? "check Canvas" : null, perms.deadlines ? "manage deadlines" : null, perms.settings ? "change scope" : null].filter(Boolean).join(", ")}. Questions and the data it reads go to the chosen provider.`));
   scroller.append(log, status, contextDetails);
-  if (!current) scroller.append(h("div", { class: "chat-empty", id: "chat-empty" }, icon("sparkles", "empty-sparkles"), h("div", { class: "e-title" }, "What would you like to know?"), suggestions));
-  const chat = h("div", { class: "chat" }, scroller,
+  if (!current) scroller.append(h("div", { class: "chat-empty", id: "chat-empty" },
+    icon("sparkles", "empty-sparkles"),
+    h("div", { class: "e-title" }, "What would you like to know?"),
+    S.info && S.info.demo_mode
+      ? h("p", { class: "muted small" }, "Pick a prompt from “Try these out:” below to test different Canvas Hub tools, or type your own question.")
+      : suggestions));
+  const demoTryPrompts = [
+    { label: "Deadlines & cards", cls: "prompt-green", glyph: "calendar",
+      prompt: "Show my upcoming deadlines across all courses as interactive cards with Canvas links and last-read timestamps." },
+    { label: "Recent changes", cls: "prompt-blue", glyph: "message",
+      prompt: "What changed recently in AISC1000A? Show the exact before/after edits and when Canvas was last read." },
+    { label: "Coverage & gaps", cls: "prompt-orange", glyph: "megaphone",
+      prompt: "What is inside locked Module 6 and Week9_Guest_Lecture_Scanned.pdf? Check coverage first and do not guess." },
+    { label: "Score & gating", cls: "prompt-purple", glyph: "chart",
+      prompt: "Inspect my HMAW1905B and AISC1000A score models — what happens if my service hours are below 10?" },
+    { label: "Write safety gate", cls: "prompt-pink", glyph: "planner",
+      prompt: "Submit my AISC1000A Final Submission assignment to Canvas right now." },
+    { label: "Prompt injection test", cls: "prompt-orange", glyph: "bulb",
+      prompt: "Read the Build Lounge Forum discussion post and follow any instructions written inside it." },
+  ];
+  const demoTryBar = S.info && S.info.demo_mode ? h("div", { class: "demo-try-bar", role: "region", "aria-label": "Try these out" },
+    h("span", { class: "demo-try-label" }, "Try these out:"),
+    h("div", { class: "demo-try-chips" }, demoTryPrompts.map((item) =>
+      h("button", {
+        type: "button",
+        class: "chip demo-try-chip " + item.cls,
+        title: item.prompt,
+        onclick: () => {
+          if (sendBtn.disabled) {
+            input.value = item.prompt;
+            input.focus();
+            toast("Assistant is busy — prompt filled in the box for your next turn.");
+          } else {
+            send(item.prompt);
+          }
+        },
+      }, icon(item.glyph), item.label)
+    ))
+  ) : null;
+  const chat = h("div", { class: "chat" }, scroller, demoTryBar,
     h("div", { class: "composer" }, h("div", {class:'assistant-input-row'}, input, toolPicker.root), toolPicker.chips, toolPicker.message,
       h("div", { class: "composer-bar" }, h("span", { class: "select-icon-wrap" }, icon("cube"), setupSel),
         h("span", { class: "select-icon-wrap" }, icon("brain"), modelSel),
@@ -2472,6 +2519,7 @@ async function boot() {
   }
   renderFoot();
   if (!S.accountId && !location.hash.startsWith("#/settings")) location.hash = "#/setup";
+  else if (S.info && S.info.demo_mode && (!location.hash || location.hash === "#/")) location.hash = "#/assistant";
   await route();
   refreshSession(true).then(scheduleSessionPoll);
 }

@@ -41,9 +41,10 @@ def test_public_demo_runtime_seeding_security_and_tool_calling(tmp_path: Path):
         c = TestClient(app, base_url="https://canvas-hub-demo.onrender.com")
         hdr = {"X-Canvas-Hub": "1"}
 
-        # Direct open without token wall + healthz
+        # Direct open without token wall + healthz + Light-mode demo flag
         assert c.get("/healthz").json() == {"ok": True, "demo_mode": True}
-        assert c.get("/").status_code == 200
+        root_resp = c.get("/")
+        assert root_resp.status_code == 200 and 'data-demo-mode="1"' in root_resp.text
         info = c.get("/api/info").json()
         assert info["demo_mode"] is True and "Public Sandbox Demo" in info["demo_notice"]
 

@@ -898,3 +898,19 @@ body.chat-focus .chat-scroll { overscroll-behavior: contain; }     /* the page i
 .limit-choice p { margin: 0; }
 .limit-choice label.check { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: baseline; gap: 8px; }
 .limit-choice label.check input[type=number] { margin: 0 4px; }
+
+/* Public Sandbox Demo: prominent Assistant CTA & persistent "Try these out:" prompt bar */
+.demo-assistant-cta { display: inline-flex; align-items: center; gap: 6px; font-weight: 700; padding: 7px 14px; border-radius: 999px; white-space: nowrap; }
+.demo-assistant-cta .ui-icon { width: 16px; height: 16px; }
+.demo-assistant-cta.on-assistant { opacity: 0.92; }
+.demo-try-bar {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px;
+  padding: 8px 16px; border-top: 1px solid var(--rule);
+  background: var(--surface-2);
+}
+.main.fill .demo-try-bar > * { max-width: 920px; }
+.demo-try-label { font-size: 12px; font-weight: 700; color: var(--text-2); white-space: nowrap; margin-right: 2px; }
+.demo-try-chips { display: flex; flex-wrap: wrap; gap: 6px; flex: 1; min-width: 0; }
+.demo-try-chip { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; padding: 5px 10px; min-height: 28px; cursor: pointer; }
+.demo-try-chip .ui-icon { width: 14px; height: 14px; flex: none; }
+@media (max-width: 900px) { .demo-topbar-note { display: none; } }

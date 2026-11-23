@@ -267,7 +267,10 @@ def create_app(api: HubAPI, *, token: str, port: int, public_demo: bool = False,
     @app.get("/")
     async def index(request: Request):
         if public_demo:
-            return FileResponse(STATIC / "index.html", media_type="text/html")
+            html_text = (STATIC / "index.html").read_text(encoding="utf-8").replace(
+                '<html lang="en">', '<html lang="en" data-demo-mode="1">', 1
+            )
+            return Response(html_text, media_type="text/html")
         t = request.query_params.get("token")
         if t:
             if not token_ok(token, t):

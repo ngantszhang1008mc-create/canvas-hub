@@ -1,8 +1,9 @@
 // Runs before stylesheets so a saved appearance is applied before first paint.
 (() => {
-  let theme = 'dark';
+  let theme = document.documentElement.dataset.demoMode === '1' ? 'light' : 'dark';
   try {
-    if (localStorage.getItem('ch.theme') === 'light') theme = 'light';
-  } catch { /* Storage may be unavailable; retain the original Dark appearance. */ }
+    const saved = localStorage.getItem('ch.theme');
+    if (saved === 'light' || saved === 'dark') theme = saved;
+  } catch { /* Storage may be unavailable; keep default appearance. */ }
   document.documentElement.dataset.theme = theme;
 })();
