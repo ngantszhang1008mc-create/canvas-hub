@@ -10,8 +10,21 @@ export function makeAssistantToolPicker({h, input, catalog}) {
   let byCommand = new Map(choices.map(c => [c.command, c]));
   let byId = new Map(choices.map(c => [c.id, c]));
   const id = `assistant-tools-${Math.random().toString(36).slice(2)}`;
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const chevron = document.createElementNS(svgNS, 'svg');
+  chevron.setAttribute('viewBox', '0 0 24 24');
+  chevron.setAttribute('aria-hidden', 'true');
+  chevron.setAttribute('fill', 'none');
+  chevron.setAttribute('stroke', 'currentColor');
+  chevron.setAttribute('stroke-width', '2.25');
+  chevron.setAttribute('stroke-linecap', 'round');
+  chevron.setAttribute('stroke-linejoin', 'round');
+  const chevronPath = document.createElementNS(svgNS, 'path');
+  chevronPath.setAttribute('d', 'M6 15l6-6 6 6');
+  chevron.append(chevronPath);
   const toggle = h('button', {type:'button', class:'assistant-tool-toggle', 'aria-label':'Choose tools for this message',
-    'aria-haspopup':'dialog', 'aria-controls':id, 'aria-expanded':'false', title:'Choose tools for this message', disabled:!catalog}, '‹');
+    'aria-haspopup':'dialog', 'aria-controls':id, 'aria-expanded':'false', title:'Choose tools for this message',
+    dataset:{placement:'above'}, disabled:!catalog}, chevron);
   const search = h('input', {type:'search', 'aria-label':'Search permitted tools', placeholder:'Search tools or groups…', autocomplete:'off'});
   const list = h('div', {class:'assistant-tool-options'});
   const message = h('div', {class:'tiny muted assistant-tool-feedback', role:'status'});
@@ -72,6 +85,7 @@ export function makeAssistantToolPicker({h, input, catalog}) {
     panel.style.width = `${width}px`;
     panel.style.left = `${Math.max(12, Math.min(rect.right-width, innerWidth-width-12))}px`;
     const above = rect.top > innerHeight-rect.bottom;
+    toggle.dataset.placement = above ? 'above' : 'below';
     panel.style.top = above ? 'auto' : `${rect.bottom+8}px`;
     panel.style.bottom = above ? `${innerHeight-rect.top+8}px` : 'auto';
     panel.style.maxHeight = `${Math.max(120, Math.min(440, (above ? rect.top : innerHeight-rect.bottom)-20))}px`;
@@ -85,7 +99,7 @@ export function makeAssistantToolPicker({h, input, catalog}) {
     if (query !== null) search.value = query;
     if (!opened) {
       opened = true; panel.hidden = false; document.body.append(panel);
-      toggle.setAttribute('aria-expanded', 'true'); toggle.textContent = '›';
+      toggle.setAttribute('aria-expanded', 'true');
       document.addEventListener('pointerdown', outside);
       document.addEventListener('keydown', escape, true);
       window.addEventListener('resize', position);
@@ -96,7 +110,8 @@ export function makeAssistantToolPicker({h, input, catalog}) {
   function close(focus=false) {
     if (!opened) return;
     opened = false; panel.hidden = true; root.append(panel);
-    toggle.setAttribute('aria-expanded', 'false'); toggle.textContent = '‹';
+    toggle.setAttribute('aria-expanded', 'false');
+    toggle.dataset.placement = 'above';
     document.removeEventListener('pointerdown', outside);
     document.removeEventListener('keydown', escape, true);
     window.removeEventListener('resize', position);

@@ -1,8 +1,12 @@
 .assistant-input-row { display:flex; align-items:flex-end; gap:10px; min-width:0; }
 .assistant-input-row > textarea { min-width:0; flex:1; }
 .assistant-tool-picker { flex:none; }
-.assistant-tool-toggle { width:42px; height:42px; min-width:42px; min-height:42px; padding:0; border-radius:50%; display:inline-flex; align-items:center; justify-content:center; font:500 28px/1 var(--mono); background:var(--paper); color:var(--accent); }
+.assistant-tool-toggle { width:42px; height:42px; min-width:42px; min-height:42px; padding:0; border-radius:50%; display:inline-flex; align-items:center; justify-content:center; background:var(--paper); color:var(--accent); }
+.assistant-tool-toggle svg { width:20px; height:20px; display:block; transition:transform 150ms ease; }
 .assistant-tool-toggle[aria-expanded="true"] { background:var(--accent-soft); border-color:var(--accent); }
+.assistant-tool-toggle[aria-expanded="true"] svg,
+.assistant-tool-toggle[data-placement="below"][aria-expanded="false"] svg { transform:rotate(180deg); }
+.assistant-tool-toggle[data-placement="below"][aria-expanded="true"] svg { transform:rotate(0deg); }
 .assistant-tool-panel { position:fixed; z-index:100; box-sizing:border-box; padding:14px; display:flex; flex-direction:column; gap:9px; overflow:hidden; background:var(--paper); color:var(--ink); border:1px solid var(--border-strong); border-radius:12px; box-shadow:var(--shadow); }
 .assistant-tool-panel[hidden] { display:none; }
 .assistant-tool-heading { display:flex; align-items:center; justify-content:space-between; gap:12px; }
