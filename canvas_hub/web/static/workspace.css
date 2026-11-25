@@ -128,6 +128,8 @@ button.workspace-attention-link:hover { color: var(--accent); background: transp
   .workspace-context.agent-open .workspace-row-state { max-width: 150px; }
 }
 @media (max-width: 860px) {
+  .workspace-nav-toggle { top: 7px; left: 10px; bottom: auto; width: 34px; height: 34px; padding: 6px; box-shadow: none; }
+  .workspace-shell .topbar { padding: 7px 10px 7px 52px; flex-wrap: nowrap; gap: 6px; min-height: 48px; }
   .workspace-nav-scrim { left: 250px; }
   .workspace-shell .shell { flex-direction: row; }
   .workspace-shell .sidebar { position: fixed; inset: 0 auto 0 0; width: 250px; height: 100dvh; z-index: 40; border-right: 1px solid var(--rule); border-bottom: 0; overflow-y: auto; }

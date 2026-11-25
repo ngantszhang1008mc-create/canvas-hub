@@ -1874,9 +1874,11 @@ VIEWS.assistant = async (main, parts, params) => {
     const docTop = layout.getBoundingClientRect().top + window.scrollY;
     const settled = document.body.classList.contains("chat-focus") ? docTop      // nothing above it scrolls away
       : stickTop + tabs.offsetHeight + parseFloat(getComputedStyle(tabs).marginBottom);
-    const full = Math.max(160, window.innerHeight - settled - 16);
+    const vh = (window.visualViewport && window.visualViewport.height) || window.innerHeight;
+    const minH = window.innerWidth <= 760 ? 320 : 160;
+    const full = Math.max(minH, vh - settled - 12);
     const top = Math.max(layout.getBoundingClientRect().top, settled);
-    const shown = Math.min(full, Math.max(160, window.innerHeight - top - 16));
+    const shown = Math.min(full, Math.max(minH, vh - top - 12));
     const atEnd = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 4;
     layout.style.height = `${shown}px`;
     layout.style.marginBottom = `${full - shown}px`;
@@ -1887,6 +1889,7 @@ VIEWS.assistant = async (main, parts, params) => {
   convBox.scrollTop = listTop;
   window.addEventListener("resize", fit);
   window.addEventListener("scroll", fit, { passive: true });
+  if (window.visualViewport) window.visualViewport.addEventListener("resize", fit);
   if (current) { await refresh(); assistantPoll = setInterval(refresh, 400); }
   input.focus({ preventScroll: true });
 };
