@@ -1780,9 +1780,10 @@ VIEWS.assistant = async (main, parts, params) => {
       tools: ["tool:list_canvas_writes", "tool:prepare_submission"],
       prompt: "Submit my AISC1000A Final Submission assignment to Canvas right now — or show me the write preview gate if you cannot auto-submit." },
   ];
-  const demoTryBar = S.info && S.info.demo_mode ? h("div", { class: "demo-try-bar", role: "region", "aria-label": "Try these out" },
-    h("span", { class: "demo-try-label" }, "Try these out:"),
-    h("div", { class: "demo-try-chips" }, demoTryPrompts.map((item) =>
+  let demoTryBar = null;
+  if (S.info && S.info.demo_mode) {
+    let tryCollapsed = store.get("demoTryCollapsed") === "1";
+    const tryChips = h("div", { class: "demo-try-chips" }, demoTryPrompts.map((item) =>
       h("button", {
         type: "button",
         class: "chip demo-try-chip " + item.cls,
@@ -1797,8 +1798,52 @@ VIEWS.assistant = async (main, parts, params) => {
           }
         },
       }, icon(item.glyph), item.label)
-    ))
-  ) : null;
+    ));
+    const nudgeLeft = h("button", {
+      type: "button", class: "demo-try-nudge", "aria-label": "Scroll prompts left", title: "Scroll left",
+      onclick: () => tryChips.scrollBy({ left: -240, behavior: "smooth" }),
+    }, "‹");
+    const nudgeRight = h("button", {
+      type: "button", class: "demo-try-nudge", "aria-label": "Scroll prompts right", title: "Scroll right",
+      onclick: () => tryChips.scrollBy({ left: 240, behavior: "smooth" }),
+    }, "›");
+    const tryToggle = h("button", {
+      type: "button",
+      class: "demo-try-toggle",
+      "aria-expanded": String(!tryCollapsed),
+      title: "Show or hide quick demo prompts",
+      onclick: () => {
+        tryCollapsed = !tryCollapsed;
+        store.set("demoTryCollapsed", tryCollapsed ? "1" : "0");
+        syncTryBar();
+      },
+    }, h("span", null, "Try these out"), h("span", { class: "demo-try-caret", "aria-hidden": "true" }, "▾"));
+    const tryStrip = h("div", { class: "demo-try-strip" }, nudgeLeft, tryChips, nudgeRight);
+    const syncNudges = () => {
+      const maxScroll = Math.max(0, tryChips.scrollWidth - tryChips.clientWidth);
+      nudgeLeft.hidden = tryCollapsed || tryChips.scrollLeft <= 4;
+      nudgeRight.hidden = tryCollapsed || maxScroll <= 4 || tryChips.scrollLeft >= maxScroll - 4;
+      tryStrip.classList.toggle("fade-right", !nudgeRight.hidden);
+      tryStrip.classList.toggle("fade-left", !nudgeLeft.hidden);
+    };
+    const syncTryBar = () => {
+      tryToggle.setAttribute("aria-expanded", String(!tryCollapsed));
+      tryStrip.hidden = tryCollapsed;
+      demoTryBar.classList.toggle("collapsed", tryCollapsed);
+      if (!tryCollapsed) requestAnimationFrame(syncNudges);
+    };
+    tryChips.addEventListener("scroll", syncNudges, { passive: true });
+    tryChips.addEventListener("wheel", (e) => {
+      if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
+        e.preventDefault();
+        tryChips.scrollLeft += e.deltaY;
+      }
+    }, { passive: false });
+    demoTryBar = h("div", { class: "demo-try-bar", role: "region", "aria-label": "Try these out" },
+      h("div", { class: "demo-try-inner" }, tryToggle, tryStrip));
+    syncTryBar();
+    window.addEventListener("resize", syncNudges);
+  }
   const chat = h("div", { class: "chat" }, scroller, demoTryBar,
     h("div", { class: "composer" }, h("div", {class:'assistant-input-row'}, input, toolPicker.root), toolPicker.chips, toolPicker.message,
       h("div", { class: "composer-bar" }, h("span", { class: "select-icon-wrap" }, icon("cube"), setupSel),
