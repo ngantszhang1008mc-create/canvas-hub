@@ -1430,13 +1430,18 @@ function renderMessages(list, msgs, ctx = {}) {
   for (const m of msgs) {
     if (m.role === "user") out.push(h("div", { class: "msg user" }, h("div", { class: "bubble" }, m.text),
       m.tool_selection?.length ? h("div", {class:"msg-meta tiny muted"}, `Requested tools: ${m.tool_selection.map(s=>s.replace('group:', '/').replace('tool:', '')).join(', ')}`) : null,
-      m.setup ? h("div", { class: "msg-meta tiny muted" }, `${m.setup}${m.model ? ` · ${m.model}` : ""}${m.reasoning ? ` · reasoning ${m.reasoning}` : ""}`) : null));
+      m.setup ? h("div", { class: "msg-meta tiny muted" }, `${m.setup}${m.model && m.model !== "gpt-6.2-astra-doubao" ? ` · ${m.model}` : ""}${m.reasoning ? ` · reasoning ${m.reasoning}` : ""}`) : null));
     else if (m.role === "assistant") {
       const parts = [];
       if (m.text) parts.push(ctx.typed ? ctx.typed(m) : renderMarkdown(m.text));
       const plain = (m.tool_calls || []).filter((c) => !(results[c.id] && results[c.id].display));
       if (plain.length) parts.push(h("div", { class: "steps" }, plain.map((c) => stepRow(c, results[c.id]))));
       for (const c of m.tool_calls || []) if (results[c.id] && results[c.id].display) parts.push(componentView(results[c.id].display, ctx, c.id));
+      if (S.info && S.info.demo_mode && (m.model === "gpt-6.2-astra-doubao" || (m.text || "").trim() === "我是豆包。") && ctx.switchToFlash) {
+        parts.push(h("div", { class: "demo-doubao-actions" },
+          h("button", { type: "button", class: "btn primary sm demo-back-flash-btn", onclick: () => ctx.switchToFlash() },
+            icon("sparkles"), "回到 Gemini 3.8 Flash")));
+      }
       if (m.stop === "refusal") parts.push(h("div", { class: "small muted" }, "The model declined to continue."));
       if (m.incomplete_reason || m.stop === "truncated") parts.unshift(h("div", { class: "small bad-text", role: "note" },
         m.incomplete_reason === "empty_reply" ? "No final answer was returned. Review retained tool results before sending a follow-up."
@@ -1670,9 +1675,18 @@ VIEWS.assistant = async (main, parts, params) => {
   // Setup and reasoning are chosen right here for each message. The reasoning
   // level is remembered per setup in this browser only; it is not a saved setting.
   const usable = cfg.profiles.filter((x) => x.configured);
-  const setupLabel = (x) => (IS_DEMO && x.name && x.name.includes("(")) ? x.name : `${x.name} · ${x.model || "default model"}`;
+  const setupLabel = (x) => (S.info && S.info.demo_mode && x.name && x.name.includes("(")) ? x.name : `${x.name} · ${x.model || "default model"}`;
   const setupSel = h("select", { class: "chat-pick", title: "Saved API setup (provider and model) for the next message" },
     usable.map((x) => h("option", { value: x.id, selected: x.id === cfg.active_profile ? true : null }, setupLabel(x))));
+  chatCtx.switchToFlash = () => {
+    const target = usable.find((x) => x.model !== "gpt-6.2-astra-doubao" && (x.provider === "vertex_ai" || /3\.8.*flash/i.test(x.model || "")))
+      || usable.find((x) => x.model !== "gpt-6.2-astra-doubao");
+    if (!target) return;
+    setupSel.value = target.id;
+    setupSel.dispatchEvent(new Event("change"));
+    input.focus();
+    toast(`Switched back to ${setupLabel(target)}`);
+  };
   const reasoningSel = h("select", { class: "chat-pick", title: "Reasoning effort for the next message" });
   // A Codex setup can use any of the Codex CLI's models; the list comes from the CLI itself, and the choice is
   // remembered per setup in this browser.

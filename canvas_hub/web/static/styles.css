@@ -913,4 +913,7 @@ body.chat-focus .chat-scroll { overscroll-behavior: contain; }     /* the page i
 .demo-try-chips { display: flex; flex-wrap: wrap; gap: 6px; flex: 1; min-width: 0; }
 .demo-try-chip { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; padding: 5px 10px; min-height: 28px; cursor: pointer; }
 .demo-try-chip .ui-icon { width: 14px; height: 14px; flex: none; }
+.demo-doubao-actions { margin-top: 8px; display: flex; align-items: center; gap: 8px; }
+.demo-back-flash-btn { display: inline-flex; align-items: center; gap: 6px; border-radius: 999px; font-weight: 600; }
+.demo-back-flash-btn .ui-icon { width: 14px; height: 14px; }
 @media (max-width: 900px) { .demo-topbar-note { display: none; } }

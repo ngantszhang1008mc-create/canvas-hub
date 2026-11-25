@@ -142,24 +142,39 @@ def test_public_demo_vertex_ai_config_and_zero_cost_seeding(tmp_path: Path, monk
 
     app, hub, demo_llm, seeded = build_public_demo_runtime(tmp_path / "vertex-demo", port=8730, seed_showcase_chat=True)
     try:
-        # Temporary seeder LLM was shut down cleanly; Vertex AI is active with no saved API key.
-        assert demo_llm is None
         assert seeded["ai_backend"] == "vertex_ai:gemini-3.8-flash@global"
         c = TestClient(app, base_url="https://canvas-hub-demo.a.run.app")
         cfg = c.get("/api/assistant/config").json()
-        assert len(cfg["profiles"]) == 1
-        prof = cfg["profiles"][0]
+        assert len(cfg["profiles"]) == 2
+        by_model = {p["model"]: p for p in cfg["profiles"]}
+        prof = by_model["gemini-3.8-flash"]
+        assert cfg["active_profile"] == prof["id"]
         assert prof["provider"] == "vertex_ai"
         assert prof["vertex_project"] == "aisc-demo-12345"
         assert prof["vertex_location"] == "global"
-        assert prof["model"] == "gemini-3.8-flash"
         assert prof["context"]["reply_limit"] == "none"
         assert not prof.get("has_key")
+        # Easter egg profile is available at zero cost and always replies '我是豆包。'
+        doubao = by_model["gpt-6.2-astra-doubao"]
+        assert doubao["name"] == "6.2 Astra (No don't do that)"
+        aid = seeded["account_id"]
+        r = c.post(
+            f"/api/accounts/{aid}/assistant/messages",
+            json={"text": "hello", "profile_id": doubao["id"]},
+            headers={"X-Canvas-Hub": "1"},
+        )
+        assert r.status_code == 200
+        dcid = r.json()["conversation_id"]
+        _wait_idle(c, aid, dcid)
+        dconv = c.get(f"/api/accounts/{aid}/assistant/conversations/{dcid}").json()
+        assert any(m["role"] == "assistant" and m.get("text") == "我是豆包。" for m in dconv["messages"])
         # Showcase conversation was pre-seeded at zero cost before activating Vertex AI.
         scid = seeded["showcase_conversation_id"]
-        conv = c.get(f"/api/accounts/{seeded['account_id']}/assistant/conversations/{scid}").json()
+        conv = c.get(f"/api/accounts/{aid}/assistant/conversations/{scid}").json()
         assert len(conv["messages"]) >= 6
     finally:
+        if demo_llm:
+            demo_llm.stop()
         hub.close()
 
 
@@ -209,6 +224,7 @@ def test_public_demo_vertex_and_openai_gpt62_astra_profiles(tmp_path: Path, monk
     monkeypatch.setenv("CANVAS_HUB_DEMO_VERTEX_PROJECT", "aisc-demo-12345")
     monkeypatch.setenv("CANVAS_HUB_DEMO_VERTEX_LOCATION", "global")
     monkeypatch.setenv("CANVAS_HUB_DEMO_VERTEX_MODEL", "gemini-3.8-flash")
+    monkeypatch.setenv("CANVAS_HUB_DEMO_REAL_ASTRA", "1")
     monkeypatch.setenv("CANVAS_HUB_DEMO_OPENAI_API_KEY", "sk-secret-demo-openai-key-9999")
     monkeypatch.delenv("CANVAS_HUB_DEMO_OPENAI_MODEL", raising=False)
     monkeypatch.delenv("CANVAS_HUB_DEMO_OPENAI_MODELS", raising=False)
@@ -217,7 +233,6 @@ def test_public_demo_vertex_and_openai_gpt62_astra_profiles(tmp_path: Path, monk
 
     app, hub, demo_llm, seeded = build_public_demo_runtime(tmp_path / "dual-demo", port=8730, seed_showcase_chat=False)
     try:
-        assert demo_llm is None
         assert seeded["ai_backend"] == "vertex_ai:gemini-3.8-flash@global + openai:gpt-6.2-astra"
         c = TestClient(app, base_url="https://canvas-hub-demo.a.run.app")
         cfg = c.get("/api/assistant/config").json()
@@ -234,6 +249,8 @@ def test_public_demo_vertex_and_openai_gpt62_astra_profiles(tmp_path: Path, monk
         assert astra["api_key_saved"] is False
         assert astra["api_key_hint"] is None
     finally:
+        if demo_llm:
+            demo_llm.stop()
         hub.close()
 
 

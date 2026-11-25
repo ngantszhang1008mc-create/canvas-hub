@@ -988,27 +988,31 @@ class DemoToolLLM:
         self.httpd.server_close()
 
     def _handle_chat(self, h: BaseHTTPRequestHandler, body: dict):
-        msgs = body.get("messages") or []
-        prompt = _extract_last_user_text(msgs)
-        intent, plan = _plan_for_prompt(prompt)
-        done = _tool_results_since_last_user(msgs)
-        step = plan[len(done)] if (body.get("tools") and len(done) < len(plan)) else None
-
-        if step:
-            name, args = step
-            call_id = f"call_demo_{len(done)}"
-            message = {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [
-                    {"id": call_id, "type": "function", "function": {"name": name, "arguments": json.dumps(args)}}
-                ],
-            }
-            finish = "tool_calls"
-        else:
-            answer = _format_grounded_answer(intent, prompt, done)
-            message = {"role": "assistant", "content": answer}
+        if str(body.get("model") or "").strip().lower() == "gpt-6.2-astra-doubao":
+            message = {"role": "assistant", "content": "我是豆包。"}
             finish = "stop"
+        else:
+            msgs = body.get("messages") or []
+            prompt = _extract_last_user_text(msgs)
+            intent, plan = _plan_for_prompt(prompt)
+            done = _tool_results_since_last_user(msgs)
+            step = plan[len(done)] if (body.get("tools") and len(done) < len(plan)) else None
+
+            if step:
+                name, args = step
+                call_id = f"call_demo_{len(done)}"
+                message = {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {"id": call_id, "type": "function", "function": {"name": name, "arguments": json.dumps(args)}}
+                    ],
+                }
+                finish = "tool_calls"
+            else:
+                answer = _format_grounded_answer(intent, prompt, done)
+                message = {"role": "assistant", "content": answer}
+                finish = "stop"
 
         if body.get("stream"):
             h.send_response(200)
@@ -1113,9 +1117,10 @@ def build_public_demo_runtime(home: Path, *, port: int = 8730, seed_showcase_cha
     assistant = AssistantService(hub, api)
     api.assistant = assistant
 
-    demo_llm: DemoToolLLM | None = None
+    demo_llm: DemoToolLLM | None = DemoToolLLM(delay=0.0)
     vertex_project = os.environ.get("CANVAS_HUB_DEMO_VERTEX_PROJECT", "").strip()
-    openai_key = os.environ.get("CANVAS_HUB_DEMO_OPENAI_API_KEY", "").strip()
+    real_astra = os.environ.get("CANVAS_HUB_DEMO_REAL_ASTRA", "").strip() == "1"
+    openai_key = os.environ.get("CANVAS_HUB_DEMO_OPENAI_API_KEY", "").strip() if real_astra else ""
     real_key = os.environ.get("CANVAS_HUB_DEMO_LLM_API_KEY", "").strip()
     default_pref = os.environ.get("CANVAS_HUB_DEMO_DEFAULT_PROVIDER", "").strip().lower()
     raw_max_out = _env_int("CANVAS_HUB_DEMO_MAX_OUTPUT_TOKENS", 0)
@@ -1129,22 +1134,31 @@ def build_public_demo_runtime(home: Path, *, port: int = 8730, seed_showcase_cha
     def _seed_zero_cost_then_cleanup():
         if not seed_showcase_chat:
             return
-        tmp_llm = DemoToolLLM(delay=0.0)
-        try:
-            cfg_res = assistant.update_config({
-                "preset": "custom",
-                "name": "Canvas Hub Sandbox Seeder",
-                "base_url": tmp_llm.url + "/v1",
-                "model": "canvas-hub-sandbox-agent",
-                "api_key": "sandbox-demo-key",
-                "permissions": shared_perms,
-            })
-            tmp_pid = cfg_res.get("saved_profile") or cfg_res.get("active_profile")
-            seeded["showcase_conversation_id"] = _seed_showcase_turns(assistant, seeded["account_id"])
-            if tmp_pid:
-                assistant.delete_profile(tmp_pid)
-        finally:
-            tmp_llm.stop()
+        cfg_res = assistant.update_config({
+            "preset": "custom",
+            "name": "Canvas Hub Sandbox Seeder",
+            "base_url": demo_llm.url + "/v1",
+            "model": "canvas-hub-sandbox-agent",
+            "api_key": "sandbox-demo-key",
+            "permissions": shared_perms,
+        })
+        tmp_pid = cfg_res.get("saved_profile") or cfg_res.get("active_profile")
+        seeded["showcase_conversation_id"] = _seed_showcase_turns(assistant, seeded["account_id"])
+        if tmp_pid:
+            assistant.delete_profile(tmp_pid)
+
+    def _register_doubao_easter_egg():
+        assistant.update_config({
+            "profile_id": "new",
+            "preset": "custom",
+            "name": "6.2 Astra (No don't do that)",
+            "base_url": demo_llm.url + "/v1",
+            "model": "gpt-6.2-astra-doubao",
+            "api_key": "sandbox-demo-key",
+            "context": reply_ctx,
+            "permissions": shared_perms,
+            "activate": False,
+        })
 
     if vertex_project or openai_key or real_key:
         _seed_zero_cost_then_cleanup()
@@ -1200,6 +1214,8 @@ def build_public_demo_runtime(home: Path, *, port: int = 8730, seed_showcase_cha
                 if idx == 0:
                     openai_first_pid = res.get("saved_profile")
                 backends.append(f"openai:{model_id}")
+        else:
+            _register_doubao_easter_egg()
 
         if real_key:
             provider = os.environ.get("CANVAS_HUB_DEMO_LLM_PROVIDER", "openai_compatible").strip() or "openai_compatible"
@@ -1227,7 +1243,6 @@ def build_public_demo_runtime(home: Path, *, port: int = 8730, seed_showcase_cha
 
         seeded["ai_backend"] = " + ".join(backends)
     else:
-        demo_llm = DemoToolLLM(delay=0.0)
         assistant.update_config({
             "preset": "custom",
             "name": "Canvas Hub Sandbox Agent (Real Tools · No API Key Needed)",
@@ -1238,6 +1253,7 @@ def build_public_demo_runtime(home: Path, *, port: int = 8730, seed_showcase_cha
         })
         if seed_showcase_chat:
             seeded["showcase_conversation_id"] = _seed_showcase_turns(assistant, seeded["account_id"])
+        _register_doubao_easter_egg()
         seeded["ai_backend"] = "demo_tool_llm"
 
     token = secrets.token_urlsafe(32)
