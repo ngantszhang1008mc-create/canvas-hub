@@ -1115,7 +1115,9 @@ def build_public_demo_runtime(home: Path, *, port: int = 8730, seed_showcase_cha
 
     demo_llm: DemoToolLLM | None = None
     vertex_project = os.environ.get("CANVAS_HUB_DEMO_VERTEX_PROJECT", "").strip()
+    openai_key = os.environ.get("CANVAS_HUB_DEMO_OPENAI_API_KEY", "").strip()
     real_key = os.environ.get("CANVAS_HUB_DEMO_LLM_API_KEY", "").strip()
+    default_pref = os.environ.get("CANVAS_HUB_DEMO_DEFAULT_PROVIDER", "").strip().lower()
     raw_max_out = _env_int("CANVAS_HUB_DEMO_MAX_OUTPUT_TOKENS", 0)
     reply_ctx = (
         {"reply_limit": "custom", "response_tokens": max(256, min(65536, raw_max_out))}
@@ -1137,45 +1139,86 @@ def build_public_demo_runtime(home: Path, *, port: int = 8730, seed_showcase_cha
                 "api_key": "sandbox-demo-key",
                 "permissions": shared_perms,
             })
-            tmp_pid = cfg_res.get("active")
+            tmp_pid = cfg_res.get("saved_profile") or cfg_res.get("active_profile")
             seeded["showcase_conversation_id"] = _seed_showcase_turns(assistant, seeded["account_id"])
             if tmp_pid:
                 assistant.delete_profile(tmp_pid)
         finally:
             tmp_llm.stop()
 
-    if vertex_project:
+    if vertex_project or openai_key or real_key:
         _seed_zero_cost_then_cleanup()
-        location = os.environ.get("CANVAS_HUB_DEMO_VERTEX_LOCATION", "global").strip() or "global"
-        model = os.environ.get("CANVAS_HUB_DEMO_VERTEX_MODEL", "gemini-3.8-flash").strip() or "gemini-3.8-flash"
-        assistant.update_config({
-            "preset": "vertex_ai",
-            "name": f"Vertex AI · {model}",
-            "provider": "vertex_ai",
-            "vertex_project": vertex_project,
-            "vertex_location": location,
-            "model": model,
-            "context": reply_ctx,
-            "permissions": shared_perms,
-        })
-        seeded["ai_backend"] = f"vertex_ai:{model}@{location}"
-    elif real_key:
-        _seed_zero_cost_then_cleanup()
-        provider = os.environ.get("CANVAS_HUB_DEMO_LLM_PROVIDER", "openai_compatible").strip() or "openai_compatible"
-        base_url = os.environ.get("CANVAS_HUB_DEMO_LLM_BASE_URL", "https://api.openai.com/v1").strip()
-        model = os.environ.get("CANVAS_HUB_DEMO_LLM_MODEL", "gpt-4o-mini").strip()
-        preset = "anthropic" if provider == "anthropic" else "custom"
-        assistant.update_config({
-            "preset": preset,
-            "name": f"Live Sandbox LLM ({model})",
-            "provider": provider,
-            "base_url": "" if provider == "anthropic" else base_url,
-            "model": model,
-            "api_key": real_key,
-            "context": reply_ctx,
-            "permissions": shared_perms,
-        })
-        seeded["ai_backend"] = f"{provider}:{model}"
+        backends: list[str] = []
+        vertex_pid: str | None = None
+        openai_first_pid: str | None = None
+
+        if vertex_project:
+            location = os.environ.get("CANVAS_HUB_DEMO_VERTEX_LOCATION", "global").strip() or "global"
+            model = os.environ.get("CANVAS_HUB_DEMO_VERTEX_MODEL", "gemini-3.8-flash").strip() or "gemini-3.8-flash"
+            res = assistant.update_config({
+                "profile_id": "new",
+                "preset": "vertex_ai",
+                "name": "Vertex AI",
+                "provider": "vertex_ai",
+                "vertex_project": vertex_project,
+                "vertex_location": location,
+                "model": model,
+                "context": reply_ctx,
+                "permissions": shared_perms,
+                "activate": True,
+            })
+            vertex_pid = res.get("saved_profile")
+            backends.append(f"vertex_ai:{model}@{location}")
+
+        if openai_key:
+            raw_models = (
+                os.environ.get("CANVAS_HUB_DEMO_OPENAI_MODELS", "").strip()
+                or os.environ.get("CANVAS_HUB_DEMO_OPENAI_MODEL", "gpt-6.2-astra").strip()
+                or "gpt-6.2-astra"
+            )
+            openai_models = [m.strip() for m in raw_models.split(",") if m.strip()] or ["gpt-6.2-astra"]
+            openai_base = os.environ.get("CANVAS_HUB_DEMO_OPENAI_BASE_URL", "https://api.openai.com/v1").strip() or "https://api.openai.com/v1"
+            for idx, model_id in enumerate(openai_models):
+                res = assistant.update_config({
+                    "profile_id": "new",
+                    "preset": "openai",
+                    "name": "OpenAI",
+                    "provider": "openai_compatible",
+                    "base_url": openai_base,
+                    "model": model_id,
+                    "context": reply_ctx,
+                    "permissions": shared_perms,
+                    "activate": (not vertex_pid and idx == 0),
+                })
+                if idx == 0:
+                    openai_first_pid = res.get("saved_profile")
+                backends.append(f"openai:{model_id}")
+
+        if real_key:
+            provider = os.environ.get("CANVAS_HUB_DEMO_LLM_PROVIDER", "openai_compatible").strip() or "openai_compatible"
+            base_url = os.environ.get("CANVAS_HUB_DEMO_LLM_BASE_URL", "https://api.openai.com/v1").strip()
+            model = os.environ.get("CANVAS_HUB_DEMO_LLM_MODEL", "gpt-4o-mini").strip()
+            preset = "anthropic" if provider == "anthropic" else ("openai" if base_url.rstrip("/") == "https://api.openai.com/v1" else "custom")
+            assistant.update_config({
+                "profile_id": "new",
+                "preset": preset,
+                "name": f"Live Sandbox LLM ({model})",
+                "provider": provider,
+                "base_url": "" if provider == "anthropic" else base_url,
+                "model": model,
+                "api_key": real_key,
+                "context": reply_ctx,
+                "permissions": shared_perms,
+                "activate": not vertex_pid and not openai_first_pid,
+            })
+            backends.append(f"{provider}:{model}")
+
+        if default_pref == "openai" and openai_first_pid:
+            assistant.activate_profile(openai_first_pid)
+        elif default_pref == "vertex" and vertex_pid:
+            assistant.activate_profile(vertex_pid)
+
+        seeded["ai_backend"] = " + ".join(backends)
     else:
         demo_llm = DemoToolLLM(delay=0.0)
         assistant.update_config({

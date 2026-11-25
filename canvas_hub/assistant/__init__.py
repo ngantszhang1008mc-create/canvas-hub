@@ -88,6 +88,11 @@ def reasoning_levels(cfg: dict) -> list[str]:
         return ["low", "medium", "high", "xhigh", "max"]     # output_config.effort
     if cfg.get("preset") == "deepseek":
         return ["off", "low", "high", "max"]                 # thinking + reasoning_effort
+    model = (cfg.get("model") or "").strip().lower()
+    if cfg.get("provider") == "openai_responses" or (
+        cfg.get("provider") == "openai_compatible" and cfg.get("preset") == "openai" and model.startswith("gpt-6")
+    ):
+        return ["low", "medium", "high", "xhigh", "max"]     # Responses API reasoning.effort
     if cfg.get("provider") in ("openai_compatible", "vertex_ai", "chatgpt"):
         return ["low", "medium", "high"]                     # reasoning_effort
     if cfg.get("provider") == "codex":

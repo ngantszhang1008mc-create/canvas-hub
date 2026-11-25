@@ -302,7 +302,7 @@ class OpenAICompatibleProvider:
         self.model = (cfg.get("model") or "").strip()
         if not self.model:
             raise ProviderError("Enter the model name for this provider in Assistant settings.")
-        key = cfg.get("api_key") or os.environ.get("OPENAI_API_KEY") or "not-needed"
+        key = cfg.get("api_key") or os.environ.get("OPENAI_API_KEY") or os.environ.get("CANVAS_HUB_DEMO_OPENAI_API_KEY") or "not-needed"
         self.client = openai.OpenAI(api_key=key, base_url=(cfg.get("base_url") or "").strip() or None,
                                     timeout=120.0 if cfg.get("_single_attempt") else 600.0,
                                     max_retries=0)
@@ -566,7 +566,10 @@ def make_provider(cfg: dict):
         return ChatGPTProvider(cfg)
     if kind == "anthropic":
         return AnthropicProvider(cfg)
-    if kind == "openai_compatible":
+    if kind in ("openai_compatible", "openai_responses"):
+        from .openai_responses import OpenAIResponsesProvider, uses_openai_responses
+        if uses_openai_responses(cfg):
+            return OpenAIResponsesProvider(cfg)
         return OpenAICompatibleProvider(cfg)
     if kind == "vertex_ai":
         from .vertex import VertexAIProvider

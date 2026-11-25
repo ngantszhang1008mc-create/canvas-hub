@@ -64,6 +64,16 @@ def verified_capacity(cfg: dict) -> tuple[int, str] | None:
     return 1_048_576, _DEEPSEEK_PROVENANCE
 
 
+_OPENAI_GPT6 = {
+    "gpt-6.2-astra": (1_050_000, 128_000),
+    "gpt-6.2-sol": (1_050_000, 128_000),
+    "gpt-6.1-terra": (1_050_000, 128_000),
+    "gpt-6-astra": (1_050_000, 128_000),
+    "gpt-6-luna": (1_050_000, 128_000),
+}
+_OPENAI_SOURCE = "OpenAI's published model limits"
+
+
 def known(cfg: dict) -> dict | None:
     """Published limits for this exact model, without any network request."""
     model = (cfg.get("model") or "").strip()
@@ -73,6 +83,10 @@ def known(cfg: dict) -> dict | None:
             return None
         limits = _CLAUDE.get(model or "claude-opus-5-5")
         return {"context": limits[0], "max_output": limits[1], "source": _CLAUDE_SOURCE} if limits else None
+    if cfg.get("provider") in ("openai_compatible", "openai_responses") and model in _OPENAI_GPT6:
+        if not cfg.get("base_url") or _official_host(cfg, "api.openai.com"):
+            limits = _OPENAI_GPT6[model]
+            return {"context": limits[0], "max_output": limits[1], "source": _OPENAI_SOURCE}
     deepseek = verified_capacity(cfg)
     if deepseek:
         return {"context": deepseek[0], "max_output": _DEEPSEEK_OUTPUT, "source": deepseek[1]}

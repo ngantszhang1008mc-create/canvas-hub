@@ -204,3 +204,36 @@ def test_public_demo_rate_limiter_enforces_429(tmp_path: Path):
             demo_llm.stop()
         hub.close()
 
+
+def test_public_demo_vertex_and_openai_gpt62_astra_profiles(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("CANVAS_HUB_DEMO_VERTEX_PROJECT", "aisc-demo-12345")
+    monkeypatch.setenv("CANVAS_HUB_DEMO_VERTEX_LOCATION", "global")
+    monkeypatch.setenv("CANVAS_HUB_DEMO_VERTEX_MODEL", "gemini-3.8-flash")
+    monkeypatch.setenv("CANVAS_HUB_DEMO_OPENAI_API_KEY", "sk-secret-demo-openai-key-9999")
+    monkeypatch.delenv("CANVAS_HUB_DEMO_OPENAI_MODEL", raising=False)
+    monkeypatch.delenv("CANVAS_HUB_DEMO_OPENAI_MODELS", raising=False)
+    monkeypatch.delenv("CANVAS_HUB_DEMO_DEFAULT_PROVIDER", raising=False)
+    monkeypatch.delenv("CANVAS_HUB_DEMO_LLM_API_KEY", raising=False)
+
+    app, hub, demo_llm, seeded = build_public_demo_runtime(tmp_path / "dual-demo", port=8730, seed_showcase_chat=False)
+    try:
+        assert demo_llm is None
+        assert seeded["ai_backend"] == "vertex_ai:gemini-3.8-flash@global + openai:gpt-6.2-astra"
+        c = TestClient(app, base_url="https://canvas-hub-demo.a.run.app")
+        cfg = c.get("/api/assistant/config").json()
+        assert len(cfg["profiles"]) == 2
+        by_model = {p["model"]: p for p in cfg["profiles"]}
+        assert set(by_model) == {"gemini-3.8-flash", "gpt-6.2-astra"}
+        # Vertex AI stays active by default; GPT-6.2 Astra is selectable in the composer dropdown.
+        assert cfg["active_profile"] == by_model["gemini-3.8-flash"]["id"]
+        astra = by_model["gpt-6.2-astra"]
+        assert astra["name"] == "OpenAI"
+        assert astra["preset"] == "openai"
+        assert astra["context"]["reply_limit"] == "none"
+        assert astra["reasoning_levels"] == ["low", "medium", "high", "xhigh", "max"]
+        assert astra["api_key_saved"] is False
+        assert astra["api_key_hint"] is None
+    finally:
+        hub.close()
+
+

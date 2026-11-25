@@ -60,7 +60,7 @@ def normalize_usage(value, provider, *, final=True):
         written = take("cacheWriteInputTokens", "cacheWriteInputTokens")
         reasoning = take("reasoningOutputTokens", "reasoningOutputTokens")
         take("totalTokens", "totalTokens")
-    elif provider == "chatgpt":
+    elif provider in ("chatgpt", "openai_responses"):
         input_tokens = take("input_tokens", "input_tokens")
         output_tokens = take("output_tokens", "output_tokens")
         cached = take("input_tokens_details.cached_tokens", "input_tokens_details", "cached_tokens")

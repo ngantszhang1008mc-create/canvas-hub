@@ -65,11 +65,14 @@ cloudflared tunnel --url http://127.0.0.1:8730
 | `CANVAS_HUB_DEMO_VERTEX_PROJECT` | *(unset)* | GCP project ID/number to enable native **Vertex AI (Gemini via ADC)** |
 | `CANVAS_HUB_DEMO_VERTEX_LOCATION` | `global` | Vertex AI location (`global`, `us-central1`, `asia-southeast1`, etc.) |
 | `CANVAS_HUB_DEMO_VERTEX_MODEL` | `gemini-3.8-flash` | Gemini model ID on Vertex AI |
-| `CANVAS_HUB_DEMO_LLM_API_KEY` | *(unset)* | Optional BYOK API key (used if Vertex project is unset) |
+| `CANVAS_HUB_DEMO_OPENAI_API_KEY` | *(unset)* | OpenAI API key to also expose **OpenAI GPT-6.2 Astra** (Responses API) in the model switcher (never written to disk or exposed to browser) |
+| `CANVAS_HUB_DEMO_OPENAI_MODEL` | `gpt-6.2-astra` | OpenAI model ID (or comma-separated list via `CANVAS_HUB_DEMO_OPENAI_MODELS`) |
+| `CANVAS_HUB_DEMO_DEFAULT_PROVIDER` | `vertex` | Preferred default active model when both Vertex AI and OpenAI are set (`vertex` or `openai`) |
+| `CANVAS_HUB_DEMO_LLM_API_KEY` | *(unset)* | Optional generic BYOK API key |
 | `CANVAS_HUB_DEMO_LLM_PROVIDER` | `openai_compatible` | `openai_compatible` or `anthropic` |
 | `CANVAS_HUB_DEMO_LLM_BASE_URL` | `https://api.openai.com/v1` | Upstream OpenAI-compatible base URL |
 | `CANVAS_HUB_DEMO_LLM_MODEL` | `gpt-4o-mini` | Upstream model ID |
-| `CANVAS_HUB_DEMO_MAX_OUTPUT_TOKENS` | `2048` | Max tokens per assistant reply when using a real LLM |
+| `CANVAS_HUB_DEMO_MAX_OUTPUT_TOKENS` | `0` *(unlimited)* | Optional max output tokens per reply (`0` = provider default / no cap) |
 | `CANVAS_HUB_DEMO_AI_RPM_PER_IP` | `6` | Max AI messages per minute per visitor IP (`0` = unlimited) |
 | `CANVAS_HUB_DEMO_AI_MAX_PER_HOUR` | `120` | Global max AI messages per hour across all visitors |
 | `CANVAS_HUB_DEMO_AI_MAX_PER_DAY` | `600` | Global max AI messages per 24 hours across all visitors |
