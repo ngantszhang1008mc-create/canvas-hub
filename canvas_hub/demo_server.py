@@ -1178,11 +1178,18 @@ def build_public_demo_runtime(home: Path, *, port: int = 8730, seed_showcase_cha
             )
             openai_models = [m.strip() for m in raw_models.split(",") if m.strip()] or ["gpt-6.2-astra"]
             openai_base = os.environ.get("CANVAS_HUB_DEMO_OPENAI_BASE_URL", "https://api.openai.com/v1").strip() or "https://api.openai.com/v1"
+            openai_name_override = os.environ.get("CANVAS_HUB_DEMO_OPENAI_NAME", "").strip()
             for idx, model_id in enumerate(openai_models):
+                if openai_name_override and len(openai_models) == 1:
+                    prof_name = openai_name_override
+                elif model_id.lower() == "gpt-6.2-astra":
+                    prof_name = "6.2 Astra (No don't do that)"
+                else:
+                    prof_name = "OpenAI"
                 res = assistant.update_config({
                     "profile_id": "new",
                     "preset": "openai",
-                    "name": "OpenAI",
+                    "name": prof_name,
                     "provider": "openai_compatible",
                     "base_url": openai_base,
                     "model": model_id,

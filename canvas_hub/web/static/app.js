@@ -1670,8 +1670,9 @@ VIEWS.assistant = async (main, parts, params) => {
   // Setup and reasoning are chosen right here for each message. The reasoning
   // level is remembered per setup in this browser only; it is not a saved setting.
   const usable = cfg.profiles.filter((x) => x.configured);
+  const setupLabel = (x) => (IS_DEMO && x.name && x.name.includes("(")) ? x.name : `${x.name} · ${x.model || "default model"}`;
   const setupSel = h("select", { class: "chat-pick", title: "Saved API setup (provider and model) for the next message" },
-    usable.map((x) => h("option", { value: x.id, selected: x.id === cfg.active_profile ? true : null }, `${x.name} · ${x.model || "default model"}`)));
+    usable.map((x) => h("option", { value: x.id, selected: x.id === cfg.active_profile ? true : null }, setupLabel(x))));
   const reasoningSel = h("select", { class: "chat-pick", title: "Reasoning effort for the next message" });
   // A Codex setup can use any of the Codex CLI's models; the list comes from the CLI itself, and the choice is
   // remembered per setup in this browser.

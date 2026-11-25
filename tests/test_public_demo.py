@@ -227,7 +227,7 @@ def test_public_demo_vertex_and_openai_gpt62_astra_profiles(tmp_path: Path, monk
         # Vertex AI stays active by default; GPT-6.2 Astra is selectable in the composer dropdown.
         assert cfg["active_profile"] == by_model["gemini-3.8-flash"]["id"]
         astra = by_model["gpt-6.2-astra"]
-        assert astra["name"] == "OpenAI"
+        assert astra["name"] == "6.2 Astra (No don't do that)"
         assert astra["preset"] == "openai"
         assert astra["context"]["reply_limit"] == "none"
         assert astra["reasoning_levels"] == ["low", "medium", "high", "xhigh", "max"]
