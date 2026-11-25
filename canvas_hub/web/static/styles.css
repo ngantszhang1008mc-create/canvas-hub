@@ -518,10 +518,16 @@ details.raw summary { cursor: pointer; color: var(--text-3); font-size: 12.5px; 
 /* ---- assistant components ---- */
 .cmp { margin: 8px 0 10px; border: 1px solid var(--rule); border-radius: var(--radius); padding: 12px 14px; background: var(--bg); }
 .cmp-head { font-family: var(--serif); font-weight: 600; font-size: 15.5px; margin-bottom: 8px; }
-.cmp-deadlines { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px; padding: 10px; }
-.cmp-card { background: var(--paper); border: 1px solid var(--rule); border-top: 3px solid var(--ink); border-radius: 5px; padding: 10px 12px; }
+.cmp-deadlines:not(.cmp) { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 10px; padding: 0; }
+.cmp-card {
+  display: flex; flex-direction: column; justify-content: space-between; gap: 8px; min-width: 0;
+  background: var(--paper); border: 1px solid var(--rule); border-top: 3px solid var(--accent);
+  border-radius: 10px; padding: 12px 14px; box-shadow: 0 1px 3px rgb(15 23 42 / 4%);
+}
+.cmp-card > .spread { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
+.cmp-card > .row { margin-top: auto !important; padding-top: 8px; border-top: 1px dashed var(--rule); gap: 6px; flex-wrap: wrap; align-items: center; }
 .cmp-when { font-size: 11.5px; color: var(--mark); font-weight: 650; }
-.cmp-title { display: block; font-family: var(--serif); font-size: 16px; font-weight: 600; color: var(--ink); margin-top: 2px; }
+.cmp-title { display: block; font-family: var(--serif); font-size: 15px; line-height: 1.35; font-weight: 650; color: var(--ink); margin-top: 2px; }
 .bars { display: flex; flex-direction: column; gap: 6px; }
 .bar-row { display: grid; grid-template-columns: minmax(80px, 200px) 1fr 56px; gap: 10px; align-items: center; font-size: 12.5px; }
 .bar-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-2); }
@@ -543,7 +549,7 @@ details.raw summary { cursor: pointer; color: var(--text-3); font-size: 12.5px; 
 .cmp-menu-item:hover, .cmp-menu-item:focus-visible { background: var(--surface-2); }
 button.copied { color: var(--ok); border-color: var(--ok); }
 .cmp.fullscreen { position: fixed; inset: 12px; z-index: 50; margin: 0; overflow: auto; box-shadow: 0 10px 40px rgba(0, 0, 0, .25); background: var(--bg); }
-.cmp-deadlines.cmp-deadlines { padding: 0; }
+.cmp-deadlines:not(.cmp) { padding: 0; }
 .modal { position: fixed; inset: 0; z-index: 80; background: rgba(20, 16, 10, .35); display: grid; place-items: center; padding: 16px; }
 .modal-box { background: var(--paper); border-radius: var(--radius); padding: 16px; width: min(720px, 100%); display: flex; flex-direction: column; gap: 8px; }
 .copy-fallback { width: 100%; min-height: 220px; font-size: 12.5px; }

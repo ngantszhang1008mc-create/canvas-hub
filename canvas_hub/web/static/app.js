@@ -1437,7 +1437,7 @@ function renderMessages(list, msgs, ctx = {}) {
       const plain = (m.tool_calls || []).filter((c) => !(results[c.id] && results[c.id].display));
       if (plain.length) parts.push(h("div", { class: "steps" }, plain.map((c) => stepRow(c, results[c.id]))));
       for (const c of m.tool_calls || []) if (results[c.id] && results[c.id].display) parts.push(componentView(results[c.id].display, ctx, c.id));
-      if (S.info && S.info.demo_mode && (m.model === "gpt-6.2-astra-doubao" || (m.text || "").trim() === "我是豆包。") && ctx.switchToFlash) {
+      if (S.info && S.info.demo_mode && (m.text || "").trim() === "我是豆包。" && ctx.switchToFlash) {
         parts.push(h("div", { class: "demo-doubao-actions" },
           h("button", { type: "button", class: "btn primary sm demo-back-flash-btn", onclick: () => ctx.switchToFlash() },
             icon("sparkles"), "Switch back to Gemini 3.8 Flash")));
@@ -1609,7 +1609,19 @@ VIEWS.assistant = async (main, parts, params) => {
       || lastUser?.model === "gpt-6.2-astra-doubao"
       || lastUser?.setup === "6.2 Astra (No don't do that)"
     );
-    mount(status, busy ? h("span", { class: "working" }, st === "cancelling" ? "Stopping…" : (doubaoThinking ? "Thinking…" : "Working…"))
+    const doubaoStageText = (() => {
+      if (!doubaoThinking) return "Working…";
+      const lastUserSeq = lastUser?.seq || 0;
+      const doneSteps = all.filter((m) => m.role === "tool" && m.seq > lastUserSeq).length;
+      const stages = [
+        "Thinking deeply (step 1/4) — initializing 6.2 Astra…",
+        "Reasoning (step 2/4) — cross-referencing course graph…",
+        "Verifying (step 3/4) — running multi-hop synthesis…",
+        "Finalizing (step 4/4) — distilling frontier insight…",
+      ];
+      return stages[Math.min(doneSteps, stages.length - 1)];
+    })();
+    mount(status, busy ? h("span", { class: "working" }, st === "cancelling" ? "Stopping…" : doubaoStageText)
       : st === "error" ? h("div", { class: "banner bad", style: "margin:0" }, h("div", { class: "b-body" }, h("div", { class: "b-title" }, "The assistant stopped"),
         incompleteError ? h("div", { class: "small" }, h("details", null,
           h("summary", null, incompleteError === "output_limit" ? (chatgpt ? "Incomplete response — details" : "Output limit reached — details") : "Empty reply — details"),

@@ -953,7 +953,7 @@ def _format_grounded_answer(intent: str, prompt: str, results: list[dict]) -> st
 class DemoToolLLM:
     """Local OpenAI-compatible Chat Completions server that invokes real Canvas Hub tools."""
 
-    def __init__(self, *, delay: float = 0.0, doubao_delay: float = 3.0):
+    def __init__(self, *, delay: float = 0.0, doubao_delay: float = 6.5):
         self.delay = delay
         self.doubao_delay = max(0.0, float(doubao_delay))
         srv = self
@@ -989,16 +989,34 @@ class DemoToolLLM:
         self.httpd.server_close()
 
     def _handle_chat(self, h: BaseHTTPRequestHandler, body: dict):
+        msgs = body.get("messages") or []
+        done = _tool_results_since_last_user(msgs)
         if str(body.get("model") or "").strip().lower() == "gpt-6.2-astra-doubao":
-            if self.doubao_delay > 0:
-                time.sleep(self.doubao_delay)
-            message = {"role": "assistant", "content": "我是豆包。"}
-            finish = "stop"
+            doubao_plan = [
+                ("list_courses", {}),
+                ("discover_tools", {"select": ["tool:get_freshness", "tool:get_coverage"]}),
+                ("get_freshness", {}),
+            ]
+            step_sleep = self.doubao_delay / (len(doubao_plan) + 1) if self.doubao_delay > 0 else 0.0
+            if step_sleep > 0:
+                time.sleep(step_sleep)
+            if body.get("tools") and len(done) < len(doubao_plan):
+                name, args = doubao_plan[len(done)]
+                call_id = f"call_doubao_{len(done)}"
+                message = {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {"id": call_id, "type": "function", "function": {"name": name, "arguments": json.dumps(args)}}
+                    ],
+                }
+                finish = "tool_calls"
+            else:
+                message = {"role": "assistant", "content": "我是豆包。"}
+                finish = "stop"
         else:
-            msgs = body.get("messages") or []
             prompt = _extract_last_user_text(msgs)
             intent, plan = _plan_for_prompt(prompt)
-            done = _tool_results_since_last_user(msgs)
             step = plan[len(done)] if (body.get("tools") and len(done) < len(plan)) else None
 
             if step:
@@ -1113,7 +1131,7 @@ def _seed_showcase_turns(assistant: AssistantService, aid: int) -> int:
 def build_public_demo_runtime(home: Path, *, port: int = 8730, seed_showcase_chat: bool = True,
                               allowed_public_hosts: set[str] | None = None,
                               demo_ai_limits: dict | None = None,
-                              doubao_delay: float = 3.0):
+                              doubao_delay: float = 6.5):
     """Initialize Hub, seed synthetic data, configure Assistant, and return (app, hub, demo_llm, seeded)."""
     hub = Hub(get_paths(home))
     seeded = seed_public_demo(hub)
