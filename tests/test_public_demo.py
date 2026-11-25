@@ -140,7 +140,7 @@ def test_public_demo_vertex_ai_config_and_zero_cost_seeding(tmp_path: Path, monk
     monkeypatch.delenv("CANVAS_HUB_DEMO_MAX_OUTPUT_TOKENS", raising=False)
     monkeypatch.delenv("CANVAS_HUB_DEMO_LLM_API_KEY", raising=False)
 
-    app, hub, demo_llm, seeded = build_public_demo_runtime(tmp_path / "vertex-demo", port=8730, seed_showcase_chat=True)
+    app, hub, demo_llm, seeded = build_public_demo_runtime(tmp_path / "vertex-demo", port=8730, seed_showcase_chat=True, doubao_delay=0.0)
     try:
         assert seeded["ai_backend"] == "vertex_ai:gemini-3.8-flash@global"
         c = TestClient(app, base_url="https://canvas-hub-demo.a.run.app")

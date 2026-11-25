@@ -953,8 +953,9 @@ def _format_grounded_answer(intent: str, prompt: str, results: list[dict]) -> st
 class DemoToolLLM:
     """Local OpenAI-compatible Chat Completions server that invokes real Canvas Hub tools."""
 
-    def __init__(self, *, delay: float = 0.0):
+    def __init__(self, *, delay: float = 0.0, doubao_delay: float = 3.0):
         self.delay = delay
+        self.doubao_delay = max(0.0, float(doubao_delay))
         srv = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -989,6 +990,8 @@ class DemoToolLLM:
 
     def _handle_chat(self, h: BaseHTTPRequestHandler, body: dict):
         if str(body.get("model") or "").strip().lower() == "gpt-6.2-astra-doubao":
+            if self.doubao_delay > 0:
+                time.sleep(self.doubao_delay)
             message = {"role": "assistant", "content": "我是豆包。"}
             finish = "stop"
         else:
@@ -1109,7 +1112,8 @@ def _seed_showcase_turns(assistant: AssistantService, aid: int) -> int:
 
 def build_public_demo_runtime(home: Path, *, port: int = 8730, seed_showcase_chat: bool = True,
                               allowed_public_hosts: set[str] | None = None,
-                              demo_ai_limits: dict | None = None):
+                              demo_ai_limits: dict | None = None,
+                              doubao_delay: float = 3.0):
     """Initialize Hub, seed synthetic data, configure Assistant, and return (app, hub, demo_llm, seeded)."""
     hub = Hub(get_paths(home))
     seeded = seed_public_demo(hub)
@@ -1117,7 +1121,7 @@ def build_public_demo_runtime(home: Path, *, port: int = 8730, seed_showcase_cha
     assistant = AssistantService(hub, api)
     api.assistant = assistant
 
-    demo_llm: DemoToolLLM | None = DemoToolLLM(delay=0.0)
+    demo_llm: DemoToolLLM | None = DemoToolLLM(delay=0.0, doubao_delay=doubao_delay)
     vertex_project = os.environ.get("CANVAS_HUB_DEMO_VERTEX_PROJECT", "").strip()
     real_astra = os.environ.get("CANVAS_HUB_DEMO_REAL_ASTRA", "").strip() == "1"
     openai_key = os.environ.get("CANVAS_HUB_DEMO_OPENAI_API_KEY", "").strip() if real_astra else ""

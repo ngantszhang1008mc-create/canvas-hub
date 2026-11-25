@@ -1440,7 +1440,7 @@ function renderMessages(list, msgs, ctx = {}) {
       if (S.info && S.info.demo_mode && (m.model === "gpt-6.2-astra-doubao" || (m.text || "").trim() === "我是豆包。") && ctx.switchToFlash) {
         parts.push(h("div", { class: "demo-doubao-actions" },
           h("button", { type: "button", class: "btn primary sm demo-back-flash-btn", onclick: () => ctx.switchToFlash() },
-            icon("sparkles"), "回到 Gemini 3.8 Flash")));
+            icon("sparkles"), "Switch back to Gemini 3.8 Flash")));
       }
       if (m.stop === "refusal") parts.push(h("div", { class: "small muted" }, "The model declined to continue."));
       if (m.incomplete_reason || m.stop === "truncated") parts.unshift(h("div", { class: "small bad-text", role: "note" },
@@ -1602,8 +1602,14 @@ VIEWS.assistant = async (main, parts, params) => {
       cx.last_request ? h("p", null, `Last request: the provider counted ${count(cx.last_request.reported_input_tokens)} input and ${count(cx.last_request.reported_output_tokens)} output tokens`
         + (cx.last_request.estimated_input_tokens ? ` (estimated beforehand: ${count(cx.last_request.estimated_input_tokens)}).` : ".")) : null,
       d.conversation.context_notice ? h("p", null, d.conversation.context_notice) : null);
-    const chatgpt = cfg.profiles.find((p) => p.id === (setupSel.value || cfg.active_profile))?.provider === "chatgpt";
-    mount(status, busy ? h("span", { class: "working" }, st === "cancelling" ? "Stopping…" : "Working…")
+    const selectedProf = cfg.profiles.find((p) => p.id === (setupSel.value || cfg.active_profile));
+    const chatgpt = selectedProf?.provider === "chatgpt";
+    const doubaoThinking = S.info && S.info.demo_mode && (
+      selectedProf?.model === "gpt-6.2-astra-doubao"
+      || lastUser?.model === "gpt-6.2-astra-doubao"
+      || lastUser?.setup === "6.2 Astra (No don't do that)"
+    );
+    mount(status, busy ? h("span", { class: "working" }, st === "cancelling" ? "Stopping…" : (doubaoThinking ? "Thinking…" : "Working…"))
       : st === "error" ? h("div", { class: "banner bad", style: "margin:0" }, h("div", { class: "b-body" }, h("div", { class: "b-title" }, "The assistant stopped"),
         incompleteError ? h("div", { class: "small" }, h("details", null,
           h("summary", null, incompleteError === "output_limit" ? (chatgpt ? "Incomplete response — details" : "Output limit reached — details") : "Empty reply — details"),
