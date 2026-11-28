@@ -7,7 +7,7 @@
 | **Project Name** | **Canvas Hub** — Local-First, Provenance-Tracked Agentic Canvas Workspace |
 | **Team / Authors** | Canvas Hub Team *(Submitted via FeedbackFruits)* |
 | **Source Repository** | [github.com/ngantszhang1008mc-create/canvas-hub](https://github.com/ngantszhang1008mc-create/canvas-hub) |
-| **Public Demo Link (Item #5)** | [https://canvas-hub-demo-1002757101526.asia-east2.run.app](https://canvas-hub-demo-1002757101526.asia-east2.run.app) *(Hosted on GCP Cloud Run `asia-east2` + Vertex AI `gemini-3.8-flash`)* |
+| **Public Demo Link (Item #5)** | [https://canvas-hub-course-demo.puretrout.chatgpt.site/#/assistant](https://canvas-hub-course-demo.puretrout.chatgpt.site/#/assistant) *(Hosted Public Sandbox Demo powered by DeepSeek Flash `deepseek-flash`)* |
 
 ---
 
@@ -171,7 +171,7 @@ We engineered Canvas Hub around an explicit three-tier **Autonomy Dial**, enforc
 
 ## 5. Public Demo Link & Peer Evaluator Walkthrough
 
-- **Live Public Sandbox Demo URL**: [https://canvas-hub-demo-1002757101526.asia-east2.run.app](https://canvas-hub-demo-1002757101526.asia-east2.run.app) *(Hosted on GCP Cloud Run in Hong Kong `asia-east2` with live Vertex AI `gemini-3.8-flash` — zero local installation and zero HKUST Canvas login required)*
+- **Live Public Sandbox Demo URL**: [https://canvas-hub-course-demo.puretrout.chatgpt.site/#/assistant](https://canvas-hub-course-demo.puretrout.chatgpt.site/#/assistant) *(Hosted Public Sandbox Demo powered by DeepSeek Flash `deepseek-flash` — zero local installation and zero HKUST Canvas login required)*
 - **GitHub Repository**: [https://github.com/ngantszhang1008mc-create/canvas-hub](https://github.com/ngantszhang1008mc-create/canvas-hub)
 
 ### 2-Minute Peer Reviewer Testing Script

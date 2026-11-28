@@ -139,7 +139,7 @@ ARCH_SVG = """
 
 
 def build_html() -> str:
-    demo_url = os.environ.get("DEMO_URL", "https://canvas-hub-demo-1002757101526.asia-east2.run.app")
+    demo_url = os.environ.get("DEMO_URL", "https://canvas-hub-course-demo.puretrout.chatgpt.site/#/assistant")
     team_info = os.environ.get("TEAM_INFO", "Canvas Hub Team (Submitted via FeedbackFruits)")
 
     return f"""<!doctype html>
@@ -627,7 +627,7 @@ def build_html() -> str:
   <h2>5. Public Demo Link &amp; Peer Evaluator Testing Guide <span class="badge">Zero-Install · No Canvas Login</span></h2>
   <div class="demo-box">
     <p style="margin-bottom:5px;"><strong>Live Public Sandbox Demo:</strong> <a class="demo-pill" style="text-decoration:none;" href="{html.escape(demo_url)}">{html.escape(demo_url)}</a></p>
-    <p style="margin-bottom:6px;font-size:8.7pt;color:#1e3a8a;">Hosted on Google Cloud Run (<code>asia-east2</code>, Hong Kong) running the real Canvas Hub FastAPI + SQLite/FTS5 backend in Public Sandbox Demo mode (<code>Dockerfile.demo</code>) with 4 de-identified HKUST-style courses pre-loaded and live Google Vertex AI (<code>gemini-3.8-flash</code> via ADC, rate-limited for safe public evaluation). No local setup or HKUST Canvas login is required.</p>
+    <p style="margin-bottom:6px;font-size:8.7pt;color:#1e3a8a;">Hosted Public Sandbox Demo running the real Canvas Hub FastAPI + SQLite/FTS5 backend (<code>Dockerfile.demo</code>) with 4 de-identified HKUST-style courses pre-loaded and live <strong>DeepSeek Flash</strong> (<code>deepseek-flash</code>, rate-limited for safe public evaluation). Opens directly in Light mode on the AI Assistant view—no local setup or HKUST Canvas login is required.</p>
     <ol style="margin:0;font-size:8.8pt;">
       <li><strong>Overall Workbench &amp; Trackers:</strong> Tick items in the <em>AISC1000A Final Submission Checklist</em> and drag the <em>HMAW1905B Service Hours</em> slider below/above <code>10 hours</code> to verify deterministic min-threshold gating.</li>
       <li><strong>Changes:</strong> Inspect the verified <code>field_changed</code> revision diff extending <code>3. Final Submission and Voting</code> by +48h.</li>
